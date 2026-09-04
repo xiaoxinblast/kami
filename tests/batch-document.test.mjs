@@ -54,6 +54,78 @@ test("同一自然段可选择逐句或整段翻译", async () => {
   assert.equal(paragraphMode.segments[0].source, source);
 });
 
+test("XLIFF 导入仅选择空且未锁定的 trans-unit，并在导出时恢复内联标签", async () => {
+  const original = `<?xml version="1.0" encoding="UTF-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2"><file original="story"><body>
+<trans-unit id="u1"><source>你好 <ph id="p1">{player}</ph>！</source><context-group><context context-type="x-location">menu</context></context-group><note>主菜单问候</note></trans-unit>
+<trans-unit id="u2" translate="no"><source>固定文本</source><target>Locked</target></trans-unit>
+<trans-unit id="u3"><source><g id="g1">强调</g></source></trans-unit>
+<trans-unit id="u4"><source>已有文本</source><target>Existing</target></trans-unit>
+</body></file></xliff>`;
+  const prepared = await prepareBatchDocument({ filename: "story.xliff", base64: Buffer.from(original, "utf8").toString("base64") });
+  assert.equal(prepared.format, "xliff");
+  assert.equal(prepared.segments.length, 2);
+  assert.match(prepared.segments[0].source, /<tag id='tag-1' type='inline' desc='ph'\/>/);
+  assert.match(prepared.segments[1].source, /inline-open/);
+  assert.match(prepared.segments[0].context.note, /menu.*主菜单问候/);
+
+  const translated = prepared.segments.map((segment) => ({
+    ...segment,
+    translation: segment.source.replace("你好", "Hello").replace("强调", "Highlight")
+  }));
+  const exported = await exportBatchDocument({
+    filename: prepared.filename,
+    locale: "en-US",
+    format: prepared.format,
+    structure: prepared.structure,
+    base64: Buffer.from(original, "utf8").toString("base64"),
+    segments: translated
+  });
+  const output = Buffer.from(exported.base64, "base64").toString("utf8");
+  assert.equal(exported.filename, "story.en-US.xliff");
+  assert.match(output, /<target xml:space="preserve">Hello <ph id="p1">\{player\}<\/ph>！<\/target>/);
+  assert.match(output, /<target xml:space="preserve"><g id="g1">Highlight<\/g><\/target>/);
+  assert.match(output, /<trans-unit id="u2" translate="no"><source>固定文本<\/source><target>Locked<\/target>/);
+  assert.match(output, /<trans-unit id="u4"><source>已有文本<\/source><target>Existing<\/target>/);
+
+  await assert.rejects(
+    exportBatchDocument({
+      filename: prepared.filename,
+      locale: "en-US",
+      format: prepared.format,
+      base64: Buffer.from(original, "utf8").toString("base64"),
+      segments: [{ ...prepared.segments[0], translation: "Hello!" }]
+    }),
+    /内联标签/
+  );
+});
+
+test("MQXLIFF 导出保留锁定单元和 bpt/ept 标签，并写入 Pretranslated 状态", async () => {
+  const original = `<?xml version="1.0" encoding="UTF-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:mq="MQXliff" version="1.2"><file original="story"><body>
+<trans-unit id="m1" mq:status="NotStarted"><source>你好 <bpt id="1">&lt;b&gt;</bpt>世界<ept id="1">&lt;/b&gt;</ept>！</source><target></target></trans-unit>
+<trans-unit id="m2" mq:locked="locked" mq:status="Translated"><source>不要改</source><target>Keep</target></trans-unit>
+</body></file></xliff>`;
+  const prepared = await prepareBatchDocument({ filename: "story.mqxliff", base64: Buffer.from(original, "utf8").toString("base64") });
+  assert.equal(prepared.format, "mqxliff");
+  assert.equal(prepared.segments.length, 1);
+  assert.match(prepared.segments[0].source, /desc='bpt'/);
+  assert.match(prepared.segments[0].source, /desc='ept'/);
+
+  const exported = await exportBatchDocument({
+    filename: prepared.filename,
+    locale: "en-US",
+    format: prepared.format,
+    base64: Buffer.from(original, "utf8").toString("base64"),
+    segments: [{ ...prepared.segments[0], translation: prepared.segments[0].source.replace("你好", "Hello").replace("世界", "world") }]
+  });
+  const output = Buffer.from(exported.base64, "base64").toString("utf8");
+  assert.equal(exported.filename, "story.en-US.mqxliff");
+  assert.match(output, /<trans-unit id="m1" mq:status="Pretranslated">/);
+  assert.match(output, /<target>.*<bpt id="1">&lt;b&gt;<\/bpt>world<ept id="1">&lt;\/b&gt;<\/ept>！<\/target>/);
+  assert.match(output, /<trans-unit id="m2" mq:locked="locked" mq:status="Translated"><source>不要改<\/source><target>Keep<\/target>/);
+});
+
 test("DOCX 翻译导出保留文档容器并替换段落", async () => {
   const zip = new JSZip();
   zip.file("word/document.xml", '<?xml version="1.0"?><w:document xmlns:w="w"><w:body><w:p><w:r><w:t>第一段。</w:t></w:r></w:p><w:p><w:r><w:t>第二段。</w:t></w:r></w:p></w:body></w:document>');

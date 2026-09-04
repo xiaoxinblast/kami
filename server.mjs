@@ -1016,7 +1016,7 @@ async function apiHandler(req, res, url) {
     const task = await createBackgroundTask({
       type: "term_import",
       title: String(body.filename || "术语导入表格").slice(0, 120),
-      locale: body.locale || ""
+      locale: body.locale === "auto" ? "" : (body.locale || "")
     });
     let progressWrites = Promise.resolve();
     const progress = (update) => {

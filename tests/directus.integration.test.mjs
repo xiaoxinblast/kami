@@ -91,7 +91,7 @@ test("翻译记忆、风格版本和 AIQA 资产形成隔离闭环", { skip: !en
   await saveStyleLearningRun({ id: learningRun.id, status: "promoted", promotedProfileId: profile.id });
   const run = await saveQaRun({ locale: "ja-JP", contentType: "marketing", domain: "integration", source: marker, initialTranslation: "統合メモリ", finalTranslation: "統合メモリ", score: null, status: "review", issues: [], termDecisions: [{ officialSource: "豪华内容", officialTarget: "デラックスコンテンツ", decision: "not_applicable", reason: "集成测试" }], humanDecisions: [{ decision: "approved_as_is", reason: "集成测试人工批准" }], references: [], model: "integration", fallbackReason: "integration-timeout" });
   created.push(["qa_runs", run.id]);
-  const qaCase = await saveQaCase({ locale: "ja-JP", contentType: "marketing", domain: "integration", source: marker, rejectedTranslation: "誤訳", correctedTranslation: "統合メモリ", issues: [], scoreBefore: 80, scoreAfter: 100, status: "machine_verified" });
+  const qaCase = await saveQaCase({ locale: "ja-JP", contentType: "marketing", domain: "integration", source: marker, rejectedTranslation: "誤訳", correctedTranslation: "統合メモリ", issues: [], scoreBefore: 80, scoreAfter: 100, status: "human_approved" });
   created.push(["qa_cases", qaCase.id]);
   try {
     const ja = await getMemories("ja-JP", { contentType: "marketing", domain: "integration" });

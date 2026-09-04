@@ -956,7 +956,7 @@ async function loadPastedTextAsBatch(value) {
 
 async function setBatchFile(file) {
   if (!file) return;
-  if (!/\.(txt|md|docx|xlsx)$/i.test(file.name)) return toast("请选择 TXT、Markdown、DOCX 或 XLSX 文件");
+  if (!/\.(txt|md|docx|xlsx|csv|xliff|mqxliff)$/i.test(file.name)) return toast("请选择 TXT、Markdown、DOCX、XLSX、CSV、XLIFF 或 MQXLIFF 文件");
   if (file.size > 10 * 1024 * 1024) return toast("文件不能超过 10MB");
   state.batchFile = file;
   state.batchBase64 = "";
@@ -986,7 +986,7 @@ function resetBatch() {
   $("#batchFile").value = "";
   $("#batchPasteText").value = "";
   $("#batchFilePrompt").textContent = "拖入或点击选择文件";
-  $("#batchFileMeta").textContent = "拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV，最大 10MB";
+  $("#batchFileMeta").textContent = "拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 10MB";
   $("#batchDropZone").classList.remove("has-file");
   $("#batchSourceMeta").textContent = "尚未载入";
   $("#spreadsheetAnalysis").hidden = true;
@@ -1838,7 +1838,7 @@ async function exportBatch() {
   if (!state.batchPreview) return;
   setBusy(true, "正在合并文件…");
   try {
-    const restoredWithoutSource = !state.batchBase64 && ["docx", "xlsx"].includes(state.batchPreview.format);
+    const restoredWithoutSource = !state.batchBase64 && ["docx", "xlsx", "xliff", "mqxliff"].includes(state.batchPreview.format);
     const payload = await api("/api/batch/export", { method: "POST", body: JSON.stringify({
       filename: state.batchPreview.filename,
       locale: state.workbenchLocale,

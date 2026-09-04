@@ -3,8 +3,9 @@ import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { csvValues, parseCsvDocument, replaceCsvCells } from "./csv-document.mjs";
 import { buildSpreadsheetSnapshot, describeSpreadsheetAnalysis, inferSpreadsheetStructure, mergeSpreadsheetAnalysis } from "./spreadsheet-structure.mjs";
+import { exportXliffDocument, prepareXliffDocument } from "./xliff-document.mjs";
 
-const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".docx", ".xlsx", ".csv"]);
+const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".docx", ".xlsx", ".csv", ".xliff", ".mqxliff"]);
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_SEGMENTS = 2_000;
 
@@ -195,7 +196,7 @@ async function prepareCsv(buffer, segmentationMode, analyzeSpreadsheet) {
 export async function prepareBatchDocument(input = {}, options = {}) {
   const filename = String(input.filename || (input.text ? "粘贴长文.txt" : "")).trim();
   const extension = extname(filename).toLowerCase();
-  if (!filename || !SUPPORTED_EXTENSIONS.has(extension)) fail("仅支持 .txt、.md、.docx、.xlsx、.csv 文件");
+  if (!filename || !SUPPORTED_EXTENSIONS.has(extension)) fail("仅支持 .txt、.md、.docx、.xlsx、.csv、.xliff、.mqxliff 文件");
   const segmentationMode = input.segmentationMode === "paragraph" ? "paragraph" : "sentence";
   let prepared;
   if (extension === ".txt" || extension === ".md") {
@@ -205,7 +206,8 @@ export async function prepareBatchDocument(input = {}, options = {}) {
   else if (extension === ".csv") {
     const buffer = input.text !== undefined ? Buffer.from(String(input.text), "utf8") : decodeBase64(input.base64);
     prepared = await prepareCsv(buffer, segmentationMode, options.analyzeSpreadsheet);
-  } else prepared = await prepareXlsx(decodeBase64(input.base64), segmentationMode, options.analyzeSpreadsheet);
+  } else if (extension === ".xliff" || extension === ".mqxliff") prepared = prepareXliffDocument(decodeBase64(input.base64), filename);
+  else prepared = await prepareXlsx(decodeBase64(input.base64), segmentationMode, options.analyzeSpreadsheet);
   if (!prepared.segments.length) fail("没有找到可翻译的中文内容");
   return {
     filename,
@@ -298,6 +300,10 @@ export async function exportBatchDocument(input = {}) {
     buffer = await zip.generateAsync({ type: "nodebuffer" });
     mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     extension = ".docx";
+  } else if (format === "xliff" || format === "mqxliff") {
+    buffer = exportXliffDocument(input);
+    mimeType = "application/xliff+xml; charset=utf-8";
+    extension = format === "mqxliff" ? ".mqxliff" : ".xliff";
   } else if (format === "xlsx") {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(decodeBase64(input.base64));

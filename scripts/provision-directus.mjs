@@ -887,7 +887,16 @@ async function cleanupAbandonedFrenchSharedFields() {
 async function migrateSeedAssets() {
   for (const [locale, { key }] of Object.entries(localeCollections)) {
     const sourcePath = resolve(`data/assets/${locale}.json`);
-    const source = JSON.parse(await readFile(sourcePath, "utf8"));
+    let source;
+    try {
+      source = JSON.parse(await readFile(sourcePath, "utf8"));
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        console.log(`${locale}: seed asset file not found, skipped`);
+        continue;
+      }
+      throw error;
+    }
     const existing = await api(`/items/${key}?limit=-1&fields=id,source,target`);
     const existingKeys = new Set(existing.map((item) => `${item.source}\u0000${item.target}`));
     const items = source.terms.filter((term) => !existingKeys.has(`${term.source}\u0000${term.target}`)).map((term) => ({
