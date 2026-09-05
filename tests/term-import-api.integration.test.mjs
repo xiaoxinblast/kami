@@ -14,12 +14,12 @@ async function request(url, options = {}) {
   return payload?.data ?? payload;
 }
 
-test("表格预览、分语言入库与清理形成完整闭环", { skip: !enabled }, async () => {
+test("日中术语表预览、入库与清理形成完整闭环", { skip: !enabled }, async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("术语表");
   sheet.addRows([
-    ["中文", "日语", "韩语", "繁體中文", "泰语"],
-    ["星辉徽章测试", "スターライトバッジテスト", "별빛 배지 테스트", "星輝徽章測試", "ตราแสงดาวทดสอบ"]
+    ["日语", "简体中文"],
+    ["スターライトバッジテスト", "星辉徽章测试"]
   ]);
   const progressId = randomUUID();
   const preview = await request(`${appUrl}/api/term-import/preview`, {
@@ -31,8 +31,8 @@ test("表格预览、分语言入库与清理形成完整闭环", { skip: !enabl
     const progress = await request(`${appUrl}/api/term-import/progress/${progressId}`);
     assert.equal(progress.status, "completed");
     assert.equal(progress.percent, 100);
-    assert.equal(preview.candidates.length, 4);
-    assert.equal(new Set(preview.candidates.map((item) => item.locale)).size, 4);
+    assert.equal(preview.candidates.length, 1);
+    assert.deepEqual(new Set(preview.candidates.map((item) => item.locale)), new Set(["zh-CN"]));
     const committed = await request(`${appUrl}/api/term-import/commit`, {
       method: "POST",
       body: JSON.stringify({
@@ -45,7 +45,7 @@ test("表格预览、分语言入库与清理形成完整闭环", { skip: !enabl
       })
     });
     imported.push(...committed.imported);
-    assert.equal(committed.imported.length, 4);
+    assert.equal(committed.imported.length, 1);
     for (const item of imported) {
       const assets = await request(`${appUrl}/api/assets?locale=${encodeURIComponent(item.locale)}`);
       assert.ok(assets.terms.some((term) => term.id === item.id));
@@ -60,18 +60,18 @@ test("表格预览、分语言入库与清理形成完整闭环", { skip: !enabl
   }
 });
 
-test("Directus 候选审核队列接受超过 255 字符的中外文句段", { skip: !enabled }, async () => {
+test("Directus 候选审核队列接受超过 255 字符的日中句段", { skip: !enabled }, async () => {
   const adminHeaders = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
-  const longSource = "长句候选内容".repeat(60);
-  const longTarget = "長文翻訳候補です。".repeat(60);
+  const longSource = "長文候補です。".repeat(60);
+  const longTarget = "简体中文长句候选。".repeat(60);
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("长句候选");
-  sheet.addRows([["中文", "日语"], [longSource, longTarget]]);
+  sheet.addRows([["日语", "简体中文"], [longSource, longTarget]]);
   const preview = await request(`${appUrl}/api/term-import/preview`, {
     method: "POST",
     body: JSON.stringify({
       filename: "长句候选容量测试.xlsx",
-      locale: "ja-JP",
+      locale: "zh-CN",
       useModel: false,
       base64: Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64")
     })

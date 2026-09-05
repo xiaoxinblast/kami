@@ -1,4 +1,16 @@
 export const LOCALES = Object.freeze({
+  "zh-CN": {
+    flagAsset: "/assets/flag-cn.svg",
+    label: "简体中文",
+    shortLabel: "中",
+    language: "Simplified Chinese",
+    defaultInstruction: "使用自然、准确的现代简体中文，避免日语式语序和生硬直译；按用途统一语气、称谓与标点。",
+    localizationExamples: [
+      { source: "根性で乗り切れ！", literal: "用毅力撑过去！", idiomatic: "咬牙挺过去！", note: "游戏口语：用自然中文重写" },
+      { source: "この流れはもらったな。", literal: "这个势头拿到了。", idiomatic: "这把稳了。", note: "对白/社媒：用中文玩家的惯用口吻" },
+      { source: "お先に失礼！", literal: "我先失礼了！", idiomatic: "我先走一步了！", note: "客套话用中文固定表达" }
+    ]
+  },
   "ja-JP": {
     flagAsset: "/assets/flag-jp.svg",
     label: "日本語",
@@ -56,6 +68,9 @@ export const LOCALES = Object.freeze({
     localizationExamples: []
   }
 });
+
+/** 仅向工作台公开的语言域；其余 LOCALES 条目仅用于读取历史记录。 */
+export const ACTIVE_LOCALES = Object.freeze(["zh-CN"]);
 
 export const CONTENT_TYPES = Object.freeze({
   verse: {
@@ -144,4 +159,15 @@ export function assertLocale(locale) {
     throw error;
   }
   return locale;
+}
+
+/** 当前工作台只接受 ACTIVE_LOCALES；完整 LOCALES 仅保留给历史记录读取。 */
+export function assertActiveLocale(locale) {
+  const normalized = assertLocale(locale);
+  if (!ACTIVE_LOCALES.includes(normalized)) {
+    const error = new Error(`Inactive target locale: ${normalized}`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return normalized;
 }

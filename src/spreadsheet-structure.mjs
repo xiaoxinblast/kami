@@ -1,8 +1,8 @@
 const COLUMN_ROLES = new Set(["source_text", "context", "constraint", "existing_translation", "ignore"]);
-const SOURCE_HEADERS = ["中文", "中文原文", "简中", "简中原文", "简体", "简体中文", "chinese simp", "chinese simplified", "zh-cn", "source", "source text", "原文", "待翻译"];
+const SOURCE_HEADERS = ["日语", "日语原文", "日文", "日文原文", "日本语", "日本語", "japanese", "ja-jp", "ja_jp", "source", "source text", "原文", "待翻译"];
 const CONTEXT_HEADERS = ["位置", "渠道", "平台", "用途", "投放位置", "发布位置", "场景", "备注", "说明", "类型", "content type"];
 const CONSTRAINT_HEADERS = ["ddl", "截止", "交付", "字数", "字符", "长度", "语种要求", "语言要求", "要求", "限制", "deadline", "limit", "language requirement"];
-const TRANSLATION_HEADERS = ["english", "英文", "日语", "日文", "japanese", "korean", "韩语", "韩文", "繁中", "繁体", "traditional chinese", "thai", "泰语", "译文", "translation"];
+const TRANSLATION_HEADERS = ["中文", "中文译文", "简中", "简体中文", "chinese", "chinese simp", "chinese simplified", "zh-cn", "zh_cn", "译文", "translation"];
 
 function compact(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ");
@@ -20,12 +20,8 @@ function headerMatches(value, aliases) {
   });
 }
 
-function containsHan(value) {
-  return /[\p{Script=Han}]/u.test(value);
-}
-
-function containsOtherAsianScript(value) {
-  return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u.test(value);
+function containsJapanese(value) {
+  return /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(value);
 }
 
 function characterCount(value, expression) {
@@ -69,7 +65,7 @@ export function buildSpreadsheetSnapshot(workbook, cellText) {
 
     const columns = [...columnCells.entries()].map(([column, cells]) => {
       const texts = cells.map((cell) => cell.text);
-      const hanCharacters = texts.reduce((sum, text) => sum + characterCount(text, /[\p{Script=Han}]/u), 0);
+      const japaneseCharacters = texts.reduce((sum, text) => sum + characterCount(text, /[\p{Script=Hiragana}\p{Script=Katakana}]/u), 0);
       const latinCharacters = texts.reduce((sum, text) => sum + characterCount(text, /[A-Za-z]/), 0);
       const constraintCells = texts.filter(looksLikeConstraint).length;
       const sentenceCells = texts.filter((text) => /[。！？!?；;]|\n/.test(text)).length;
@@ -78,7 +74,7 @@ export function buildSpreadsheetSnapshot(workbook, cellText) {
         letter: columnLetter(column),
         nonEmpty: cells.length,
         averageLength: Math.round(texts.reduce((sum, text) => sum + [...text].length, 0) / Math.max(1, texts.length)),
-        hanCharacters,
+        japaneseCharacters,
         latinCharacters,
         constraintCells,
         sentenceCells,
@@ -121,10 +117,10 @@ function findHeaderRow(sheet, options = {}) {
 function columnRuleScore(column, headerRow) {
   const body = column.samples.filter((sample) => !headerRow || sample.row !== headerRow);
   const bodyCount = Math.max(1, body.length);
-  const hanRatio = body.filter((sample) => containsHan(sample.text) && !containsOtherAsianScript(sample.text)).length / bodyCount;
+  const japaneseRatio = body.filter((sample) => containsJapanese(sample.text)).length / bodyCount;
   const constraintRatio = body.filter((sample) => looksLikeConstraint(sample.text)).length / bodyCount;
   const narrativeRatio = body.filter((sample) => /[。！？!?；;]|\n/.test(sample.text) || [...sample.text].length >= 22).length / bodyCount;
-  return hanRatio * 0.44 + Math.min(column.averageLength / 70, 1) * 0.25 + narrativeRatio * 0.31 - constraintRatio * 0.55;
+  return japaneseRatio * 0.44 + Math.min(column.averageLength / 70, 1) * 0.25 + narrativeRatio * 0.31 - constraintRatio * 0.55;
 }
 
 export function inferSpreadsheetStructure(snapshot, options = {}) {
@@ -140,13 +136,13 @@ export function inferSpreadsheetStructure(snapshot, options = {}) {
       const score = ruleScores.find((item) => item.column === column.column)?.score || 0;
       const body = column.samples.filter((sample) => !headerRow || sample.row !== headerRow);
       const constraintRatio = body.filter((sample) => looksLikeConstraint(sample.text)).length / Math.max(1, body.length);
-      const hanRatio = body.filter((sample) => containsHan(sample.text) && !containsOtherAsianScript(sample.text)).length / Math.max(1, body.length);
-      const latinRatio = body.filter((sample) => /[A-Za-z]/.test(sample.text) && !containsHan(sample.text)).length / Math.max(1, body.length);
-      if (score >= Math.max(0.34, highestScore - 0.12) && hanRatio >= 0.45) {
-        return { column: column.column, letter: column.letter, label, role: "source_text", confidence: Number(Math.min(0.88, 0.55 + score * 0.28).toFixed(2)), reason: "中文正文密度、长度和句式特征最高" };
+      const japaneseRatio = body.filter((sample) => containsJapanese(sample.text)).length / Math.max(1, body.length);
+      const chineseRatio = body.filter((sample) => /[\p{Script=Han}]/u.test(sample.text) && !containsJapanese(sample.text)).length / Math.max(1, body.length);
+      if (score >= Math.max(0.34, highestScore - 0.12) && japaneseRatio >= 0.45) {
+        return { column: column.column, letter: column.letter, label, role: "source_text", confidence: Number(Math.min(0.88, 0.55 + score * 0.28).toFixed(2)), reason: "日文正文密度、长度和句式特征最高" };
       }
       if (constraintRatio >= 0.45) return { column: column.column, letter: column.letter, label, role: "constraint", confidence: 0.78, reason: "内容主要是日期、字数或语言限制" };
-      if (latinRatio >= 0.55 && column.averageLength >= 18) return { column: column.column, letter: column.letter, label, role: "existing_translation", confidence: 0.72, reason: "主要为连续外文，视为已有参考译文" };
+      if (chineseRatio >= 0.55 && column.averageLength >= 2) return { column: column.column, letter: column.letter, label, role: "existing_translation", confidence: 0.72, reason: "主要为连续中文，视为已有参考译文" };
       if (body.length) return { column: column.column, letter: column.letter, label, role: "context", confidence: 0.62, reason: "辅助定位或说明信息" };
       return { column: column.column, letter: column.letter, label, role: "ignore", confidence: 0.6, reason: "没有可用内容" };
     });
@@ -154,7 +150,7 @@ export function inferSpreadsheetStructure(snapshot, options = {}) {
       const best = [...columns].sort((a, b) => (ruleScores.find((item) => item.column === b.column)?.score || 0) - (ruleScores.find((item) => item.column === a.column)?.score || 0))[0];
       best.role = "source_text";
       best.confidence = 0.51;
-      best.reason = "无表头条件下选择中文正文特征最强的列";
+      best.reason = "无表头条件下选择日文正文特征最强的列";
     }
     return { sheet: sheet.sheet, headerRow, columns, confidence: headerRow ? 0.86 : 0.64, reason: headerRow ? "规则识别到语义表头" : "无表头，按列内容特征推断" };
   });

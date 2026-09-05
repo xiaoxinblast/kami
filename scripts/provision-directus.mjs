@@ -8,19 +8,11 @@ const token = process.env.DIRECTUS_ADMIN_TOKEN || process.env.DIRECTUS_TOKEN;
 if (!token) throw new Error("DIRECTUS_ADMIN_TOKEN or DIRECTUS_TOKEN is required");
 
 const localeCollections = {
-  "ja-JP": { key: "terms_ja_jp", label: "日语术语库", icon: "translate" },
-  "ko-KR": { key: "terms_ko_kr", label: "韩语术语库", icon: "translate" },
-  "zh-Hant-TW": { key: "terms_zh_hant_tw", label: "繁体中文（台湾）术语库", icon: "translate" },
-  "fr-FR": { key: "terms_fr_fr", label: "法语术语库", icon: "translate" },
-  "th-TH": { key: "terms_th_th", label: "泰语术语库", icon: "translate" }
+  "zh-CN": { key: "terms_zh_cn", label: "简体中文术语库", icon: "translate" }
 };
 
 const memoryCollections = {
-  "ja-JP": { key: "translation_memory_ja_jp", label: "日语翻译记忆" },
-  "ko-KR": { key: "translation_memory_ko_kr", label: "韩语翻译记忆" },
-  "zh-Hant-TW": { key: "translation_memory_zh_hant_tw", label: "繁体中文（台湾）翻译记忆" },
-  "fr-FR": { key: "translation_memory_fr_fr", label: "法语翻译记忆" },
-  "th-TH": { key: "translation_memory_th_th", label: "泰语翻译记忆" }
+  "zh-CN": { key: "translation_memory_zh_cn", label: "简体中文翻译记忆" }
 };
 
 const label = (translation) => [{ language: "zh-CN", translation }];
@@ -69,9 +61,8 @@ function jsonField(field, translation, { note = null, sort } = {}) {
 
 /**
  * `nullable` 必须显式声明：这里原本一律 is_nullable: false，于是任何"这一项可以
- * 没有"的下拉都成了非空列。后台任务的 target_locale 就栽在这上面——一张术语表
- * 可以同时含四个目标语言，本来就没有单一 locale，写 null 直接被约束拒绝，
- * 术语导入与全语言 Embedding 重建在 Directus 模式下必然 400。
+ * 没有"的下拉都成了非空列。后台任务的 target_locale 就栽在这上面——不归属某一条
+ * 翻译链路的任务本来就没有单一 locale，写 null 直接被约束拒绝。
  */
 function selectField(field, translation, values, { defaultValue = null, width = "half", sort, nullable = false } = {}) {
   return {
@@ -164,8 +155,8 @@ function termFields() {
 function memoryFields() {
   return [
     uuidField(),
-    textField("source", "简体中文原文", { required: true, multiline: true, sort: 2 }),
-    textField("target", "目标语言译文", { required: true, multiline: true, sort: 3 }),
+    textField("source", "日语原文", { required: true, multiline: true, sort: 2 }),
+    textField("target", "简体中文译文", { required: true, multiline: true, sort: 3 }),
     textField("domain", "业务领域", { width: "half", sort: 4 }),
     selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 5 }),
     jsonField("content_tags", "细分类标签", { note: "主语体内的场景标签。", sort: 6 }),
@@ -200,7 +191,7 @@ const definitions = [
     collection: key,
     meta: {
       icon,
-      note: `${collectionLabel}。与其他目标语言物理隔离。`,
+      note: `${collectionLabel}。只存日语到简体中文的正式术语。`,
       display_template: "{{source}} → {{target}}",
       group: "localization_assets",
       sort: index + 1,
@@ -219,12 +210,12 @@ const definitions = [
     collection: "corpus_documents",
     meta: {
       icon: "article",
-      note: "中文原始语料、切段和候选提取结果。",
+      note: "日语原始语料、切段和候选提取结果。",
       display_template: "{{name}}",
       group: "localization_pipeline",
       sort: 1,
       accountability: "all",
-      translations: label("中文语料")
+      translations: label("日语语料")
     },
     schema: {},
     fields: [
@@ -233,7 +224,7 @@ const definitions = [
       textField("source_language", "源语言", { required: true, width: "half", sort: 3 }),
       textField("domain", "业务领域", { width: "half", sort: 4 }),
       textField("content_type", "内容语体", { width: "half", sort: 5 }),
-      textField("text", "中文原文", { required: true, multiline: true, sort: 6 }),
+      textField("text", "日语原文", { required: true, multiline: true, sort: 6 }),
       jsonField("segments", "切分句段", { sort: 7 }),
       jsonField("candidates", "术语候选", { sort: 8 }),
       dateField("date_created", "创建时间", "date-created", 9)
@@ -243,7 +234,7 @@ const definitions = [
     collection: "term_import_batches",
     meta: {
       icon: "upload_file",
-      note: "中外文表格上传、清洗与入库批次记录。",
+      note: "日语与简体中文对照表格的上传、清洗与入库批次记录。",
       display_template: "{{filename}}",
       group: "localization_pipeline",
       sort: 2,
@@ -269,7 +260,7 @@ const definitions = [
     collection: "term_candidates",
     meta: {
       icon: "manage_search",
-      note: "从中文语料提取、等待人工确认的候选术语。",
+      note: "从日语语料提取、等待人工确认的候选术语。",
       display_template: "{{source}}",
       group: "localization_pipeline",
       sort: 3,
@@ -279,9 +270,9 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
-      textField("source", "候选中文词", { required: true, multiline: true, sort: 2 }),
+      textField("source", "候选日语词", { required: true, multiline: true, sort: 2 }),
       textField("target", "候选译法", { multiline: true, width: "half", sort: 3 }),
-      selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { defaultValue: "ja-JP", sort: 4 }),
+      selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { defaultValue: "zh-CN", sort: 4 }),
       selectField("asset_type", "资产类型", [["术语", "term"], ["翻译记忆", "memory"]], { defaultValue: "term", sort: 5 }),
       selectField("content_type", "自动识别语体", contentTypeValues, { defaultValue: "general", sort: 6 }),
       jsonField("content_tags", "自动细分类标签", { sort: 7 }),
@@ -298,7 +289,7 @@ const definitions = [
       textField("candidate_origin", "候选提取来源", { width: "half", sort: 14 }),
       textField("term_category", "术语类别", { width: "half", sort: 15 }),
       { field: "extraction_confidence", type: "float", meta: { interface: "input", readonly: true, width: "half", sort: 16, translations: label("术语提取置信度") }, schema: { is_nullable: true } },
-      jsonField("source_span", "中文原文位置", { sort: 17 }),
+      jsonField("source_span", "日语原文位置", { sort: 17 }),
       jsonField("target_span", "目标译文位置", { sort: 18 }),
       { field: "frequency", type: "integer", meta: { interface: "input", width: "half", sort: 6, translations: label("出现频次") }, schema: { is_nullable: false, default_value: 1 } },
       { field: "score", type: "float", meta: { interface: "input", width: "half", sort: 6, translations: label("候选分数") }, schema: { is_nullable: true } },
@@ -348,7 +339,7 @@ const definitions = [
     collection: "user_profiles",
     meta: {
       icon: "person",
-      note: "从人工采纳译文中蒸馏的全局译者偏好画像，按目标语言各一份，翻译时始终注入。",
+      note: "从人工采纳译文中蒸馏的日语到简体中文译者偏好画像，翻译时始终注入。",
       display_template: "{{name}}",
       group: "localization_pipeline",
       sort: 4,
@@ -408,7 +399,7 @@ const definitions = [
     collection: key,
     meta: {
       icon: "history_edu",
-      note: `${collectionLabel}。只存该目标语言的已对齐句段，与其他语言物理隔离。`,
+      note: `${collectionLabel}。只存日语与简体中文已对齐句段。`,
       display_template: "{{source}} → {{target}}",
       group: "localization_pipeline",
       sort: 5 + index,
@@ -428,8 +419,8 @@ const definitions = [
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 3 }),
       jsonField("content_tags", "细分类标签", { note: "该证据的场景标签。", sort: 4 }),
       textField("domain", "业务领域", { width: "half", sort: 4 }),
-      textField("source", "简体中文原文", { required: true, multiline: true, sort: 5 }),
-      textField("target", "目标语言译文", { required: true, multiline: true, sort: 6 }),
+      textField("source", "日语原文", { required: true, multiline: true, sort: 5 }),
+      textField("target", "简体中文译文", { required: true, multiline: true, sort: 6 }),
       textField("machine_translation", "被替换的机器译文", { multiline: true, sort: 7, note: "人工改写前的机器初稿；与 target 的差异就是风格信号。表格导入的既有对照没有这一项。" }),
       selectField("polarity", "证据极性", [["正例", "positive"], ["反例", "negative"]], { defaultValue: "positive", width: "half", sort: 8 }),
       textField("note", "备注 / 否决理由", { multiline: true, sort: 9, note: "反例记录同事为什么否决这条译文。" }),
@@ -494,7 +485,7 @@ const definitions = [
       textField("project", "项目", { width: "half", sort: 5 }),
       textField("batch_id", "批次 ID", { width: "half", sort: 6 }),
       textField("segment_id", "分段 ID", { width: "half", sort: 7 }),
-      textField("source", "中文原文", { required: true, multiline: true, sort: 8 }),
+      textField("source", "日语原文", { required: true, multiline: true, sort: 8 }),
       textField("initial_translation", "初始译文", { multiline: true, sort: 9 }),
       textField("final_translation", "最终译文", { multiline: true, sort: 10 }),
       jsonField("context_pack", "实际注入上下文", { sort: 11 }),
@@ -693,7 +684,7 @@ const definitions = [
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 2 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 3 }),
       textField("domain", "业务领域", { width: "half", sort: 4 }),
-      textField("source", "简体中文原文", { required: true, multiline: true, sort: 5 }),
+      textField("source", "日语原文", { required: true, multiline: true, sort: 5 }),
       textField("initial_translation", "初始译文", { required: true, multiline: true, sort: 6 }),
       textField("final_translation", "最终译文", { required: true, multiline: true, sort: 7 }),
       { field: "score", type: "float", meta: { interface: "input", width: "half", sort: 8, translations: label("最终分数") }, schema: { is_nullable: true } },
@@ -719,7 +710,7 @@ const definitions = [
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 2 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 3 }),
       textField("domain", "业务领域", { width: "half", sort: 4 }),
-      textField("source", "简体中文原文", { required: true, multiline: true, sort: 5 }),
+      textField("source", "日语原文", { required: true, multiline: true, sort: 5 }),
       textField("rejected_translation", "问题译文", { required: true, multiline: true, sort: 6 }),
       textField("corrected_translation", "修订译文", { multiline: true, sort: 7 }),
       jsonField("issues", "问题类型与意见", { sort: 8 }),
@@ -750,8 +741,8 @@ const definitions = [
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 3 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 4 }),
       textField("domain", "业务领域", { width: "half", sort: 5 }),
-      textField("source_text", "中文原文", { required: true, multiline: true, sort: 6 }),
-      textField("translation_text", "目标语言译文", { required: true, multiline: true, sort: 7 }),
+      textField("source_text", "日语原文", { required: true, multiline: true, sort: 6 }),
+      textField("translation_text", "简体中文译文", { required: true, multiline: true, sort: 7 }),
       { field: "source_count", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 8, translations: label("原文句数") }, schema: { is_nullable: true } },
       { field: "translation_count", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 9, translations: label("译文句数") }, schema: { is_nullable: true } },
       { field: "overall_score", type: "float", meta: { interface: "input", readonly: true, width: "half", sort: 10, translations: label("综合分") }, schema: { is_nullable: true } },
@@ -795,7 +786,7 @@ const definitions = [
       uuidField(),
       selectField("task_type", "任务类型", [["术语导入", "term_import"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
       textField("title", "任务标题", { required: true, sort: 3 }),
-      // 跨语言的术语导入与全语言 Embedding 重建没有单一目标语言，必须允许为空。
+      // 不归属单一翻译任务的后台操作没有目标语言，必须允许为空。
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { width: "half", sort: 4, nullable: true }),
       selectField("status", "任务状态", [["进行中", "in_progress"], ["已完成", "completed"], ["失败", "failed"]], { defaultValue: "in_progress", sort: 5 }),
       jsonField("progress", "进度快照", { note: "percent、phase、message、completed、total。", sort: 6 }),
@@ -872,7 +863,8 @@ async function ensureCollection(definition) {
 }
 
 async function cleanupAbandonedFrenchSharedFields() {
-  const fields = await api("/fields/terms_fr_fr");
+  const fields = await api("/fields/terms_fr_fr", { allowed: [403, 404] });
+  if (!Array.isArray(fields)) return;
   if (!fields.some((field) => field.field === "record_kind")) return;
   const memoryRows = await api("/items/terms_fr_fr?limit=1&filter[record_kind][_eq]=memory&fields=id");
   if (memoryRows.length) throw new Error("terms_fr_fr 里仍有共表时期的法语记忆，停止删除旧字段；请先迁移这些记录");
@@ -1036,13 +1028,13 @@ async function ensureServiceAccount() {
 }
 
 await waitForDirectus();
-await ensureFolder("localization_assets", "五语术语资产", "translate", 1);
+await ensureFolder("localization_assets", "日语到简体中文资产", "translate", 1);
 await ensureFolder("localization_pipeline", "语料与规则", "account_tree", 2);
 await ensureFolder("localization_learning", "翻译学习与评测", "psychology", 3);
 for (const definition of definitions) await ensureCollection(definition);
 await cleanupAbandonedFrenchSharedFields();
 await reconcileTranslationSkillKeys();
-await api("/settings", { method: "PATCH", body: { project_name: "Kami 本地化语言工作台", project_descriptor: "中译日、韩、繁中（台湾）、法、泰的强隔离语言资产后台", project_color: "#123e31" } });
+await api("/settings", { method: "PATCH", body: { project_name: "Kami 日语到简体中文本地化工作台", project_descriptor: "日语到简体中文的术语、翻译记忆与质量资产后台", project_color: "#123e31" } });
 await ensureServiceAccount();
 await migrateSeedAssets();
 console.log(`Directus provisioned at ${baseUrl}`);

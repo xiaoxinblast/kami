@@ -31,7 +31,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
   const preferred = matches.filter((item) => item.mode !== "exact" || item.term.enforcement !== "required" || item.scopeMismatch);
   const defaultRegister = CONTENT_TYPES[classification.contentType].register;
   return {
-    sourceLanguage: "Simplified Chinese",
+    sourceLanguage: "Japanese",
     targetLocale: locale,
     targetLanguage: LOCALES[locale].language,
     domain,

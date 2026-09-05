@@ -1,7 +1,7 @@
 import ExcelJS from "exceljs";
 import { Readable } from "node:stream";
 import { extname } from "node:path";
-import { CONTENT_TYPES, LOCALES, assertLocale } from "./config.mjs";
+import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES, assertLocale } from "./config.mjs";
 import { classifyContent, inferContentTags, inferDomainFromText } from "./classifier.mjs";
 
 const HEADER_SCAN_LIMIT = 12;
@@ -25,13 +25,9 @@ const TERM_CATEGORIES = new Set([
 ]);
 const PROPER_NAME_CATEGORIES = new Set(["proper_name", "character_name", "place_name", "organization_name"]);
 
-const SOURCE_HEADERS = ["中文", "简中", "简体中文", "简体", "zh-cn", "zh_cn", "源文", "原文", "source", "source text"];
+const SOURCE_HEADERS = ["日语", "日语原文", "日文", "日文原文", "日本语", "日本語", "ja", "ja-jp", "ja_jp", "japanese", "源文", "原文", "source", "source text"];
 const TARGET_HEADERS = Object.freeze({
-  "ja-JP": ["日语", "日文", "日本语", "日本語", "ja", "ja-jp", "japanese"],
-  "ko-KR": ["韩语", "韩文", "韓語", "한국어", "ko", "ko-kr", "korean"],
-  "zh-Hant-TW": ["繁中", "繁体", "繁體", "繁体中文", "繁體中文", "台湾", "臺灣", "zh-tw", "zh-hant", "zh-hant-tw"],
-  "fr-FR": ["法语", "法文", "français", "francais", "fr", "fr-fr", "french"],
-  "th-TH": ["泰语", "泰文", "ภาษาไทย", "th", "th-th", "thai"]
+  "zh-CN": ["中文", "简中", "简体中文", "简体", "zh-cn", "zh_cn", "chinese", "chinese simp", "chinese simplified"]
 });
 
 function compact(value) {
@@ -78,17 +74,13 @@ function containsHan(value) {
 function scriptScore(value, locale) {
   const text = compact(value);
   if (!text) return 0;
-  if (locale === "ko-KR") return /[\p{Script=Hangul}]/u.test(text) ? 1 : 0;
-  if (locale === "th-TH") return /[\p{Script=Thai}]/u.test(text) ? 1 : 0;
-  if (locale === "ja-JP") return /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text) ? 1 : 0;
-  if (locale === "zh-Hant-TW") return containsHan(text) && !/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u.test(text) ? 0.55 : 0;
+  if (locale === "zh-CN") return containsHan(text) && !/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text) ? 1 : 0;
   return 0;
 }
 
 function sourceScore(value) {
   const text = compact(value);
-  if (!text || !containsHan(text)) return 0;
-  if (/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u.test(text)) return 0.1;
+  if (!text || !/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text)) return 0;
   return 0.8;
 }
 
@@ -123,14 +115,14 @@ function inferColumns(worksheet, header, requestedLocale) {
     .map((column) => ({ column, score: averageColumnScore(worksheet, column, startRow, sampleEnd, sourceScore) }))
     .sort((a, b) => b.score - a.score)[0]?.column;
   const targetColumns = { ...(header?.targetColumns || {}) };
-  const locales = requestedLocale ? [assertLocale(requestedLocale)] : Object.keys(LOCALES);
+  const locales = requestedLocale ? [assertLocale(requestedLocale)] : ACTIVE_LOCALES;
   for (const locale of locales) {
     if (targetColumns[locale]) continue;
     const best = columns
       .filter((column) => column !== sourceColumn && !Object.values(targetColumns).includes(column))
       .map((column) => ({ column, score: averageColumnScore(worksheet, column, startRow, sampleEnd, (value) => scriptScore(value, locale)) }))
       .sort((a, b) => b.score - a.score)[0];
-    const threshold = locale === "zh-Hant-TW" ? 0.28 : 0.2;
+    const threshold = locale === "zh-CN" ? 0.28 : 0.2;
     if (best?.score >= threshold) targetColumns[locale] = best.column;
   }
   if (requestedLocale && !targetColumns[requestedLocale]) {
@@ -154,7 +146,7 @@ function sourceLooksSentence(source) {
   if (!text) return false;
   if (/[，。！？!?；;：:]/u.test(text)) return true;
   if ([...text].length >= 18) return true;
-  return [...text].length >= 8 && /(?:已经|正在|将要|应该|可以|不能|不会|不要|没有|不是|就是|如果|因为|所以|但是|然后|还是|便是|乃是|只要|之后|以前|如今|今日|明日|我们|你们|他们|这里|那里|回来|出去|知道|觉得|看来|说道|问道|为何|怎么|什么|谁|呢|吗|吧|啊|哩|了|着|过)$/u.test(text);
+  return [...text].length >= 8 && /(?:です|ます|でした|ました|でしょう|だろう|ない|ないです|ません|ました|する|した|して|いる|いない|れる|られる|だ|だった|ね|よ|か|な|ぞ|わ|の)$/u.test(text);
 }
 
 export function inferSheetMode({ filename = "", sheet = "", headerValues = [], sources = [], modelMode = "" } = {}) {
@@ -172,8 +164,8 @@ export function inferSheetMode({ filename = "", sheet = "", headerValues = [], s
   if (/(glossary|terminology|term(?:s)?|dictionary|lexicon|术语|词汇|词典|名词表|命名表)/iu.test(identity) && terseRatio >= 0.65 && sentenceRatio <= 0.25) {
     return { mode: "glossary", confidence: 0.96, source: "rules", reason: "工作表名称或表头表明内容为术语表" };
   }
-  if (sentenceRatio >= 0.55) return { mode: "dialogue", confidence: Math.min(0.92, 0.62 + sentenceRatio * 0.3), source: "rules", reason: `中文源文中完整句比例为 ${Math.round(sentenceRatio * 100)}%` };
-  if (terseRatio >= 0.8 && sentenceRatio <= 0.12) return { mode: "glossary", confidence: Math.min(0.9, 0.58 + terseRatio * 0.32), source: "rules", reason: `中文源文中短词条比例为 ${Math.round(terseRatio * 100)}%` };
+  if (sentenceRatio >= 0.55) return { mode: "dialogue", confidence: Math.min(0.92, 0.62 + sentenceRatio * 0.3), source: "rules", reason: `日文源文中完整句比例为 ${Math.round(sentenceRatio * 100)}%` };
+  if (terseRatio >= 0.8 && sentenceRatio <= 0.12) return { mode: "glossary", confidence: Math.min(0.9, 0.58 + terseRatio * 0.32), source: "rules", reason: `日文源文中短词条比例为 ${Math.round(terseRatio * 100)}%` };
   return { mode: "mixed", confidence: 0.7, source: "rules", reason: "工作表同时包含短词条与完整句段" };
 }
 
@@ -194,11 +186,11 @@ function quality(source, target, locale, sheetMode = "mixed") {
   const sentenceLike = rowKind === "memory";
   if (sourceLength >= 2 && sourceLength <= 18) score += 0.22;
   else if (sourceLength <= 32) score += 0.08;
-  else reasons.push("中文较长，可能是完整句子");
+  else reasons.push("日文较长，可能是完整句子");
   if (targetLength >= 1 && targetLength <= 32) score += 0.16;
   else if (targetLength <= 64) score += 0.05;
   else reasons.push("译文较长，建议人工确认");
-  if (scriptScore(target, locale) >= 0.5 || (locale === "zh-Hant-TW" && containsHan(target))) score += 0.14;
+  if (scriptScore(target, locale) >= 0.5) score += 0.14;
   else reasons.push("目标语言文字特征不明显");
   if (/[。！？!?；;：:]|\.{2,}/u.test(source) || /[。！？!?；;]|\.{2,}/u.test(target)) {
     score -= 0.18;
@@ -214,10 +206,10 @@ function quality(source, target, locale, sheetMode = "mixed") {
   }
   if (source === target) {
     score -= 0.25;
-    reasons.push("中外文内容相同");
+    reasons.push("日中文内容相同");
   }
   if (sentenceLike && score > 0.2 && source !== target) {
-    const targetScriptValid = scriptScore(target, locale) >= 0.5 || (locale === "zh-Hant-TW" && containsHan(target));
+    const targetScriptValid = scriptScore(target, locale) >= 0.5;
     if (targetScriptValid) {
       score = Math.max(score, 0.78);
       reasons.push("完整双语句段，将沉淀为翻译记忆与风格证据");
@@ -430,7 +422,7 @@ export async function extractTermPairs({ filename, base64, locale = "auto" }, { 
     .filter(Boolean);
   const candidates = sheets.flatMap((sheet) => sheet.candidates);
   if (!candidates.length) {
-    const error = new Error("没有识别到可用的中外文对照行；请确认表格中至少有一列中文和一列目标语言内容");
+    const error = new Error("没有识别到可用的日语与简体中文对照行；请确认表格中至少有一列日语和一列简体中文内容");
     error.statusCode = 422;
     throw error;
   }

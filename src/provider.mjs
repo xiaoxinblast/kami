@@ -1,5 +1,5 @@
 import { loadProviderConfig, saveProviderConfig } from "./provider-store.mjs";
-import { CONTENT_TYPES, LOCALES } from "./config.mjs";
+import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-qa.mjs";
 
 const loadedProvider = loadProviderConfig();
@@ -134,7 +134,7 @@ function packPrompt(contextPack) {
   const exampleHint = localeExamples.length
     ? `本地化示范（左：原文 → 直译，右：合格的地道译法。请达到右侧的水平）：\n${localeExamples.map((item) => `· ${item.source} → ${item.literal} ✗ / ${item.idiomatic} ✓（${item.note}）`).join("\n")}\n`
     : "";
-  return `你是资深游戏本地化写手。你的任务不是逐字翻译，而是把简体中文文案用 ${contextPack.targetLanguage} 玩家最自然的方式重新表达：先读懂这句话在游戏场景里的意图、情绪与角色，再用目标语言母语者会用的说法写出来。只改变表达方式，不改变信息。\n\n` +
+  return `你是资深游戏本地化写手。你的任务不是逐字翻译，而是把${contextPack.sourceLanguage}文案用 ${contextPack.targetLanguage} 玩家最自然的方式重新表达：先读懂这句话在游戏场景里的意图、情绪与角色，再用目标语言母语者会用的说法写出来。只改变表达方式，不改变信息。\n\n` +
     `内容类型：${contextPack.contentTypeLabel}\n` +
     `语体要求：${contextPack.register}\n` +
     `本语体写作口径：${contextPack.styleProfile?.contentTypeDirective || ""}\n` +
@@ -160,10 +160,10 @@ function packPrompt(contextPack) {
 ` +
     `结构化事实锚点（translation 范围必须在译文中保持等价；task 范围只作为交付约束，不得翻译进正文）：${JSON.stringify(contextPack.factSchema || { facts: [], limits: [] })}
 ` +
-    `数字与日期：数值必须等价，但格式要按目标语言习惯改写。中文的日期简写（如 820 表示 8 月 20 日）必须展开为目标语言的正常写法，不得为了保留字面而在译文里额外塞入原样数字。
+    `数字与日期：数值必须等价，但格式要按目标语言习惯改写；不得为了保留字面而在译文里额外塞入原样数字。
 
 ` +
-    `规则：\n1. 不得使用其他目标语言的表达。\n2. 信息保真：数字、日期、名称、占位符、强制术语和事实必须完整保留；除此之外，语序、句式、用词、修辞都可以自由改写为地道说法——换一种地道表达不等于漏译或增译。\n3. 强制术语必须逐字采用指定目标译法。\n4. 上下文只用于消歧和保持连贯，不得把上文或下文混入译文。\n5. 标有 contextualFallback 或 contentType 不同的历史译例只用于稳定术语与基础表达，不得覆盖当前语体要求。\n6. 拒绝翻译腔：成语、习语、重复、语气词、客套话一律换成目标语言中语义与语气对等的自然说法；译文读起来必须像目标语言原生文案，而不是中文的逐字影子。\n7. 原文含押韵、对仗、重复或口号结构时，必须在目标语言中重现节奏与韵律，允许换用地道表达；语气要与原句一致（如闲散自嘲不得译成命令口吻）。\n8. 只翻译“当前原文”，只输出译文，不解释。\n\n${rhymeHint}当前原文：\n${contextPack.source}`;
+    `规则：\n1. 不得使用其他目标语言的表达。\n2. 信息保真：数字、日期、名称、占位符、强制术语和事实必须完整保留；除此之外，语序、句式、用词、修辞都可以自由改写为地道说法——换一种地道表达不等于漏译或增译。\n3. 强制术语必须逐字采用指定目标译法。\n4. 上下文只用于消歧和保持连贯，不得把上文或下文混入译文。\n5. 标有 contextualFallback 或 contentType 不同的历史译例只用于稳定术语与基础表达，不得覆盖当前语体要求。\n6. 拒绝翻译腔：成语、习语、重复、语气词、客套话一律换成目标语言中语义与语气对等的自然说法；译文读起来必须像目标语言原生文案，而不是日语的逐字影子。\n7. 原文含押韵、对仗、重复或口号结构时，必须在目标语言中重现节奏与韵律，允许换用地道表达；语气要与原句一致（如闲散自嘲不得译成命令口吻）。\n8. 只翻译“当前原文”，只输出译文，不解释。\n\n${rhymeHint}当前原文：\n${contextPack.source}`;
 }
 
 /**
@@ -339,13 +339,13 @@ export async function reviewTermCandidatesWithModel(locale, candidates) {
   const content = await chat([
     {
       role: "system",
-      content: `你是游戏本地化资产清洗员。用户只负责上传文件，你必须逐条完成资产归类，不要求用户设置任何参数。审核简体中文到${language}的候选对照。每一个输入 index 都必须且只能返回一次 decision，不能遗漏。
+      content: `你是游戏本地化资产清洗员。用户只负责上传文件，你必须逐条完成资产归类，不要求用户设置任何参数。审核日语到${language}的候选对照。每一个输入 index 都必须且只能返回一次 decision，不能遗漏。
 
-rowKind 只能为 term 或 memory。sheetMode=dialogue 时整行必须保持 memory；不得因为译文长短或目标语言不同将同一句中文改成 term。term 是独立词条中的专名、系统名、功能名、道具名、角色名、地点名、技能名；memory 是语义对齐的台词、句子、UI 文本或完整文案。memory 的 contentType 必须从 ${Object.keys(CONTENT_TYPES).join(", ")} 中选择；term 的主分类继承所在行或来源文件的用途，不得把 general 当作跨分类通配。domain 只能为 game、marketing、community、general。
+rowKind 只能为 term 或 memory。sheetMode=dialogue 时整行必须保持 memory；不得因为译文长短将同一句日语改成 term。term 是独立词条中的专名、系统名、功能名、道具名、角色名、地点名、技能名；memory 是语义对齐的台词、句子、UI 文本或完整文案。memory 的 contentType 必须从 ${Object.keys(CONTENT_TYPES).join(", ")} 中选择；term 的主分类继承所在行或来源文件的用途，不得把 general 当作跨分类通配。domain 只能为 game、marketing、community、general。
 
 对 keep=true 且 rowKind=memory 的完整句段，同时检查句内术语，放入 nestedTerms，不得用 nestedTerms 替换父 memory。nestedTerms.category 只能是 proper_name、character_name、place_name、item_name、skill_name、system_name、organization_name、species_name、currency_name、lore_concept、fixed_ui_label。必须是专名、官方命名或能稳定复用的固定标签；严禁抽取代词、动词/形容词短语、普通搭配、礼貌套话、一次性修辞和整分句。nestedTerms.source 必须逐字存在于 source，target 必须逐字存在于 target；不得补译、改写或猜测目标词。专名和官方命名 enforcement=required，其他固定标签 preferred。
 
-排除数字、网址、DDL、字符限制、位置说明、语种要求、错列、元数据和明显误译。不要改写父 source 或 target。输出严格 JSON：{"decisions":[{"index":0,"keep":true,"confidence":0.95,"rowKind":"memory","contentType":"dialogue","domain":"game","enforcement":"preferred","reason":"完整对白且语义对齐","nestedTerms":[{"source":"孙悟空","target":"孫悟空","category":"character_name","enforcement":"required","confidence":0.98,"reason":"角色专名"}]}]}`
+排除数字、网址、DDL、字符限制、位置说明、语种要求、错列、元数据和明显误译。不要改写父 source 或 target。输出严格 JSON：{"decisions":[{"index":0,"keep":true,"confidence":0.95,"rowKind":"memory","contentType":"dialogue","domain":"game","enforcement":"preferred","reason":"完整对白且语义对齐","nestedTerms":[{"source":"プレミアムパス","target":"高级通行证","category":"fixed_ui_label","enforcement":"required","confidence":0.98,"reason":"固定 UI 名称"}]}]}`
     },
     { role: "user", content: JSON.stringify(compactCandidates) }
   ], runtimeConfig, {
@@ -375,7 +375,7 @@ rowKind 只能为 term 或 memory。sheetMode=dialogue 时整行必须保持 mem
 }
 
 export async function analyzeTermTableStructureWithModel(snapshot, requestedLocale) {
-  const allowedLocales = requestedLocale ? [requestedLocale] : Object.keys(LOCALE_NAMES);
+  const allowedLocales = requestedLocale ? [requestedLocale] : ACTIVE_LOCALES;
   const compactSnapshot = {
     requestedLocale: requestedLocale || "auto",
     allowedLocales,
@@ -389,11 +389,11 @@ export async function analyzeTermTableStructureWithModel(snapshot, requestedLoca
   const content = await chat([
     {
       role: "system",
-      content: `你是亚洲语言游戏本地化术语表结构分析器。源语言固定为简体中文，允许的目标语言 locale 只有 ${allowedLocales.join(", ")}。你只判断表格结构，绝对不能翻译、改写或补全单元格。
+      content: `你是日语到简体中文的游戏本地化术语表结构分析器。源语言固定为日语，允许的目标语言 locale 只有 ${allowedLocales.join(", ")}。你只判断表格结构，绝对不能翻译、改写或补全单元格。
 
-表格可能完全没有表头，也可能前几行是标题、说明或元数据。请根据整列的文字脚本、成对行关系、长度和内容分布，找出一列简体中文源文以及一个或多个目标语言列。纯汉字日文和繁体中文也必须结合对应行语义与整列分布判断，不能因为缺少假名或表头就拒绝。
+表格可能完全没有表头，也可能前几行是标题、说明或元数据。请根据整列的文字脚本、成对行关系、长度和内容分布，找出一列日语源文以及简体中文目标列。纯汉字日文必须结合对应行语义与整列分布判断，不能因为缺少假名或表头就拒绝。
 
-不要把位置、描述、DDL、字符限制、语种要求、序号或日期列当成中外文对照。headerRow 只有确实存在列名行时才填写，否则必须为 null。还要只根据工作表名称、表头和中文源列整体分布判断 sheetMode：dialogue=对白/字幕/剧情句段为主，glossary=独立命名词条为主，mixed=两类明显混合。目标语言译文长度不得影响 sheetMode。输出严格 JSON，不要 Markdown：{"sheets":[{"sheet":"原工作表名","headerRow":null,"sourceColumn":1,"targetColumns":{"ja-JP":2},"sheetMode":"dialogue","confidence":0.9,"reason":"简短依据"}]}`
+不要把位置、描述、DDL、字符限制、语种要求、序号或日期列当成日中对照。headerRow 只有确实存在列名行时才填写，否则必须为 null。还要只根据工作表名称、表头和日语源列整体分布判断 sheetMode：dialogue=对白/字幕/剧情句段为主，glossary=独立命名词条为主，mixed=两类明显混合。目标语言译文长度不得影响 sheetMode。输出严格 JSON，不要 Markdown：{"sheets":[{"sheet":"原工作表名","headerRow":null,"sourceColumn":1,"targetColumns":{"zh-CN":2},"sheetMode":"dialogue","confidence":0.9,"reason":"简短依据"}]}`
     },
     { role: "user", content: JSON.stringify(compactSnapshot) }
   ]);
@@ -451,7 +451,7 @@ export async function distillBatchStyleLearningWithModel({ batchId, filename, lo
     target: String(item?.target || "").trim(),
     rowNumber: Number(item?.rowNumber || item?.sourceRow) || null
   })).filter((item) => item.source && item.target);
-  if (!evidence.length) throw new Error("批次风格学习缺少有效中外文证据");
+  if (!evidence.length) throw new Error("批次风格学习缺少有效日中对照证据");
   const messages = [
     {
       role: "system",
@@ -510,7 +510,7 @@ export async function distillUserProfileWithModel({ locale, examples }) {
   const content = await chat([
     {
       role: "system",
-      content: `你是${language}游戏本地化译者画像编辑。请只根据人工采纳的中外文证据，提炼该团队/译者对${language}的全局翻译偏好。只提炼跨语体稳定的习惯：称谓与敬体选择、句尾语气、长度倾向、标点习惯、数字与格式处理、禁用表达，并提供简短正反例。不得把某个语体的临时风格当成全局偏好。
+      content: `你是${language}游戏本地化译者画像编辑。请只根据人工采纳的日语与简体中文对照证据，提炼该团队/译者对${language}的全局翻译偏好。只提炼跨语体稳定的习惯：称谓、句尾语气、长度倾向、标点习惯、数字与格式处理、禁用表达，并提供简短正反例。不得把某个语体的临时风格当成全局偏好。
 `
         + `带 change="revised" 的证据里，machineDraft 是机器初稿、target 是人工定稿，**反复出现的同类改动才是这位译者的稳定习惯**；只在某一条里出现一次的改动不要写成规则。change="confirmed" 表示原样采纳，只说明达标。
 `
@@ -680,13 +680,12 @@ export async function evaluateAutoQaWithModel({ source, translation, locale, con
 1) basic 基本检查：目标语言拼写错误、语法错误、数字/日期/符号与原文不符、专名与品牌名在句内前后不一致。
 2) fidelity 语义忠实性（着重检查项）：只检查**信息点**是否守住。信息点指可以被独立核实的内容：事实陈述、数字、日期、时间、金额、名称与专名、平台与渠道、条件与限制、因果或先后关系、否定与转折、承诺强度。判定方法固定为两步：先从原文列出信息点，再逐个检查该信息点能否从译文中还原；只有还原不出、被改变、或译文凭空多出一个原文没有的信息点，才是 fidelity 问题，且必须在 message 里指名是哪一个信息点。必须同时给出原文片段 sourceSpan 与译文片段 targetSpan 作为证据。
 以下一律**不是** fidelity 问题，不得记为漏译、增译或语义偏差（属于合格本地化，至多在 nuance 记 minor）：
-· 中文话语标记与虚词在目标语言中省略或改写：首先/其次/再次/所以/那么/然后/给大家/我们/大家
-· 程度与强调副词换成目标语言等价强度的说法：全力/非常/十分/一定/或许/难免
-· 中文范畴词与冗余限定被目标语言惯用表达吸收：古代神话→神話、进行/工作/情况/方面等虚化名词
-· 把中文代词显化为具体名称（"它"→产品名），或反过来把重复的专名代词化——这是目标语言可读性要求
-· 句子拆分、合并、语序调整、主被动转换、把疑问句改写成目标语言更自然的问法
-· 语气词、拟声词、客套与自嘲（嘻嘻/瞅瞅/顺手/别无二致）换成目标语言等价口吻
-· 中文四字格、对仗、夸张修辞换成目标语言等效表达
+· 日语主语、助词、敬体语尾和省略成分按简体中文自然语法改写或吸收
+· 程度与强调表达换成简体中文等价强度的说法，不机械逐词对应
+· 日语中重复的专名、代词和冗余限定按中文可读性显化、代词化或省略
+· 句子拆分、合并、语序调整、主被动转换，以及疑问句按简体中文习惯改写
+· 语气词、拟声词、客套与自嘲换成简体中文等价口吻
+· 日语四字熟语、对仗、夸张修辞换成简体中文等效表达
 severity：critical 只用于事实层面的丢失或捏造——整句未译、数字/日期/名称/平台错误、条件或否定被改变、承诺强度被改变。信息点仍在但语义范围有出入记 major；措辞偏好记 minor。
 特别重要：若原文包含多个句子（用换行分隔），必须逐句核对译文是否覆盖每一句的信息，任何一句未译出都要记 critical omission，不得因为其他句子译出了就认为完整。
 3) nuance 细微一致性：敬语级别、语气词、正式度、句式节奏是否与提供的风格规范、approvedReferences（人工批准的译例）、历史风格证据一致。有证据时优先对照证据判断；没有证据时按目标语言自然习惯判断。细微差异记 minor，明显违反记 major。
@@ -1127,7 +1126,7 @@ export async function analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysi
         letter: column.letter,
         nonEmpty: column.nonEmpty,
         averageLength: column.averageLength,
-        hanCharacters: column.hanCharacters,
+        japaneseCharacters: column.japaneseCharacters,
         latinCharacters: column.latinCharacters,
         constraintCells: column.constraintCells,
         sentenceCells: column.sentenceCells,
@@ -1140,18 +1139,18 @@ export async function analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysi
   const content = await chat([
     {
       role: "system",
-      content: `你是本地化项目的 Excel 表格结构分析器。源语言固定为简体中文，目标语言是 ${locale}。你的任务只识别结构，不翻译、不改写任何单元格。
+      content: `你是日语到简体中文的本地化项目 Excel 表格结构分析器。源语言固定为日语，目标语言是 ${locale}。你的任务只识别结构，不翻译、不改写任何单元格。
 
 请结合表头、列内样本、文字脚本、文本长度、行列分布和规则建议，为每张表识别表头行及每列角色。即使没有表头也必须根据数据分布推断，不能要求用户添加表头。
 
 列角色只能是：
-- source_text：真正需要翻译的简体中文正文、标题、按钮或文案。
+- source_text：真正需要翻译的日语正文、标题、按钮或文案。
 - context：位置、渠道、场景、用途、备注等只用于理解的补充信息。
 - constraint：DDL、字符限制、语种要求、平台规范等翻译约束。
-- existing_translation：英文或其他语言的已有译文/参考译文，不作为中文正文重复翻译。
+- existing_translation：简体中文的已有译文/参考译文，不作为日语正文重复翻译。
 - ignore：序号、空辅助列或无关数据。
 
-特别注意：含中文不代表需要翻译。诸如“海外社媒”“80字符内”“8月3日”“中英”“游戏内语言”等通常是 context 或 constraint。正文往往是连续文案列，但短标题、按钮也可能是正文，需要结合整列分布判断。一张表允许多个 source_text 列。
+特别注意：含日文不代表需要翻译。诸如“海外SNS”“80文字以内”“8月3日”“日中”“ゲーム内言語”等通常是 context 或 constraint。正文往往是连续文案列，但短标题、按钮也可能是正文，需要结合整列分布判断。一张表允许多个 source_text 列。
 
 输出严格 JSON，不要 Markdown：{"sheets":[{"sheet":"原工作表名","headerRow":1或null,"confidence":0到1,"reason":"简短依据","columns":[{"column":1,"label":"位置","role":"context","confidence":0.95,"reason":"简短依据"}]}]}`
     },
@@ -1189,6 +1188,7 @@ export async function alignTermSuggestionsWithModel(locale, translation, candida
 }
 
 const LOCALE_NAMES = Object.freeze({
+  "zh-CN": "简体中文",
   "ja-JP": "日语",
   "ko-KR": "韩语",
   "zh-Hant-TW": "台湾繁体中文",
@@ -1281,8 +1281,8 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
     // 韵文本地化专用通道：初译只作参考，要求模型以目标语言玩家视角再创作，
     // 而不是修补字对字直译。
     const localized = await chat([
-      { role: "system", content: "你是游戏文案韵文本地化师。把简体中文顺口溜/韵文改写为目标语言地道的押韵短句：保留原意与情绪（自嘲、洒脱、吆喝等），重现节奏、叠词与韵脚，允许换用拟态词、惯用句和谚语；严禁机械逐字直译，严禁把闲散语气译成命令口吻。只输出一行最终译文，不解释。\n\n改写示范（达到这个质量才算合格）：\n原文：走走走，游游游，甘为铜钱做马牛。\n译文：とことこ歩いて、ぶらぶら遊んで、銭のためなら馬にも牛にも。" },
-      { role: "user", content: `原文：${contextPack.source}\n参考技巧：中文三字重复可译为日语叠词/拟态词（とことこ、ぶらぶら等），尾韵可用同一语尾（〜て、〜で、〜う）呼应。不要参考任何现成译文，直接从原文创作。` }
+      { role: "system", content: "你是游戏文案韵文本地化师。把日语顺口溜/韵文改写为自然、节奏鲜明的简体中文短句：保留原意与情绪（自嘲、洒脱、吆喝等），重现节奏、叠词与韵脚，允许换用中文惯用句和谚语；严禁机械逐字直译，严禁把闲散语气译成命令口吻。只输出一行最终译文，不解释。\n\n改写示范（达到这个质量才算合格）：\n原文：とことこ歩いて、ぶらぶら遊んで、銭のためなら馬にも牛にも。\n译文：走走走，游游游，甘为铜钱做马牛。" },
+      { role: "user", content: `原文：${contextPack.source}\n参考技巧：日语叠词、拟态词和反复句可改写为中文叠词、四字结构或顺口句；尾韵可用同韵脚或节奏呼应。不要参考任何现成译文，直接从原文创作。` }
     ], callConfig, { temperature: translationTemperature, seed, onSeedUnsupported, timeoutMs: 75_000, requestLabel: "韵文本地化", onUsage });
     return { initial, translation: localized, reflection: "rhyme-localized" };
   }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { classifyContent, contentTypeFromDescriptor, descriptorFromContext, inferDomainFromText, resolveDomain } from "../src/classifier.mjs";
-import { LOCALES } from "../src/config.mjs";
+import { ACTIVE_LOCALES, LOCALES, assertActiveLocale } from "../src/config.mjs";
 import { buildContextPack } from "../src/context-pack.mjs";
 import { refineCorpus } from "../src/corpus.mjs";
 import { matchTerms } from "../src/matcher.mjs";
@@ -167,6 +167,12 @@ test("各语言本地化示范结构完整且源文一致", () => {
     }
   }
   assert.deepEqual(LOCALES["th-TH"].localizationExamples, []);
+});
+
+test("工作台只公开日语到简体中文语言对", () => {
+  assert.deepEqual(ACTIVE_LOCALES, ["zh-CN"]);
+  assert.equal(assertActiveLocale("zh-CN"), "zh-CN");
+  assert.throws(() => assertActiveLocale("ja-JP"), (error) => error?.statusCode === 400);
 });
 
 test("顺口溜/韵文结构检测保守且不误伤普通对话", () => {

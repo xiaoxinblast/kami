@@ -27,6 +27,11 @@ const SHARED = Object.freeze({
  * on its own, because a noisy lexicon turns this into another opinion generator.
  */
 const LEXICONS = Object.freeze({
+  "zh-CN": {
+    promotional: ["立即", "千万别错过", "史上最强", "超值", "限时抢购", "绝对", "必买", "惊喜价", "独家优惠"],
+    casual: ["哈哈", "笑死", "太离谱了", "这波", "吧", "啦", "诶"],
+    generic: ["各种各样", "非常好", "很方便", "多元", "丰富"]
+  },
   "ja-JP": {
     promotional: ["今すぐ", "お見逃しなく", "大好評", "圧倒的", "史上最強", "驚きの", "特別価格", "限定セール", "絶対に", "必見", "大幅割引", "お得"],
     casual: ["めっちゃ", "やばい", "超うれしい", "ガチ", "神ってる", "だよね", "じゃん", "ｗｗ", "笑笑"],

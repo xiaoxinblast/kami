@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONTENT_TAGS, CONTENT_TYPES, LOCALES, assertLocale } from "./src/config.mjs";
+import { ACTIVE_LOCALES, CONTENT_TAGS, CONTENT_TYPES, LOCALES, assertActiveLocale, assertLocale } from "./src/config.mjs";
 import { classifyContent, descriptorFromContext, inferContentTags, resolveDomain } from "./src/classifier.mjs";
 import { buildContextPack } from "./src/context-pack.mjs";
 import { refineCorpus } from "./src/corpus.mjs";
@@ -108,6 +108,24 @@ function feedbackEntry(share, feedback) {
 /** 单个分享最多生成的语素拆解段数。 */
 /** 出厂值；实际生效值来自设置面板（getSettings().share.glossLimit）。 */
 const SHARE_GLOSS_LIMIT = 30;
+
+/** 简体中文译文无需再向中文审阅者做“目标语→中文”的语素拆解。 */
+function shareNeedsGloss(locale) {
+  return locale !== "zh-CN";
+}
+
+function finalizeShareWithoutGloss(share) {
+  const meta = share?.meta && typeof share.meta === "object" && !Array.isArray(share.meta) ? { ...share.meta } : {};
+  delete meta.generationError;
+  delete meta.generationFailedSegments;
+  return {
+    ...share,
+    status: "ready",
+    glossedSegments: 0,
+    totalSegments: Number(share?.totalSegments) || (share?.segments || []).length,
+    meta: Object.keys(meta).length ? meta : null
+  };
+}
 
 /** 创建后台任务记录（术语导入 / Embedding 重建 / 批次导出）。 */
 async function createBackgroundTask({ type, title, locale = "", progress = {} }) {
@@ -265,6 +283,10 @@ async function persistQualityRun({ scope, skill, result, triggeredBy }) {
 async function generateShareGlosses(token) {
   const share = await getShare(token);
   if (!share || share.status === "ready" || share.status === "failed") return;
+  if (!shareNeedsGloss(share.locale)) {
+    await updateShare(token, finalizeShareWithoutGloss);
+    return;
+  }
   const targets = (share.segments || [])
     .slice(0, getSettings().share.glossLimit)
     .map((segment, index) => ({ index, segment }))
@@ -605,7 +627,7 @@ function importStatistics(candidates) {
     review: candidates.filter((item) => item.decision === "review").length,
     excluded: candidates.filter((item) => item.decision === "excluded").length,
     existing: candidates.filter((item) => item.existing).length,
-    locales: Object.fromEntries(Object.keys(LOCALES).map((locale) => [locale, candidates.filter((item) => item.locale === locale).length]))
+    locales: Object.fromEntries(ACTIVE_LOCALES.map((locale) => [locale, candidates.filter((item) => item.locale === locale).length]))
   };
 }
 
@@ -687,11 +709,11 @@ function markExistingTermCandidates(candidates, assetsByLocale) {
 }
 
 async function previewTermImport(body, onProgress = () => {}) {
-  onProgress({ phase: "structure", message: "正在解析表格并识别中外文列", percent: 5, completed: 0, total: 1 });
+  onProgress({ phase: "structure", message: "正在解析表格并识别日语列与简体中文列", percent: 5, completed: 0, total: 1 });
   const useModel = body.useModel !== false;
   const analyzeStructure = useModel ? (snapshot, requestedLocale) => analyzeTermTableStructureWithModel(snapshot, requestedLocale) : undefined;
   const extracted = await extractTermPairs(body, { analyzeStructure });
-  onProgress({ phase: "assets", message: "正在读取四个独立术语库", percent: 24, completed: 1, total: 1 });
+  onProgress({ phase: "assets", message: "正在读取简体中文术语库", percent: 24, completed: 1, total: 1 });
   let candidates = extracted.candidates.map((candidate) => classifyImportCandidate({ ...candidate, sourceFile: body.filename || "" }));
   const assetsByLocale = {};
   const locales = [...new Set(candidates.map((candidate) => candidate.locale))];
@@ -708,7 +730,7 @@ async function previewTermImport(body, onProgress = () => {}) {
       return batches;
     });
     let completed = 0;
-    onProgress({ phase: "ai-cleaning", message: `AI 五路并发清洗：0 / ${groups.length} 批`, percent: groups.length ? 30 : 86, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
+    onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：0 / ${groups.length} 批`, percent: groups.length ? 30 : 86, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
     const results = await runTaskPool(groups, async ({ locale, indexes }) => {
       const result = await reviewCandidateGroup(locale, indexes.map(({ candidate }) => candidate));
       indexes.forEach(({ index }, localIndex) => { candidates[index] = result.candidates[localIndex]; });
@@ -718,7 +740,7 @@ async function previewTermImport(body, onProgress = () => {}) {
       onSettled: () => {
         completed += 1;
         const percent = groups.length ? 30 + Math.round((completed / groups.length) * 56) : 86;
-        onProgress({ phase: "ai-cleaning", message: `AI 五路并发清洗：${completed} / ${groups.length} 批`, percent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
+        onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：${completed} / ${groups.length} 批`, percent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
       }
     });
     const failures = [
@@ -768,7 +790,7 @@ async function commitTermImport(body, onProgress = null) {
       continue;
     }
     try {
-      const locale = assertLocale(candidate.locale);
+      const locale = assertActiveLocale(candidate.locale);
       const source = String(candidate.source || "").trim();
       const target = String(candidate.target || "").trim();
       if (!source || !target) throw new Error("源词或译法为空");
@@ -898,27 +920,27 @@ async function commitTermImport(body, onProgress = null) {
 
 async function apiHandler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/health") {
-    return json(res, 200, { ok: true, version: "0.7.0", locales: Object.keys(LOCALES), backend: getStoreMetadata() });
+    return json(res, 200, { ok: true, version: "0.7.0", locales: ACTIVE_LOCALES, backend: getStoreMetadata() });
   }
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
     const assets = {};
-    for (const locale of Object.keys(LOCALES)) {
+    for (const locale of ACTIVE_LOCALES) {
       const stats = await getAssetStats(locale);
       assets[locale] = { revision: stats.revision, termCount: stats.termCount };
     }
-    return json(res, 200, { locales: LOCALES, contentTypes: CONTENT_TYPES, contentTags: CONTENT_TAGS, provider: getProviderConfig(), backend: getStoreMetadata(), assets });
+    return json(res, 200, { locales: Object.fromEntries(ACTIVE_LOCALES.map((locale) => [locale, LOCALES[locale]])), contentTypes: CONTENT_TYPES, contentTags: CONTENT_TAGS, provider: getProviderConfig(), backend: getStoreMetadata(), assets });
   }
   if (req.method === "GET" && url.pathname === "/api/assets") {
-    const locale = assertLocale(url.searchParams.get("locale"));
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
     return json(res, 200, await getAssets(locale));
   }
   if (req.method === "POST" && url.pathname === "/api/assets") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     return json(res, 201, await saveAsset(locale, body.term || {}));
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/assets/")) {
-    const locale = assertLocale(url.searchParams.get("locale"));
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
     const id = decodeURIComponent(url.pathname.slice("/api/assets/".length));
     const deleted = await deleteAsset(locale, id);
     return json(res, deleted ? 200 : 404, { deleted });
@@ -926,7 +948,7 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/learning/conflict-scan") {
     const body = await readJsonBody(req);
     const scope = learningScope({
-      locale: assertLocale(body.locale),
+      locale: assertActiveLocale(body.locale),
       contentType: body.contentType || "general",
       domain: body.domain || "game",
       project: body.project || "default"
@@ -938,7 +960,7 @@ async function apiHandler(req, res, url) {
     // 技能规则须经配对评测晋升，译者画像走草稿流程，两者都不从这里绕过去。
     const body = await readJsonBody(req);
     const scope = learningScope({
-      locale: assertLocale(body.locale),
+      locale: assertActiveLocale(body.locale),
       contentType: body.contentType || "general",
       domain: body.domain || "game",
       project: body.project || "default"
@@ -959,7 +981,7 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/learning/conflict-scan") {
     const scope = learningScope({
-      locale: assertLocale(url.searchParams.get("locale")),
+      locale: assertActiveLocale(url.searchParams.get("locale")),
       contentType: url.searchParams.get("contentType") || "general",
       domain: url.searchParams.get("domain") || "game",
       project: url.searchParams.get("project") || "default"
@@ -971,7 +993,7 @@ async function apiHandler(req, res, url) {
       settings: getSettings(),
       groups: settingGroups(),
       titleBracketChoices: TITLE_BRACKET_CHOICES,
-      locales: Object.fromEntries(Object.entries(LOCALES).map(([locale, meta]) => [locale, meta.label])),
+      locales: Object.fromEntries(ACTIVE_LOCALES.map((locale) => [locale, LOCALES[locale].label])),
       environmentOverrides: environmentOverrides()
     });
   }
@@ -993,7 +1015,7 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/match") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     const assets = await getAssets(locale);
     return json(res, 200, {
       locale,
@@ -1012,11 +1034,13 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/term-import/preview") {
     const body = await readJsonBody(req);
+    const requestedLocale = body.locale === "auto" ? "auto" : assertActiveLocale(body.locale || "zh-CN");
+    const scopedBody = { ...body, locale: requestedLocale };
     const progressId = String(body.progressId || "").trim();
     const task = await createBackgroundTask({
       type: "term_import",
       title: String(body.filename || "术语导入表格").slice(0, 120),
-      locale: body.locale === "auto" ? "" : (body.locale || "")
+      locale: requestedLocale === "auto" ? "" : requestedLocale
     });
     let progressWrites = Promise.resolve();
     const progress = (update) => {
@@ -1024,7 +1048,7 @@ async function apiHandler(req, res, url) {
       progressWrites = progressWrites.then(() => updateBackgroundTaskProgress(task.id, { progress: update })).catch(() => {});
     };
     try {
-      const result = await previewTermImport(body, progress);
+      const result = await previewTermImport(scopedBody, progress);
       reportImportProgress(progressId, { status: "completed", phase: "completed", message: "识别与清洗完成", percent: 100 });
       await progressWrites;
       await updateBackgroundTaskProgress(task.id, {
@@ -1090,8 +1114,8 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/embedding/rebuild") {
     const body = await readJsonBody(req);
-    const locale = body.locale ? assertLocale(body.locale) : null;
-    const locales = locale ? [locale] : Object.keys(LOCALES);
+    const locale = body.locale ? assertActiveLocale(body.locale) : null;
+    const locales = locale ? [locale] : ACTIVE_LOCALES;
     const task = await createBackgroundTask({
       type: "embedding_rebuild",
       title: `Embedding 重建 · ${locale || "全部语言"}`,
@@ -1129,7 +1153,7 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/feedback/accept") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     const source = String(body.source || "").trim();
     const translation = String(body.translation || "").trim();
     if (!source || !translation) {
@@ -1237,7 +1261,7 @@ async function apiHandler(req, res, url) {
     return json(res, 201, { memory, demoted, evidence, qaCaseApproved, trajectory, termCandidateBatch, termCandidateWarning });
   }
   if (req.method === "GET" && url.pathname === "/api/style-profiles") {
-    const locale = assertLocale(url.searchParams.get("locale"));
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
     const status = String(url.searchParams.get("status") || "").trim() || null;
     const [profiles, evidence, qaRuns, learningRuns] = await Promise.all([
       listStyleProfiles(locale, status),
@@ -1364,7 +1388,7 @@ async function apiHandler(req, res, url) {
     return json(res, 200, rejected);
   }
   if (req.method === "GET" && url.pathname === "/api/qa-cases/pending") {
-    const locale = assertLocale(url.searchParams.get("locale"));
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
     return json(res, 200, await listPendingQaCases(locale));
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/qa-cases/") && url.pathname.endsWith("/approve")) {
@@ -1389,7 +1413,7 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/evolution/review") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     const result = await runEvolutionReview({
       locale,
       contentType: body.contentType || "general",
@@ -1404,7 +1428,7 @@ async function apiHandler(req, res, url) {
     return json(res, 200, result);
   }
   if (req.method === "GET" && url.pathname === "/api/learning") {
-    const locale = assertLocale(url.searchParams.get("locale"));
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
     const requestedScope = learningScope({
       locale,
       contentType: url.searchParams.get("contentType") || "general",
@@ -2031,19 +2055,21 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/batch/prepare") {
     const body = await readJsonBody(req);
-    const analyzeSpreadsheet = body.useAiStructure === false ? undefined : (snapshot, ruleAnalysis) => analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysis, body.locale || "ja-JP");
+    const locale = assertActiveLocale(body.locale || "zh-CN");
+    const analyzeSpreadsheet = body.useAiStructure === false ? undefined : (snapshot, ruleAnalysis) => analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysis, locale);
     const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet });
-    const { batchId } = await saveBatchRun({ ...prepared, locale: assertLocale(body.locale || "ja-JP"), contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments });
+    const { batchId } = await saveBatchRun({ ...prepared, locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments });
     return json(res, 200, { ...prepared, batchId });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
     const body = await readJsonBody(req);
-    const saved = await saveBatchRun(body);
+    const saved = await saveBatchRun({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") });
     return json(res, 200, saved);
   }
   if (req.method === "GET" && url.pathname === "/api/tasks") {
     const type = url.searchParams.get("type") || "";
-    const locale = url.searchParams.get("locale") || "";
+    const requestedLocale = url.searchParams.get("locale") || "";
+    const locale = requestedLocale ? assertActiveLocale(requestedLocale) : ACTIVE_LOCALES[0];
     const status = url.searchParams.get("status") || "";
     const search = url.searchParams.get("search") || "";
     const limit = Number(url.searchParams.get("limit")) || 200;
@@ -2059,14 +2085,14 @@ async function apiHandler(req, res, url) {
       status: share.status === "generating" ? "in_progress" : share.status === "failed" ? "needs_attention" : (share.feedbacks || []).some((feedback) => feedback.status === "pending") ? "review" : "completed",
       overallScore: null,
       totalSegments: Number(share.totalSegments) || share.segments.length,
-      completedSegments: Number(share.glossedSegments) || 0,
-      failedSegments: share.status === "failed" ? Math.max(0, (Number(share.totalSegments) || share.segments.length) - (Number(share.glossedSegments) || 0)) : 0,
+      completedSegments: shareNeedsGloss(share.locale) ? (Number(share.glossedSegments) || 0) : (Number(share.totalSegments) || share.segments.length),
+      failedSegments: shareNeedsGloss(share.locale) && share.status === "failed" ? Math.max(0, (Number(share.totalSegments) || share.segments.length) - (Number(share.glossedSegments) || 0)) : 0,
       qaPending: (share.feedbacks || []).filter((feedback) => feedback.status === "pending").length,
       sharePath: `/share/${share.token}`,
       createdAt: share.createdAt,
       updatedAt: share.updatedAt
-    })).filter((item) => (!locale || item.locale === locale) && (!status || item.status === status) && (!search || item.title.toLowerCase().includes(String(search).toLowerCase())));
-    const backgroundTasks = type === "batch" || type === "autoqa" || type === "share" ? [] : (await listBackgroundTasks({ locale, search, limit })).map((task) => ({
+    })).filter((item) => item.locale === locale && (!status || item.status === status) && (!search || item.title.toLowerCase().includes(String(search).toLowerCase())));
+    const backgroundTasks = type === "batch" || type === "autoqa" || type === "share" ? [] : (await listBackgroundTasks({ search, limit })).map((task) => ({
       id: task.id,
       type: "background",
       taskType: task.type,
@@ -2084,7 +2110,7 @@ async function apiHandler(req, res, url) {
       payload: task.payload || null,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt
-    })).filter((item) => (!status || item.status === status));
+    })).filter((item) => (!item.locale || item.locale === locale) && (!status || item.status === status));
     const merged = [...batches.map((item) => ({ ...item, type: "batch" })), ...qaTasks, ...shares, ...backgroundTasks]
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
       .slice(0, limit);
@@ -2098,6 +2124,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(run.locale);
     const task = await createBackgroundTask({ type: "batch_export", title: `导出 · ${run.filename}`, locale: run.locale });
     (async () => {
       try {
@@ -2163,6 +2190,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(run.locale);
     const [assets, qaRuns] = await Promise.all([
       getAssets(run.locale),
       getQaRuns(run.locale, { contentType: run.contentType, domain: run.domain, batchId: run.batchId, limit: 500 })
@@ -2192,11 +2220,12 @@ async function apiHandler(req, res, url) {
     return json(res, 200, { ...run, segments });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/export") {
-    return json(res, 200, await exportBatchDocument(await readJsonBody(req)));
+    const body = await readJsonBody(req);
+    return json(res, 200, await exportBatchDocument({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") }));
   }
   if (req.method === "POST" && url.pathname === "/api/qa/resolve") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     const source = String(body.source || "").trim();
     const translation = String(body.translation || "").trim();
     const action = String(body.action || "");
@@ -2327,7 +2356,7 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/qa") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     const assets = await getAssets(locale);
     const contentType = body.contentType || "general";
     const domain = concreteDomain(body.domain, { text: body.source || "", contentType });
@@ -2344,16 +2373,16 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/auto-qa") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     const source = String(body.source || "").trim();
     const translation = String(body.translation || "").trim();
     if (!source || !translation) {
-      const error = new Error("请同时提供中文原文与译文");
+      const error = new Error("请同时提供日语原文与简体中文译文");
       error.statusCode = 400;
       throw error;
     }
     const contentType = body.contentType || "general";
-    // 网页粘贴常带 HTML 标签：剥离后参与分析，但必须保留换行作为多语言段落边界。
+    // 网页粘贴常带 HTML 标签：剥离后参与分析，但必须保留换行作为多段文本边界。
     const stripTags = normalizeQaInputText;
     const tagsStripped = /<[^>]*>/u.test(source) || /<[^>]*>/u.test(translation);
     const cleanSource = stripTags(source);
@@ -2538,6 +2567,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(task.locale);
     const report = task.report || {};
     const reportSegments = Array.isArray(report.segments) ? report.segments : [];
     if (!reportSegments.length) {
@@ -2577,6 +2607,7 @@ async function apiHandler(req, res, url) {
       tagsStripped: Boolean(report.tagsStripped),
       fallbackReason: String(report.fallbackReason || "")
     };
+    const needsGloss = shareNeedsGloss(task.locale);
     const share = await saveShare({
       qaTaskId: id,
       filename: `Auto QA · ${task.title || "未命名质检"}`,
@@ -2585,16 +2616,16 @@ async function apiHandler(req, res, url) {
       domain: task.domain || "general",
       meta,
       segments,
-      status: "generating",
+      status: needsGloss ? "generating" : "ready",
       glossedSegments: 0,
       totalSegments: segments.length
     });
-    startShareGlossGeneration(share.token);
+    if (needsGloss) startShareGlossGeneration(share.token);
     return json(res, 200, {
       token: share.token,
       sharePath: `/share/${share.token}`,
       shareUrls: lanShareUrls(share.token),
-      status: "generating",
+      status: needsGloss ? "generating" : "ready",
       glossedSegments: 0,
       totalSegments: segments.length
     });
@@ -2607,6 +2638,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(task.locale);
     return json(res, 200, {
       task: {
         id: task.id, title: task.title, locale: task.locale, contentType: task.contentType, domain: task.domain,
@@ -2619,6 +2651,13 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/qa-tasks/")) {
     const id = decodeURIComponent(url.pathname.slice("/api/qa-tasks/".length));
+    const task = await getQaTask(id);
+    if (!task) {
+      const error = new Error("未找到该质检任务");
+      error.statusCode = 404;
+      throw error;
+    }
+    assertActiveLocale(task.locale);
     const deleted = await deleteQaTask(id);
     if (!deleted) {
       const error = new Error("未找到该质检任务");
@@ -2635,6 +2674,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(run.locale);
     const doneSegments = (run.segments || []).filter((segment) => segment.selected !== false && segment.status === "done" && segment.translation);
     if (!doneSegments.length) {
       const error = new Error("该任务还没有已完成的译文段落，无法分享");
@@ -2658,16 +2698,17 @@ async function apiHandler(req, res, url) {
       })),
       gloss: null
     }));
+    const needsGloss = shareNeedsGloss(run.locale);
     const share = await saveShare({
       batchId, filename: run.filename, locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general",
-      segments, status: "generating", glossedSegments: 0, totalSegments: segments.length
+      segments, status: needsGloss ? "generating" : "ready", glossedSegments: 0, totalSegments: segments.length
     });
-    startShareGlossGeneration(share.token);
+    if (needsGloss) startShareGlossGeneration(share.token);
     return json(res, 200, {
       token: share.token,
       sharePath: `/share/${share.token}`,
       shareUrls: lanShareUrls(share.token),
-      status: "generating",
+      status: needsGloss ? "generating" : "ready",
       glossedSegments: 0,
       totalSegments: segments.length
     });
@@ -2680,6 +2721,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(share.locale);
     return json(res, 200, {
       token: share.token,
       filename: share.filename,
@@ -2734,6 +2776,13 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/share/")) {
     const token = decodeURIComponent(url.pathname.slice("/api/share/".length));
+    const share = await getShare(token);
+    if (!share) {
+      const error = new Error("分享不存在或已删除");
+      error.statusCode = 404;
+      throw error;
+    }
+    assertActiveLocale(share.locale);
     const deleted = await deleteShare(token);
     if (!deleted) {
       const error = new Error("分享不存在或已删除");
@@ -2750,6 +2799,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(share.locale);
     const body = await readJsonBody(req);
     const segmentIndex = Number(body.segmentIndex);
     const segment = (share.segments || []).find((item) => item.index === segmentIndex);
@@ -2783,6 +2833,7 @@ async function apiHandler(req, res, url) {
     const shares = await listShares({});
     const pending = [];
     for (const share of shares) {
+      if (!ACTIVE_LOCALES.includes(share.locale)) continue;
       for (const feedback of share.feedbacks || []) {
         if (feedback.status !== "pending") continue;
         pending.push(feedbackEntry(share, feedback));
@@ -2796,6 +2847,7 @@ async function apiHandler(req, res, url) {
     const shares = await listShares({});
     const entries = [];
     for (const share of shares) {
+      if (!ACTIVE_LOCALES.includes(share.locale)) continue;
       for (const feedback of share.feedbacks || []) {
         if (status && feedback.status !== status) continue;
         entries.push(feedbackEntry(share, feedback));
@@ -2807,7 +2859,7 @@ async function apiHandler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/shares") {
     const batchId = url.searchParams.get("batchId") || "";
     const qaTaskId = url.searchParams.get("qaTaskId") || "";
-    const shares = await listShares({ batchId, qaTaskId });
+    const shares = (await listShares({ batchId, qaTaskId })).filter((share) => ACTIVE_LOCALES.includes(share.locale));
     return json(res, 200, shares.map((share) => ({
       token: share.token,
       batchId: share.batchId,
@@ -2831,6 +2883,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    assertActiveLocale(share.locale);
     const body = await readJsonBody(req);
     const feedbackId = String(body.feedbackId || "");
     const action = body.action === "adopt" ? "adopt" : body.action === "ignore" ? "ignore" : "";
@@ -2899,9 +2952,9 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/translate") {
     const body = await readJsonBody(req);
-    const locale = assertLocale(body.locale);
+    const locale = assertActiveLocale(body.locale);
     if (!String(body.source || "").trim()) {
-      const error = new Error("请输入中文原文");
+      const error = new Error("请输入日语原文");
       error.statusCode = 400;
       throw error;
     }
@@ -3353,7 +3406,7 @@ function rescheduleConflictScan() {
   if (!minutes) return;
   conflictScanTimer = setInterval(async () => {
     try {
-      for (const locale of Object.keys(LOCALES)) {
+      for (const locale of ACTIVE_LOCALES) {
         const { styleProfiles } = await listStyleProfiles(locale, "active");
         for (const profile of styleProfiles) {
           await conflictScanner.scan(learningScope({

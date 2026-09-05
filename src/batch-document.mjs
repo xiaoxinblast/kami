@@ -143,8 +143,7 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
       for (const columnNumber of sourceColumns) {
         const cell = row.getCell(columnNumber);
         const source = excelCellText(cell);
-        if (!source || !/[\p{Script=Han}]/u.test(source)) continue;
-        if (/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u.test(source)) continue;
+        if (!source) continue;
         const column = roles.get(columnNumber);
         const context = {
           sheet: worksheet.name,
@@ -208,7 +207,7 @@ export async function prepareBatchDocument(input = {}, options = {}) {
     prepared = await prepareCsv(buffer, segmentationMode, options.analyzeSpreadsheet);
   } else if (extension === ".xliff" || extension === ".mqxliff") prepared = prepareXliffDocument(decodeBase64(input.base64), filename);
   else prepared = await prepareXlsx(decodeBase64(input.base64), segmentationMode, options.analyzeSpreadsheet);
-  if (!prepared.segments.length) fail("没有找到可翻译的中文内容");
+  if (!prepared.segments.length) fail("没有找到可翻译的日语内容");
   return {
     filename,
     segmentationMode,
@@ -246,7 +245,7 @@ export async function exportBatchDocument(input = {}) {
     const worksheet = workbook.addWorksheet("翻译任务");
     worksheet.columns = [
       { header: "序号", key: "index", width: 9 },
-      { header: "中文原文", key: "source", width: 54 },
+      { header: "日语原文", key: "source", width: 54 },
       { header: "译文", key: "translation", width: 54 },
       { header: "状态", key: "status", width: 14 },
       { header: "AIQA 分数", key: "score", width: 13 },

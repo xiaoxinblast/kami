@@ -33,7 +33,7 @@
           <div class="page-heading">
             <p class="eyebrow" id="viewEyebrow">TRANSLATION</p>
             <h1 id="viewTitle">翻译</h1>
-            <p class="page-description" id="viewDescription">按目标语言调用独立术语库，并自动识别语体。</p>
+            <p class="page-description" id="viewDescription">使用日语→简体中文专属术语库，并自动识别语体。</p>
           </div>
           <div class="command-dock" aria-label="页面操作">
             <div class="system-actions">
@@ -43,7 +43,7 @@
                 </button>
                 <span class="feedback-bell-badge" id="feedbackBellBadge" hidden>0</span>
               </div>
-              <a class="text-action" id="openAdmin" href="http://127.0.0.1:8055/admin/content/terms_ja_jp" target="_blank" rel="noreferrer">Directus 后台</a>
+              <a class="text-action" id="openAdmin" href="http://127.0.0.1:8055/admin/content/terms_zh_cn" target="_blank" rel="noreferrer">Directus 后台</a>
               <button class="text-action" id="openProvider">模型设置</button><button class="text-action" id="openSettings" type="button">参数设置</button>
             </div>
             <span class="command-divider"></span>
@@ -54,7 +54,7 @@
         </header>
 
         <section class="view active" id="view-workbench">
-          <div class="locale-strip" id="workbenchLocales" aria-label="目标语言"></div>
+          <div class="locale-strip" id="workbenchLocales" aria-label="固定目标语言：简体中文"></div>
           <div class="translation-mode-switch" aria-label="翻译模式">
             <button class="translation-mode active" data-translation-mode="single"><span>单句输入</span><small>手动输入即时处理</small></button>
             <button class="translation-mode" data-translation-mode="batch"><span>粘贴 / 文件翻译</span><small>自动分句与合并导出</small></button>
@@ -68,12 +68,12 @@
           <div id="singleWorkspace">
           <div class="translation-grid">
             <article class="editor-card source-card">
-              <div class="card-head"><div><span class="card-kicker">SOURCE · ZH-CN</span><h2>中文原文</h2></div><span class="count" id="sourceCount">0 字</span></div>
-              <textarea id="sourceText" placeholder="手动输入单句；粘贴文本会自动切换到分句队列……">全新高级通行证现已登场！</textarea>
+              <div class="card-head"><div><span class="card-kicker">SOURCE · JA-JP</span><h2>日语原文</h2></div><span class="count" id="sourceCount">0 字</span></div>
+              <textarea id="sourceText" placeholder="手动输入日语单句；粘贴文本会自动切换到分句队列……">新しいプレミアムパスが登場！</textarea>
               <label class="context-field" for="neighborContext"><span>可选上下文</span><input id="neighborContext" placeholder="活动背景、角色关系或上一段内容" /></label>
             </article>
             <article class="editor-card target-card">
-              <div class="card-head"><div><span class="card-kicker" id="targetKicker">TARGET · JA-JP</span><h2 id="targetTitle">日本語译文</h2></div><div class="target-status"><span class="term-legends" id="targetLegend" hidden><span class="term-legend official" id="officialLegend"><i></i><span id="officialCount">0 处正式术语</span></span><span class="term-legend suggestion" id="suggestionLegend"><i></i><span id="suggestionCount">0 处疑似术语</span></span></span><button class="button ghost small" id="toggleTargetEdit" hidden>编辑译文</button><button class="button ghost small" id="sendToAutoQa" hidden>转 Auto QA</button><button class="button ghost small" id="acceptTranslation" disabled>采纳为正式译法</button><span class="badge neutral" id="translationState">等待翻译</span></div></div>
+              <div class="card-head"><div><span class="card-kicker" id="targetKicker">TARGET · ZH-CN</span><h2 id="targetTitle">简体中文译文</h2></div><div class="target-status"><span class="term-legends" id="targetLegend" hidden><span class="term-legend official" id="officialLegend"><i></i><span id="officialCount">0 处正式术语</span></span><span class="term-legend suggestion" id="suggestionLegend"><i></i><span id="suggestionCount">0 处疑似术语</span></span></span><button class="button ghost small" id="toggleTargetEdit" hidden>编辑译文</button><button class="button ghost small" id="sendToAutoQa" hidden>转 Auto QA</button><button class="button ghost small" id="acceptTranslation" disabled>采纳为正式译法</button><span class="badge neutral" id="translationState">等待翻译</span></div></div>
               <div class="target-output empty" id="targetOutput">译文将在这里显示</div>
               <div class="translation-candidates" id="translationCandidates" hidden></div>
             </article>
@@ -128,12 +128,12 @@
           </div>
           <div class="translation-grid autoqa-grid">
             <article class="editor-card source-card">
-              <div class="card-head"><div><span class="card-kicker">SOURCE · ZH-CN</span><h2>中文原文</h2></div><span class="count" id="autoQaSourceCount">0 字</span></div>
-              <textarea id="autoQaSource" placeholder="粘贴中文原文，例如：全新高级通行证现已登场！"></textarea>
+              <div class="card-head"><div><span class="card-kicker">SOURCE · JA-JP</span><h2>日语原文</h2></div><span class="count" id="autoQaSourceCount">0 字</span></div>
+              <textarea id="autoQaSource" placeholder="粘贴日语原文，例如：新しいプレミアムパスが登場！"></textarea>
             </article>
             <article class="editor-card target-card">
-              <div class="card-head"><div><span class="card-kicker" id="autoQaTargetKicker">TARGET · JA-JP</span><h2 id="autoQaTargetTitle">日本語译文</h2></div><span class="badge neutral" id="autoQaState">等待质检</span></div>
-              <textarea id="autoQaTarget" placeholder="粘贴目标语言译文，Ctrl + Enter 运行质检"></textarea>
+              <div class="card-head"><div><span class="card-kicker" id="autoQaTargetKicker">TARGET · ZH-CN</span><h2 id="autoQaTargetTitle">简体中文译文</h2></div><span class="badge neutral" id="autoQaState">等待质检</span></div>
+              <textarea id="autoQaTarget" placeholder="粘贴简体中文译文，Ctrl + Enter 运行质检"></textarea>
             </article>
           </div>
           <article class="panel autoqa-report" id="autoQaReport" hidden>
@@ -147,7 +147,7 @@
             <div class="panel-head"><div><span class="card-kicker">PERSISTENT WORK QUEUE</span><h2>历史翻译任务</h2></div><div class="asset-count" id="taskCount">0 个任务</div></div>
             <div class="task-toolbar">
               <label><span>任务类型</span><select id="taskType"><option value="">全部类型</option><option value="batch">翻译批次</option><option value="autoqa">Auto QA 报告</option><option value="share">分享验证</option><option value="background">后台任务</option></select></label>
-              <label><span>目标语言</span><select id="taskLocale"><option value="">全部语言</option></select></label>
+              <label><span>语言对</span><select id="taskLocale"><option value="zh-CN">日语→简体中文</option></select></label>
               <label><span>任务状态</span><select id="taskStatus"><option value="">全部状态</option><option value="in_progress">进行中</option><option value="review">QA 待处理</option><option value="needs_attention">存在失败</option><option value="completed">已完成</option></select></label>
               <label class="task-search"><span>搜索任务</span><input id="taskSearch" placeholder="文件名或任务名称" /></label>
               <button class="button secondary" id="refreshTasks">刷新列表</button>
@@ -175,13 +175,13 @@
           </div>
           <div class="smart-import-entry">
             <article class="panel upload-panel smart-upload-panel">
-              <span class="card-kicker">01 · DROP FILE</span><h2>上传中外文表格</h2>
+              <span class="card-kicker">01 · DROP FILE</span><h2>上传日语与简体中文对照表</h2>
               <label class="drop-zone" id="dropZone" for="termFile">
                 <input id="termFile" type="file" accept=".xlsx,.csv" hidden />
-                <span class="upload-mark">↑</span><strong id="filePrompt">拖入或点击选择 .xlsx / .csv</strong><small id="fileMeta">拖入后自动识别；不要求表头，支持日、韩、繁中、法、泰列</small>
+                <span class="upload-mark">↑</span><strong id="filePrompt">拖入或点击选择 .xlsx / .csv</strong><small id="fileMeta">拖入后自动识别；不要求表头，支持日语列与简体中文列</small>
               </label>
               <div class="smart-import-capabilities" aria-label="自动识别能力">
-                <div><span>01</span><strong>识别表格结构</strong><small>无表头也能找到中外文列，排除位置、DDL 和字符限制。</small></div>
+                <div><span>01</span><strong>识别表格结构</strong><small>无表头也能找到日语列与简体中文列，排除位置、DDL 和字符限制。</small></div>
                 <div><span>02</span><strong>逐条分流资产</strong><small>短术语进入术语库；完整句段进入翻译记忆和风格证据池。</small></div>
                 <div><span>03</span><strong>自动确定规则</strong><small>识别语体、领域与强制/优先级；异常项才留给人工确认。</small></div>
               </div>
@@ -203,10 +203,10 @@
               <button class="import-candidate-tab" id="importStylesTab" type="button" role="tab" aria-selected="false" aria-controls="importStylesPane" data-import-candidate-tab="styles"><strong>完整译例与风格证据</strong><small>保留整句对照，用于翻译记忆与风格学习</small></button>
             </div>
             <div class="import-candidate-pane active" id="importTermsPane" role="tabpanel" aria-labelledby="importTermsTab">
-              <div class="import-pane-head"><div><strong>术语资产审核</strong><small>句内提取项会标明来源行；确认后写入对应目标语言术语库。</small></div><div class="summary-chips" id="termImportSummary"><span>0 条术语</span></div></div>
+              <div class="import-pane-head"><div><strong>术语资产审核</strong><small>句内提取项会标明来源行；确认后写入日语→简体中文术语库。</small></div><div class="summary-chips" id="termImportSummary"><span>0 条术语</span></div></div>
               <div class="candidate-table-wrap">
                 <table class="candidate-table term-candidate-table">
-                  <thead><tr><th class="check-cell"><input id="selectAllTermCandidates" type="checkbox" aria-label="选择全部术语候选" /></th><th>目标语言 / 来源</th><th>中文术语</th><th>正式译法</th><th>入库判断</th><th>提取依据</th></tr></thead>
+                  <thead><tr><th class="check-cell"><input id="selectAllTermCandidates" type="checkbox" aria-label="选择全部术语候选" /></th><th>日中对照 / 来源</th><th>日语术语</th><th>简体中文译法</th><th>入库判断</th><th>提取依据</th></tr></thead>
                   <tbody id="termImportCandidates"><tr><td colspan="6" class="table-empty">还没有术语候选</td></tr></tbody>
                 </table>
               </div>
@@ -215,7 +215,7 @@
               <div class="import-pane-head"><div><strong>完整译例与风格证据审核</strong><small>完整句段不会冒充术语；确认后进入翻译记忆，并参与本批风格浓缩。</small></div><div class="summary-chips" id="styleImportSummary"><span>0 条译例</span></div></div>
               <div class="candidate-table-wrap">
                 <table class="candidate-table style-candidate-table">
-                  <thead><tr><th class="check-cell"><input id="selectAllStyleCandidates" type="checkbox" aria-label="选择全部完整译例" /></th><th>目标语言 / 风格范围</th><th>中文完整句段</th><th>对齐译文</th><th>入库判断</th><th>风格信号</th></tr></thead>
+                  <thead><tr><th class="check-cell"><input id="selectAllStyleCandidates" type="checkbox" aria-label="选择全部完整译例" /></th><th>日中对照 / 风格范围</th><th>日语完整句段</th><th>简体中文译文</th><th>入库判断</th><th>风格信号</th></tr></thead>
                   <tbody id="styleImportCandidates"><tr><td colspan="6" class="table-empty">还没有完整译例</td></tr></tbody>
                 </table>
               </div>
@@ -230,20 +230,20 @@
         <section class="view" id="view-assets">
           <div class="locale-strip" id="assetLocales" aria-label="资产语言"></div>
           <article class="panel asset-list-panel">
-            <div class="panel-head"><div><span class="card-kicker">PHYSICALLY ISOLATED COLLECTION</span><h2 id="assetListTitle">日本語术语库</h2></div><div class="asset-count" id="assetRevision">0 条</div></div>
-            <div class="asset-search"><input id="assetSearch" placeholder="搜索中文源词、正式译法或别名" /></div>
+            <div class="panel-head"><div><span class="card-kicker">PHYSICALLY ISOLATED COLLECTION</span><h2 id="assetListTitle">简体中文术语库</h2></div><div class="asset-count" id="assetRevision">0 条</div></div>
+            <div class="asset-search"><input id="assetSearch" placeholder="搜索日语源词、正式译法或别名" /></div>
             <div class="asset-list" id="assetList"></div>
-            <p class="isolation-note">当前列表只读取所选目标语言的物理表；其他四套术语不会混入匹配或写入流程。</p>
+            <p class="isolation-note">当前列表只读取日语→简体中文的物理术语表；历史语言资产不会混入匹配或写入流程。</p>
           </article>
         </section>
 
         <section class="view" id="view-styles">
           <div class="locale-strip" id="styleLocales" aria-label="风格语言"></div>
           <article class="panel style-guidance-panel">
-            <div class="panel-head"><div><span class="card-kicker">STYLE GUIDANCE LIBRARY</span><h2 id="styleGuidanceTitle">日本語翻译风格指导</h2></div><div class="asset-count" id="styleGuidanceCount">0 条规则</div></div>
+            <div class="panel-head"><div><span class="card-kicker">STYLE GUIDANCE LIBRARY</span><h2 id="styleGuidanceTitle">简体中文翻译风格指导</h2></div><div class="asset-count" id="styleGuidanceCount">0 条规则</div></div>
             <div class="style-explainer">
               <div><span>01</span><strong>收集同类双语句段</strong><small>表格导入的完整译例、人工采纳译文和 AIQA 复盘分别记账；短术语不会冒充风格。</small></div>
-              <div><span>02</span><strong>按语言 × 语体 × 领域精炼</strong><small>同一分类累计 8 条风格证据后生成草稿，日韩繁法泰互不混用。</small></div>
+              <div><span>02</span><strong>按语体 × 领域精炼</strong><small>同一分类累计 8 条日中风格证据后生成草稿。</small></div>
               <div><span>03</span><strong>人工启用后才生效</strong><small>待启用只是候选规则；只有已启用版本才会进入后续翻译提示。</small></div>
             </div>
             <div class="style-filter-row"><label><span>状态</span><select id="styleStatus"><option value="">全部</option><option value="active">已启用</option><option value="inactive">已关闭</option><option value="draft">待启用</option></select></label><button class="button secondary" id="refreshStyles">刷新风格</button></div>
@@ -269,7 +269,7 @@
         <section class="view" id="view-learning">
           <div class="locale-strip" id="learningLocales" aria-label="学习资产语言"></div>
           <div class="learning-scope-bar">
-            <div><span class="card-kicker">SKILL SCOPE</span><strong>当前学习范围</strong><small>每种目标语言严格隔离；候选技能只在同一语体与领域中对比。</small></div>
+            <div><span class="card-kicker">SKILL SCOPE</span><strong>当前学习范围</strong><small>固定为日语→简体中文；候选技能只在同一语体与领域中对比。</small></div>
             <label><span>内容语体</span><select id="learningContentType"><option value="general">通用内容</option></select></label>
             <label><span>业务领域</span><select id="learningDomain"><option value="game">游戏</option><option value="general">通用</option><option value="marketing">市场营销</option><option value="community">社区运营</option></select></label>
           </div>
@@ -387,9 +387,9 @@
       <form class="dialog-card" id="assetForm">
         <div class="dialog-head"><div><span class="card-kicker">SINGLE TERM</span><h2>新增单条术语</h2></div><button class="icon-button" type="button" data-close="assetDialog" aria-label="关闭">×</button></div>
         <div class="form-grid">
-          <label><span>中文源词</span><input name="source" required /></label>
-          <label><span id="targetTermLabel">日本語正式译法</span><input name="target" required /></label>
-          <label><span>中文别名</span><input name="aliases" placeholder="用逗号分隔" /></label>
+          <label><span>日语源词</span><input name="source" required /></label>
+          <label><span id="targetTermLabel">简体中文正式译法</span><input name="target" required /></label>
+          <label><span>日语别名</span><input name="aliases" placeholder="用逗号分隔" /></label>
           <label><span>禁用译法</span><input name="forbidden" placeholder="用逗号分隔" /></label>
           <label><span>适用语体</span><select name="contentType"></select></label>
           <label><span>约束级别</span><select name="enforcement"><option value="required">强制采用</option><option value="preferred">优先参考</option></select></label>

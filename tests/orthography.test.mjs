@@ -47,6 +47,13 @@ test("日语允许【】但不接受中文书名号", () => {
   assert.ok(wrong.some((issue) => issue.character === "《"));
 });
 
+test("简体中文保留顿号并拒绝日式引号", () => {
+  const valid = checkOrthography({ source: "お知らせ", translation: "第一、第二、第三", locale: "zh-CN" });
+  assert.equal(valid.some((issue) => issue.character === "、"), false);
+  const issues = checkOrthography({ source: "お知らせ", translation: "「新作」", locale: "zh-CN" });
+  assert.ok(issues.some((issue) => issue.character === "「"));
+});
+
 test("原文没有标作品名时不误判普通括号", () => {
   const issues = checkOrthography({ source: "实机演示", translation: "〈실제 플레이〉", locale: "ko-KR" });
   assert.equal(issues.filter((issue) => issue.type === "orthography_title_bracket").length, 0);

@@ -2,6 +2,7 @@ const token = decodeURIComponent(location.pathname.replace(/^\/share\/?/, ""));
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 let shareStatus = "ready";
+let shareLocale = "";
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -100,7 +101,7 @@ function renderSegment(segment, modelIncomplete = false, feedbacks = []) {
     ? `<span class="autoqa-segment-score ${scoreTone(segment.qaScore)}">QA ${segment.qaScore}</span>`
     : "";
   const badges = dimensionBadges(segment.dimensionScores, modelIncomplete);
-  const gloss = segment.gloss?.tokens?.length
+  const gloss = shareLocale === "zh-CN" ? "" : segment.gloss?.tokens?.length
     ? `<div class="share-gloss">
         ${segment.gloss.approximate ? '<p class="share-gloss-note">⚠️ 拆解为模型近似切分，仅供参考。</p>' : ""}
         <div class="share-gloss-tokens">${segment.gloss.tokens.map((tokenItem) =>
@@ -127,7 +128,7 @@ function renderSegment(segment, modelIncomplete = false, feedbacks = []) {
   return `<article class="share-segment" data-segment-index="${segment.index}">
     <div class="share-segment-head"><span class="share-segment-index">第 ${segment.index} 段</span>${qa}<span class="share-segment-badges">${badges}</span>${segment.locator ? `<span class="share-segment-locator">${escapeHtml(segment.locator)}</span>` : ""}</div>
     <div class="autoqa-segment-pair share-pair">
-      <div><span>原文（简体中文）</span><p>${escapeHtml(segment.source)}</p></div>
+      <div><span>原文（日语）</span><p>${escapeHtml(segment.source)}</p></div>
       <div><span>译文</span><p>${escapeHtml(segment.translation)}</p></div>
     </div>
     ${gloss}
@@ -202,6 +203,7 @@ async function initialize() {
   try {
     const [payload, bootstrap] = await Promise.all([api(`/api/share/${encodeURIComponent(token)}`), api("/api/bootstrap")]);
     shareStatus = payload.status || "ready";
+    shareLocale = payload.locale || "";
     const locale = bootstrap.locales?.[payload.locale];
     document.title = `${payload.filename} · Kami 分享验证`;
     $("#shareTitle").textContent = payload.filename;

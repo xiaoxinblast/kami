@@ -50,8 +50,8 @@ function fallbackBatchLearning(examples, contentType) {
   return {
     summary: `本批已收集 ${examples.length} 组${contentType === "dialogue" ? "剧情对白" : "同类"}双语证据，主要呈现短句节奏、称谓关系与语气对应；正式规则仍需结合更多证据或模型复核。`,
     rules: [
-      { category: "长度与节奏", observation: `中文平均 ${sourceAverage.toFixed(1)} 字，目标译文平均 ${targetAverage.toFixed(1)} 字`, guidance: "后续翻译优先保持信息密度与停顿节奏，不机械追求逐字等长。", confidence: 0.55 },
-      { category: "标点与语气", observation: `${hasDialoguePunctuation}/${examples.length} 条中文证据包含对话停顿或句末标点`, guidance: "依据角色语气保留停顿与情绪强度，并遵循目标语言自然标点。", confidence: 0.5 }
+      { category: "长度与节奏", observation: `日语平均 ${sourceAverage.toFixed(1)} 字，简体中文译文平均 ${targetAverage.toFixed(1)} 字`, guidance: "后续翻译优先保持信息密度与停顿节奏，不机械追求逐字等长。", confidence: 0.55 },
+      { category: "标点与语气", observation: `${hasDialoguePunctuation}/${examples.length} 条日语证据包含对话停顿或句末标点`, guidance: "依据角色语气保留停顿与情绪强度，并遵循简体中文自然标点。", confidence: 0.5 }
     ],
     examples: examples.slice(0, 3).map((item) => ({ type: "positive", source: item.source, target: item.target, reason: "本批已对齐译例" })),
     caveat: "模型浓缩暂不可用，本记录由本地统计生成，仅作为可见学习记录，不直接启用。",

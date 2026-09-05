@@ -63,6 +63,7 @@ export const SETTING_SPECS = Object.freeze({
 export const TITLE_BRACKET_CHOICES = Object.freeze(["", "《》", "「」", "『』", "〈〉", "«»"]);
 
 const TITLE_BRACKET_DEFAULTS = Object.freeze({
+  "zh-CN": "《》",
   "ja-JP": "『』",
   "ko-KR": "《》",
   "zh-Hant-TW": "《》",

@@ -6,11 +6,11 @@ const state = {
   bootstrap: null,
   serverVersion: "0.0.0",
   view: "workbench",
-  workbenchLocale: "ja-JP",
-  assetLocale: "ja-JP",
-  styleLocale: "ja-JP",
-  learningLocale: "ja-JP",
-  autoQaLocale: "ja-JP",
+  workbenchLocale: "zh-CN",
+  assetLocale: "zh-CN",
+  styleLocale: "zh-CN",
+  learningLocale: "zh-CN",
+  autoQaLocale: "zh-CN",
   learningData: null,
   learningLoading: false,
   learningSelectedSkillId: "",
@@ -130,12 +130,12 @@ function renderLocaleStrip(container, selected, onSelect) {
 function pageCopy(view) {
   if (view === "learning") return ["LEARNING CENTER", "学习中心", "将翻译轨迹沉淀为可评测、可批准、可回滚的翻译技能。"];
   return {
-    workbench: ["TRANSLATION", "翻译", "按目标语言调用独立术语库，并自动识别语体。"],
+    workbench: ["TRANSLATION", "翻译", "使用日语→简体中文专属术语库，并自动识别语体。"],
     autoqa: ["AUTO QA", "Auto QA", "逐句切分对齐后，按基本检查、语义忠实性（着重）与 nuance 一致性三层独立审查。"],
     feedback: ["FEEDBACK CENTER", "反馈中心", "同事在分享验证页提出的要求：逐条批准入风格或忽略。"],
-    tasks: ["TASK CENTER", "任务中心", "查看、恢复、审校并导出所有历史翻译任务。"],
-    import: ["TERM INGESTION", "术语导入", "只需拖入中外文表格，系统会自动分类并生成待确认结果。"],
-    assets: ["TERM ASSETS", "术语库", "查看五个物理隔离的目标语言术语集合。"],
+    tasks: ["TASK CENTER", "任务中心", "查看、恢复、审校并导出日语→简体中文翻译任务。"],
+    import: ["TERM INGESTION", "术语导入", "只需拖入日语与简体中文对照表，系统会自动分类并生成待确认结果。"],
+    assets: ["TERM ASSETS", "术语库", "查看日语→简体中文的物理隔离术语集合。"],
     styles: ["STYLE GUIDANCE", "风格指导", "查看并控制已沉淀的翻译风格规则。"]
   }[view];
 }
@@ -200,7 +200,7 @@ function refreshActions() {
     const payload = state.learningData?.data || state.learningData || {};
     const usableCount = state.learningData ? validLearningTrajectories(payload.trajectories || payload.evidence).length : 0;
     primary.disabled = state.learningLoading || !state.learningData || usableCount === 0;
-    if (!state.learningLoading && usableCount === 0) primary.title = "当前语言、语体与领域还没有带最终译文的完成或复核轨迹";
+    if (!state.learningLoading && usableCount === 0) primary.title = "当前日语→简体中文、语体与领域还没有带最终译文的完成或复核轨迹";
   }
 }
 
@@ -215,7 +215,7 @@ function setTranslationMode(mode) {
   $("#batchWorkspace").hidden = state.translationMode !== "batch";
   $("#viewDescription").textContent = state.translationMode === "batch"
     ? "上传长文或文件，自动分段、逐段审校并合并导出。"
-    : "按目标语言调用独立术语库，并自动识别语体。";
+    : "使用日语→简体中文专属术语库，并自动识别语体。";
   refreshActions();
 }
 
@@ -287,7 +287,7 @@ function renderMatches(matches) {
   $("#matchCount").textContent = `${matches.length} 条`;
   if (!matches.length) {
     $("#termMatches").className = "term-matches empty-list";
-    $("#termMatches").textContent = "当前语言库没有命中项";
+    $("#termMatches").textContent = "当前日语→简体中文术语库没有命中项";
     return;
   }
   $("#termMatches").className = "term-matches";
@@ -509,7 +509,7 @@ async function runAutoQa() {
   const source = $("#autoQaSource").value.trim();
   const translation = $("#autoQaTarget").value.trim();
   if (!source || !translation) {
-    toast("请同时填写中文原文与译文");
+    toast("请同时填写日语原文与简体中文译文");
     return;
   }
   setBusy(true, "Auto QA 质检中…");
@@ -902,7 +902,7 @@ function previewClassificationAndMatches() {
 
 async function translate() {
   const source = $("#sourceText").value.trim();
-  if (!source) return toast("请先输入中文原文");
+  if (!source) return toast("请先输入日语原文");
   setBusy(true, "翻译与审校中…");
   setTranslationStatus("warning", "处理中");
   try {
@@ -2256,10 +2256,10 @@ function renderAssets() {
     <div class="asset-row"><div class="asset-row-main"><strong>${escapeHtml(term.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(term.target)}</strong><div class="asset-meta"><span>${term.enforcement === "required" ? "强制" : "优先"}</span>${(term.contentTypes || []).map((type) => `<span>${escapeHtml(state.bootstrap.contentTypes[type]?.label || type)}</span>`).join("")}${(term.contentTags || []).map((tag) => `<span>${escapeHtml(Object.values(state.bootstrap.contentTags || {}).find((group) => group[tag])?.[tag] || tag)}</span>`).join("")}${term.provenance ? `<span>${escapeHtml(term.provenance)}</span>` : ""}</div></div><button class="delete-term" data-id="${term.id}" title="删除术语" aria-label="删除术语">×</button></div>
   `).join("") : '<div class="empty-list asset-empty">当前筛选没有术语</div>';
   $$(".delete-term").forEach((button) => button.addEventListener("click", async () => {
-    if (!confirm("确认从当前语言库删除这条术语？其他语言库不会受影响。")) return;
+    if (!confirm("确认从日语→简体中文术语库删除这条术语？")) return;
     await api(`/api/assets/${encodeURIComponent(button.dataset.id)}?locale=${encodeURIComponent(state.assetLocale)}`, { method: "DELETE" });
     await loadAssets(state.assetLocale);
-    toast("已从当前语言库删除");
+    toast("已从日语→简体中文术语库删除");
   }));
 }
 
@@ -2276,7 +2276,7 @@ async function setImportFile(file) {
   $("#filePrompt").textContent = file.name;
   $("#fileMeta").textContent = `${(file.size / 1024).toFixed(1)} KB · AI 正在识别表格结构`;
   $("#dropZone").classList.add("has-file");
-  $("#mappingNote").textContent = "正在自动识别中文列、目标语言列和无表头数据结构……";
+  $("#mappingNote").textContent = "正在自动识别日语列、简体中文列和无表头数据结构……";
   $("#importSummary").innerHTML = "<span>AI 结构识别中</span>";
   updateImportProgress({ message: "正在上传并解析表格", percent: 2 });
   $("#termImportSummary").innerHTML = "<span>等待术语识别</span>";
@@ -2299,7 +2299,7 @@ function resetImport() {
   state.importBatchLearning = [];
   $("#termFile").value = "";
   $("#filePrompt").textContent = "拖入或点击选择 .xlsx / .csv";
-  $("#fileMeta").textContent = "拖入后自动识别；不要求表头，支持日、韩、繁中、法、泰列";
+  $("#fileMeta").textContent = "拖入后自动识别；不要求表头，支持日语列与简体中文列";
   $("#dropZone").classList.remove("has-file");
   $("#mappingNote").textContent = "拖入表格后会自动识别结构并生成审核队列。";
   $("#importSummary").innerHTML = "<span>尚未清洗</span>";
@@ -3453,7 +3453,7 @@ async function cleanTable() {
     state.importPreview = result;
     state.importCompleted = false;
     state.importVisibleCount = { terms: 150, styles: 150 };
-    const mappings = result.sheets.map((sheet) => `${sheet.sheet}：中文列 ${sheet.sourceColumn}，目标列 ${Object.entries(sheet.targetColumns).map(([locale, column]) => `${state.bootstrap.locales[locale].shortLabel} ${column}`).join(" / ")}`).join("；");
+    const mappings = result.sheets.map((sheet) => `${sheet.sheet}：日语列 ${sheet.sourceColumn}，简体中文列 ${Object.entries(sheet.targetColumns).map(([locale, column]) => `${state.bootstrap.locales[locale].shortLabel} ${column}`).join(" / ")}`).join("；");
     const structureText = result.structureAnalysis?.used
       ? "AI 已识别列结构（支持无表头）"
       : result.structureAnalysis?.requested ? "AI 结构识别不可用，已回退本地整列推断" : "使用本地整列推断";
@@ -3493,7 +3493,7 @@ async function commitImport() {
     renderImportBatchLearning();
     const pendingStyles = (result.styleFallbacks || []).slice(0, 4).map((item) => `${state.bootstrap.locales[item.locale]?.shortLabel || item.locale} ${contentTypeLabel(item.contentType)} ${styleDistillProgress(item)}`).join("；");
     const learnedText = state.importBatchLearning.length ? `本批已形成 ${state.importBatchLearning.length} 个风格学习范围，具体内容见下方。` : "本批没有生成可展示的风格学习结果。";
-    $("#mappingNote").textContent = `批次已完成：写入术语 ${result.summary.terms || 0} 条、完整译例 / 风格证据 ${result.summary.memories || 0} 条、生成风格草稿 ${result.summary.styleProfiles || 0} 个，跳过 ${result.skipped.length} 条。${learnedText}${pendingStyles ? ` 尚在积累：${pendingStyles}。` : ""}所有资产均按目标语言与自动识别语体隔离。`;
+    $("#mappingNote").textContent = `批次已完成：写入术语 ${result.summary.terms || 0} 条、完整译例 / 风格证据 ${result.summary.memories || 0} 条、生成风格草稿 ${result.summary.styleProfiles || 0} 个，跳过 ${result.skipped.length} 条。${learnedText}${pendingStyles ? ` 尚在积累：${pendingStyles}。` : ""}所有资产均按日语→简体中文语言对与自动识别语体隔离。`;
     renderImportCandidates();
     await Promise.all([...new Set(result.imported.filter((item) => item.assetType === "term").map((item) => item.locale))].map((locale) => loadAssets(locale)));
     toast(`已导入 ${result.summary.terms || 0} 条术语和 ${result.summary.memories || 0} 条翻译记忆`);
@@ -3508,7 +3508,7 @@ function populateSelects() {
   $("#learningContentType").innerHTML = contentOptions;
   $("#autoQaContentType").insertAdjacentHTML("beforeend", contentOptions);
   if ([...$("#learningContentType").options].some((option) => option.value === "general")) $("#learningContentType").value = "general";
-  $("#taskLocale").insertAdjacentHTML("beforeend", Object.entries(state.bootstrap.locales).map(([locale, details]) => `<option value="${locale}">${details.label}</option>`).join(""));
+  $("#taskLocale").innerHTML = Object.entries(state.bootstrap.locales).map(([locale, details]) => `<option value="${locale}">日语→${details.label}</option>`).join("");
 }
 
 function bindEvents() {
@@ -3720,7 +3720,7 @@ async function initialize() {
     $("#providerLabel").textContent = `${state.bootstrap.provider.model} · ${new URL(state.bootstrap.provider.baseUrl).hostname}`;
     if (state.bootstrap.backend?.adminUrl) {
       $("#openAdmin").href = state.bootstrap.backend.adminUrl;
-      $("#openAdmin").title = `${state.bootstrap.backend.label} · 五语术语后台`;
+      $("#openAdmin").title = `${state.bootstrap.backend.label} · 日语→简体中文术语后台`;
     } else $("#openAdmin").hidden = true;
     populateSelects();
     renderLocaleStrip($("#workbenchLocales"), state.workbenchLocale, updateWorkbenchLocale);

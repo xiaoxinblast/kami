@@ -57,10 +57,10 @@ test("同一自然段可选择逐句或整段翻译", async () => {
 test("XLIFF 导入仅选择空且未锁定的 trans-unit，并在导出时恢复内联标签", async () => {
   const original = `<?xml version="1.0" encoding="UTF-8"?>
 <xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2"><file original="story"><body>
-<trans-unit id="u1"><source>你好 <ph id="p1">{player}</ph>！</source><context-group><context context-type="x-location">menu</context></context-group><note>主菜单问候</note></trans-unit>
-<trans-unit id="u2" translate="no"><source>固定文本</source><target>Locked</target></trans-unit>
-<trans-unit id="u3"><source><g id="g1">强调</g></source></trans-unit>
-<trans-unit id="u4"><source>已有文本</source><target>Existing</target></trans-unit>
+<trans-unit id="u1"><source>こんにちは <ph id="p1">{player}</ph>！</source><context-group><context context-type="x-location">menu</context></context-group><note>主菜单问候</note></trans-unit>
+<trans-unit id="u2" translate="no"><source>固定文</source><target>已锁定</target></trans-unit>
+<trans-unit id="u3"><source><g id="g1">強調</g></source></trans-unit>
+<trans-unit id="u4"><source>既存テキスト</source><target>已有译文</target></trans-unit>
 </body></file></xliff>`;
   const prepared = await prepareBatchDocument({ filename: "story.xliff", base64: Buffer.from(original, "utf8").toString("base64") });
   assert.equal(prepared.format, "xliff");
@@ -71,27 +71,27 @@ test("XLIFF 导入仅选择空且未锁定的 trans-unit，并在导出时恢复
 
   const translated = prepared.segments.map((segment) => ({
     ...segment,
-    translation: segment.source.replace("你好", "Hello").replace("强调", "Highlight")
+    translation: segment.source.replace("こんにちは", "你好").replace("強調", "强调")
   }));
   const exported = await exportBatchDocument({
     filename: prepared.filename,
-    locale: "en-US",
+    locale: "zh-CN",
     format: prepared.format,
     structure: prepared.structure,
     base64: Buffer.from(original, "utf8").toString("base64"),
     segments: translated
   });
   const output = Buffer.from(exported.base64, "base64").toString("utf8");
-  assert.equal(exported.filename, "story.en-US.xliff");
-  assert.match(output, /<target xml:space="preserve">Hello <ph id="p1">\{player\}<\/ph>！<\/target>/);
-  assert.match(output, /<target xml:space="preserve"><g id="g1">Highlight<\/g><\/target>/);
-  assert.match(output, /<trans-unit id="u2" translate="no"><source>固定文本<\/source><target>Locked<\/target>/);
-  assert.match(output, /<trans-unit id="u4"><source>已有文本<\/source><target>Existing<\/target>/);
+  assert.equal(exported.filename, "story.zh-CN.xliff");
+  assert.match(output, /<target xml:space="preserve">你好 <ph id="p1">\{player\}<\/ph>！<\/target>/);
+  assert.match(output, /<target xml:space="preserve"><g id="g1">强调<\/g><\/target>/);
+  assert.match(output, /<trans-unit id="u2" translate="no"><source>固定文<\/source><target>已锁定<\/target>/);
+  assert.match(output, /<trans-unit id="u4"><source>既存テキスト<\/source><target>已有译文<\/target>/);
 
   await assert.rejects(
     exportBatchDocument({
       filename: prepared.filename,
-      locale: "en-US",
+      locale: "zh-CN",
       format: prepared.format,
       base64: Buffer.from(original, "utf8").toString("base64"),
       segments: [{ ...prepared.segments[0], translation: "Hello!" }]
@@ -103,8 +103,8 @@ test("XLIFF 导入仅选择空且未锁定的 trans-unit，并在导出时恢复
 test("MQXLIFF 导出保留锁定单元和 bpt/ept 标签，并写入 Pretranslated 状态", async () => {
   const original = `<?xml version="1.0" encoding="UTF-8"?>
 <xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:mq="MQXliff" version="1.2"><file original="story"><body>
-<trans-unit id="m1" mq:status="NotStarted"><source>你好 <bpt id="1">&lt;b&gt;</bpt>世界<ept id="1">&lt;/b&gt;</ept>！</source><target></target></trans-unit>
-<trans-unit id="m2" mq:locked="locked" mq:status="Translated"><source>不要改</source><target>Keep</target></trans-unit>
+<trans-unit id="m1" mq:status="NotStarted"><source>こんにちは <bpt id="1">&lt;b&gt;</bpt>世界<ept id="1">&lt;/b&gt;</ept>！</source><target></target></trans-unit>
+<trans-unit id="m2" mq:locked="locked" mq:status="Translated"><source>変更不可</source><target>保留</target></trans-unit>
 </body></file></xliff>`;
   const prepared = await prepareBatchDocument({ filename: "story.mqxliff", base64: Buffer.from(original, "utf8").toString("base64") });
   assert.equal(prepared.format, "mqxliff");
@@ -114,16 +114,16 @@ test("MQXLIFF 导出保留锁定单元和 bpt/ept 标签，并写入 Pretranslat
 
   const exported = await exportBatchDocument({
     filename: prepared.filename,
-    locale: "en-US",
+    locale: "zh-CN",
     format: prepared.format,
     base64: Buffer.from(original, "utf8").toString("base64"),
-    segments: [{ ...prepared.segments[0], translation: prepared.segments[0].source.replace("你好", "Hello").replace("世界", "world") }]
+    segments: [{ ...prepared.segments[0], translation: prepared.segments[0].source.replace("こんにちは", "你好") }]
   });
   const output = Buffer.from(exported.base64, "base64").toString("utf8");
-  assert.equal(exported.filename, "story.en-US.mqxliff");
+  assert.equal(exported.filename, "story.zh-CN.mqxliff");
   assert.match(output, /<trans-unit id="m1" mq:status="Pretranslated">/);
-  assert.match(output, /<target>.*<bpt id="1">&lt;b&gt;<\/bpt>world<ept id="1">&lt;\/b&gt;<\/ept>！<\/target>/);
-  assert.match(output, /<trans-unit id="m2" mq:locked="locked" mq:status="Translated"><source>不要改<\/source><target>Keep<\/target>/);
+  assert.match(output, /<target>.*<bpt id="1">&lt;b&gt;<\/bpt>世界<ept id="1">&lt;\/b&gt;<\/ept>！<\/target>/);
+  assert.match(output, /<trans-unit id="m2" mq:locked="locked" mq:status="Translated"><source>変更不可<\/source><target>保留<\/target>/);
 });
 
 test("DOCX 翻译导出保留文档容器并替换段落", async () => {
@@ -148,41 +148,42 @@ test("DOCX 翻译导出保留文档容器并替换段落", async () => {
   assert.match(xml, /번역2/);
 });
 
-test("XLSX 只抽取中文单元格并在原位置写回译文", async () => {
+test("XLSX 只抽取日语单元格并在原位置写回简体中文译文", async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("剧情");
-  sheet.getCell("A1").value = "中文原文";
-  sheet.getCell("A2").value = "欢迎回来！";
-  sheet.getCell("B2").value = "Keep";
+  sheet.getCell("A1").value = "日语原文";
+  sheet.getCell("A2").value = "おかえりなさい！";
+  sheet.getCell("B1").value = "简体中文";
+  sheet.getCell("B2").value = "保留";
   const original = Buffer.from(await workbook.xlsx.writeBuffer());
   const prepared = await prepareBatchDocument({ filename: "lines.xlsx", base64: original.toString("base64") });
-  assert.equal(prepared.segments.length, 2);
+  assert.equal(prepared.segments.length, 1);
 
   const exported = await exportBatchDocument({
     filename: prepared.filename,
-    locale: "th-TH",
+    locale: "zh-CN",
     format: prepared.format,
     structure: prepared.structure,
     base64: original.toString("base64"),
-    segments: prepared.segments.map((segment) => ({ ...segment, translation: `แปล${segment.index}` }))
+    segments: prepared.segments.map((segment) => ({ ...segment, translation: "欢迎回来！" }))
   });
   const result = new ExcelJS.Workbook();
   await result.xlsx.load(Buffer.from(exported.base64, "base64"));
-  assert.equal(result.getWorksheet("剧情").getCell("A2").value, "แปล2");
-  assert.equal(result.getWorksheet("剧情").getCell("B2").value, "Keep");
+  assert.equal(result.getWorksheet("剧情").getCell("A2").value, "欢迎回来！");
+  assert.equal(result.getWorksheet("剧情").getCell("B2").value, "保留");
 });
 
-test("XLSX 只把正文列做成翻译单元，行内字段作为上下文", async () => {
+test("XLSX 只把日语正文列做成翻译单元，行内字段作为上下文", async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("交付表");
-  sheet.addRow(["位置", "描述", "DDL", "语种要求", "Chinese Simp.", "English"]);
-  sheet.addRow(["海外社媒", "无字符限制", "8月3日", "中英", "八月已至，折扣活动即将开启！", "August is here and the sale is coming!"]);
+  sheet.addRow(["位置", "描述", "DDL", "语种要求", "Japanese", "Chinese Simp."]);
+  sheet.addRow(["海外社媒", "无字符限制", "8月3日", "日中", "8月になり、セールが始まります！", "八月已至，折扣活动即将开启！"]);
   const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
   const prepared = await prepareBatchDocument({ filename: "delivery.xlsx", base64: buffer.toString("base64"), segmentationMode: "paragraph" });
   assert.equal(prepared.segments.length, 1);
-  assert.equal(prepared.segments[0].source, "八月已至，折扣活动即将开启！");
-  assert.deepEqual(prepared.segments[0].context.metadata.map((item) => item.value), ["海外社媒", "无字符限制", "8月3日", "中英"]);
-  assert.equal(prepared.segments[0].context.referenceTranslations[0].value, "August is here and the sale is coming!");
+  assert.equal(prepared.segments[0].source, "8月になり、セールが始まります！");
+  assert.deepEqual(prepared.segments[0].context.metadata.map((item) => item.value), ["海外社媒", "无字符限制", "8月3日", "日中"]);
+  assert.equal(prepared.segments[0].context.referenceTranslations[0].value, "八月已至，折扣活动即将开启！");
   assert.equal(prepared.structure.cells[0].address, "E2");
 });
 
@@ -220,29 +221,29 @@ test("XLSX 可采用 AI 返回的无表头列角色", async () => {
   assert.deepEqual(prepared.segments[0].context.metadata.map((item) => item.value), ["官网标题", "80字符内"]);
 });
 
-test("CSV 有表头时复用表格结构识别并原位回写译文", async () => {
-  const source = '\uFEFF位置,字数限制,Chinese Simp.,English\r\n官网标题,80字符内,"八月已至，折扣活动即将开启！","Keep, exactly"\r\n';
+test("CSV 有表头时复用日中表格结构识别并原位回写译文", async () => {
+  const source = '\uFEFF位置,字数限制,Japanese,Chinese Simp.\r\n官网标题,80字符内,"8月になり、セールが始まります！","八月已至，折扣活动即将开启！"\r\n';
   const base64 = Buffer.from(source, "utf8").toString("base64");
   const prepared = await prepareBatchDocument({ filename: "delivery.csv", base64, segmentationMode: "paragraph" });
 
   assert.equal(prepared.format, "csv");
   assert.equal(prepared.spreadsheetAnalysis.sheets[0].headerRow, 1);
   assert.equal(prepared.segments.length, 1);
-  assert.equal(prepared.segments[0].source, "八月已至，折扣活动即将开启！");
+  assert.equal(prepared.segments[0].source, "8月になり、セールが始まります！");
   assert.deepEqual(prepared.segments[0].context.metadata.map((item) => item.value), ["官网标题", "80字符内"]);
-  assert.equal(prepared.segments[0].context.referenceTranslations[0].value, "Keep, exactly");
+  assert.equal(prepared.segments[0].context.referenceTranslations[0].value, "八月已至，折扣活动即将开启！");
 
   const exported = await exportBatchDocument({
     filename: prepared.filename,
-    locale: "ja-JP",
+    locale: "zh-CN",
     format: prepared.format,
     structure: prepared.structure,
     base64,
-    segments: prepared.segments.map((segment) => ({ ...segment, translation: "8月になり、セールが始まります！" }))
+    segments: prepared.segments.map((segment) => ({ ...segment, translation: "八月已至，折扣活动即将开启！" }))
   });
   const output = Buffer.from(exported.base64, "base64").toString("utf8");
-  assert.equal(output, '\uFEFF位置,字数限制,Chinese Simp.,English\r\n官网标题,80字符内,"8月になり、セールが始まります！","Keep, exactly"\r\n');
-  assert.equal(exported.filename, "delivery.ja-JP.csv");
+  assert.equal(output, '\uFEFF位置,字数限制,Japanese,Chinese Simp.\r\n官网标题,80字符内,"八月已至，折扣活动即将开启！","八月已至，折扣活动即将开启！"\r\n');
+  assert.equal(exported.filename, "delivery.zh-CN.csv");
   assert.equal(exported.mimeType, "text/csv; charset=utf-8");
 });
 
@@ -282,9 +283,9 @@ test("CSV 支持带换行的引号字段并仅重写目标单元格", async () =
   assert.equal(Buffer.from(exported.base64, "base64").toString("utf8"), '位置,Chinese Simp.,English\r\n剧情,"บรรทัดหนึ่ง,\n""บรรทัดสอง""","Existing translation"\r\n');
 });
 
-test("单列 CSV 的中文表头不会被当作待翻译正文", async () => {
-  const source = "中文原文\n欢迎回来！\n活动现已开启。";
+test("单列 CSV 的日语表头不会被当作待翻译正文", async () => {
+  const source = "日语原文\nおかえりなさい！\nイベントが始まりました。";
   const prepared = await prepareBatchDocument({ filename: "single-column.csv", text: source, segmentationMode: "paragraph" });
   assert.equal(prepared.spreadsheetAnalysis.sheets[0].headerRow, 1);
-  assert.deepEqual(prepared.segments.map((segment) => segment.source), ["欢迎回来！", "活动现已开启。"]);
+  assert.deepEqual(prepared.segments.map((segment) => segment.source), ["おかえりなさい！", "イベントが始まりました。"]);
 });

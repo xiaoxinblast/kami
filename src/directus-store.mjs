@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { assertLocale } from "./config.mjs";
+import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { fetchWithTimeout } from "./provider.mjs";
 
 export const LOCALE_COLLECTIONS = Object.freeze({
+  "zh-CN": "terms_zh_cn",
   "ja-JP": "terms_ja_jp",
   "ko-KR": "terms_ko_kr",
   "zh-Hant-TW": "terms_zh_hant_tw",
@@ -12,6 +13,7 @@ export const LOCALE_COLLECTIONS = Object.freeze({
 });
 
 export const MEMORY_COLLECTIONS = Object.freeze({
+  "zh-CN": "translation_memory_zh_cn",
   "ja-JP": "translation_memory_ja_jp",
   "ko-KR": "translation_memory_ko_kr",
   "zh-Hant-TW": "translation_memory_zh_hant_tw",
@@ -215,8 +217,8 @@ export async function initializeDirectusStore() {
   const health = await fetch(`${config().baseUrl}/server/ping`, { signal: AbortSignal.timeout(5_000) });
   if (!health.ok) throw new Error(`Directus health check failed (${health.status})`);
   await Promise.all([
-    ...Object.values(LOCALE_COLLECTIONS),
-    ...Object.values(MEMORY_COLLECTIONS),
+    ...ACTIVE_LOCALES.map((locale) => LOCALE_COLLECTIONS[locale]),
+    ...ACTIVE_LOCALES.map((locale) => MEMORY_COLLECTIONS[locale]),
     "style_learning_runs",
     "learning_trajectories",
     "translation_skills",
@@ -269,7 +271,7 @@ export async function saveDirectusMemory(locale, input) {
   const collection = memoryCollectionFor(locale);
   const source = String(input.source || "").trim();
   const target = String(input.target || "").trim();
-  if (!source || !target) throw new Error("翻译记忆的中外文不能为空");
+  if (!source || !target) throw new Error("翻译记忆的日语原文和简体中文译文不能为空");
   const embedding = input.embedding ?? await embedSource(source);
   const params = new URLSearchParams({ limit: "1", fields: "id,quality_status,qa_score" });
   params.set("filter[source][_eq]", source);
@@ -2088,7 +2090,7 @@ export function getDirectusMetadata() {
     type: "directus",
     label: "Directus + PostgreSQL",
     url: baseUrl,
-    adminUrl: `${baseUrl}/admin/content/terms_ja_jp`,
-    collections: LOCALE_COLLECTIONS
+    adminUrl: `${baseUrl}/admin/content/terms_zh_cn`,
+    collections: Object.fromEntries(ACTIVE_LOCALES.map((locale) => [locale, LOCALE_COLLECTIONS[locale]]))
   };
 }
