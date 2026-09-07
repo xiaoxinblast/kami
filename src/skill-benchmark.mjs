@@ -51,7 +51,7 @@ export async function createBenchmarkSnapshot(scope, trajectories = [], { prompt
     getStyleProfile(normalizedScope.locale, normalizedScope.contentType, normalizedScope.domain),
     getQaCases(normalizedScope.locale, { contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1 }),
     getMemories(normalizedScope.locale, { contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1, exactContentType: true }),
-    getUserProfile(normalizedScope.locale)
+    getUserProfile(normalizedScope.locale, { projectId: normalizedScope.project })
   ]);
   const queryEmbeddings = {};
   // Local embeddings are the normal fallback and are cheap; keeping this
@@ -116,7 +116,7 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
       getStyleProfile(scope.locale, scope.contentType, scope.domain),
       getQaCases(scope.locale, { contentType: scope.contentType, domain: scope.domain, limit: -1 }),
       getMemories(scope.locale, { contentType: scope.contentType, domain: scope.domain, limit: -1, exactContentType: true }),
-      getUserProfile(scope.locale)
+      getUserProfile(scope.locale, { projectId: scope.project })
     ]);
   // Clean-room isolation: never feed this holdout case its own final translation
   // back through memories, QA cases or distilled profile examples. The gold must

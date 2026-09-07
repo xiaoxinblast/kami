@@ -21,6 +21,7 @@ import { embedSource } from "./src/embedding.mjs";
 import { exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
+import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories } from "./src/external-review.mjs";
 import { DEFAULT_TRANSLATION_STRATEGY, createDefaultTranslationSkill, effectiveStrategyValue, evaluateSkillPromotion, normalizedEditDistance, selectSkillHoldout, summarizeTrajectoryAttribution, validateCandidatePromotionState } from "./src/learning-engine.mjs";
 import { benchmarkTranslationSkill, createBenchmarkSnapshot } from "./src/skill-benchmark.mjs";
 import { createEvaluationJobRunner } from "./src/evaluation-jobs.mjs";
@@ -583,7 +584,7 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   const qaCases = contextPack.qaGuidance || [];
   let translation = initialTranslation;
   const deterministicIssues = (value) => [
-    ...runQa({ source: contextPack.source, translation: value, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.classification?.contentType || contentType || "general", registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
+    ...runQa({ source: contextPack.source, translation: value, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.classification?.contentType || contentType || "general", registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
     ...applyProjectQaPolicy(checkFactSchema({ schema: contextPack.factSchema || extractFactSchema({ source: contextPack.source }), translation: value, locale }), projectSettings || undefined)
   ];
   let hardIssues = deterministicIssues(translation);
@@ -910,6 +911,21 @@ async function previewBilingualAssets(body = {}) {
   };
 }
 
+async function trajectoriesForExternalReview(locale, projectId) {
+  if (!projectId) return [];
+  const scoped = await listLearningTrajectories({ locale, project: projectId, limit: 1_000 });
+  if (projectId === "default") return scoped;
+  // 旧版本把真实项目的轨迹错误写在 default 作用域。只在它关联的批次明确属于
+  // 当前项目时兼容接回，不能仅凭相同原文把其他项目的历史轨迹捞进来。
+  const legacy = await listLearningTrajectories({ locale, project: "default", limit: 1_000 });
+  const runs = new Map();
+  await Promise.all([...new Set(legacy.map((trajectory) => trajectory.batchId).filter(Boolean))].map(async (batchId) => {
+    try { runs.set(batchId, await getBatchRun(batchId)); }
+    catch { runs.set(batchId, null); }
+  }));
+  return [...scoped, ...legacy.filter((trajectory) => runs.get(trajectory.batchId)?.projectId === projectId)];
+}
+
 async function commitTermImport(body, onProgress = null) {
   if (!body.batchId || !Array.isArray(body.candidates)) {
     const error = new Error("导入批次或候选数据无效");
@@ -928,8 +944,17 @@ async function commitTermImport(body, onProgress = null) {
   const imported = [];
   const skipped = [];
   const decisions = [];
+  const trajectoryLinks = [];
+  const trajectoryLinkFailures = [];
+  const trajectoryMatch = projectId
+    ? linkExternalReviewTrajectories(
+      body.candidates.map((candidate) => candidate?.assetType === "memory" && candidate?.selected !== false ? candidate : null),
+      await trajectoriesForExternalReview("zh-CN", projectId)
+    )
+    : { links: [], unmatched: [], ambiguous: [], alreadyAccepted: [] };
+  const trajectoryByCandidate = new Map(trajectoryMatch.links.map((link) => [link.candidateIndex, link]));
   const styleEvidenceByScope = new Map();
-  for (const candidate of body.candidates) {
+  for (const [candidateIndex, candidate] of body.candidates.entries()) {
     const decision = { candidateId: candidate.candidateId, status: "rejected", decision: candidate.decision };
     if (!candidate.selected || candidate.existing || candidate.decision === "excluded") {
       skipped.push({ source: candidate.source, locale: candidate.locale, reason: candidate.existing ? "已存在" : "未选择" });
@@ -955,6 +980,13 @@ async function commitTermImport(body, onProgress = null) {
         : (["game", "marketing", "community", "general"].includes(candidate.domain) ? candidate.domain : fallback.domain);
       const enforcement = "preferred";
       if (candidate.assetType === "memory") {
+        const trajectoryLink = trajectoryByCandidate.get(candidateIndex);
+        const linkedTrajectory = trajectoryLink?.trajectory || null;
+        const evidenceContentType = linkedTrajectory?.contentType || contentType;
+        const evidenceDomain = linkedTrajectory?.domain || domain;
+        const machineTranslation = linkedTrajectory
+          ? String(linkedTrajectory.finalTranslation || linkedTrajectory.initialTranslation || "").trim()
+          : "";
         if (projectId && !masterTm) throw new Error("当前项目没有启用主 TM，无法写入人工确认译文");
         const memory = await saveMemory(locale, {
           source, target, domain, contentType,
@@ -965,15 +997,26 @@ async function commitTermImport(body, onProgress = null) {
         });
         const allowStyleEvidence = candidate.styleEvidence === true || (candidate.styleEvidence === undefined && body.styleEvidence !== false);
         const evidence = allowStyleEvidence ? await saveStyleEvidence({
-          locale, source, target, contentType, domain,
+          locale, source, target, contentType: evidenceContentType, domain: evidenceDomain,
           contentTags,
-          batchId: body.batchId, sourceFile, sourceRow: candidate.rowNumber, projectId, status: "accepted", provenance: "table-import"
+          machineTranslation,
+          batchId: body.batchId, sourceFile, sourceRow: candidate.sourceRow || candidate.rowNumber, projectId, status: "accepted", provenance: linkedTrajectory ? "external-review-import" : "table-import"
         }) : null;
         if (evidence) {
-          const scopeKey = `${locale}\u0000${contentType}\u0000${domain}`;
+          const scopeKey = `${locale}\u0000${evidenceContentType}\u0000${evidenceDomain}`;
           const evidenceGroup = styleEvidenceByScope.get(scopeKey) || [];
           evidenceGroup.push({ ...candidate, evidenceId: evidence.id });
           styleEvidenceByScope.set(scopeKey, evidenceGroup);
+        }
+        if (linkedTrajectory) {
+          try {
+            const patch = externalReviewTrajectoryPatch({ trajectory: linkedTrajectory, target, sourceFile, sourceRow: candidate.sourceRow || candidate.rowNumber, matchMethod: trajectoryLink.method });
+            await updateLearningTrajectory(linkedTrajectory.id, patch);
+            trajectoryLinks.push({ candidateIndex, trajectoryId: linkedTrajectory.id, source, method: trajectoryLink.method });
+            triggerAutoProposal({ locale: linkedTrajectory.locale, contentType: linkedTrajectory.contentType, domain: linkedTrajectory.domain, project: linkedTrajectory.project });
+          } catch (error) {
+            trajectoryLinkFailures.push({ candidateIndex, trajectoryId: linkedTrajectory.id, source, reason: error.message });
+          }
         }
         imported.push({ id: memory.id, source, target, locale, assetType: "memory", contentType, domain });
       } else {
@@ -1064,11 +1107,16 @@ async function commitTermImport(body, onProgress = null) {
     memories: imported.filter((item) => item.assetType === "memory").length,
     styleLearningRuns: batchLearning.length,
     styleProfiles: styleProfiles.length,
+    trajectoriesLinked: trajectoryLinks.length,
+    trajectoryAmbiguous: trajectoryMatch.ambiguous.length,
+    trajectoryUnmatched: trajectoryMatch.unmatched.length,
+    trajectoryAlreadyAccepted: trajectoryMatch.alreadyAccepted.length,
+    trajectoryLinkFailures: trajectoryLinkFailures.length,
     skipped: skipped.length,
     completedAt: new Date().toISOString()
   };
   await completeImport(body.batchId, decisions, summary);
-  return { batchId: body.batchId, imported, skipped, batchLearning, styleProfiles, styleFallbacks, summary };
+  return { batchId: body.batchId, imported, skipped, batchLearning, styleProfiles, styleFallbacks, trajectoryLinks, trajectoryMatch: { ambiguous: trajectoryMatch.ambiguous, unmatched: trajectoryMatch.unmatched, alreadyAccepted: trajectoryMatch.alreadyAccepted }, trajectoryLinkFailures, summary };
 }
 
 async function apiHandler(req, res, url) {
@@ -1478,8 +1526,8 @@ async function apiHandler(req, res, url) {
     }
     const contentType = body.contentType || "general";
     const domain = concreteDomain(body.domain, { text: source, contentType });
-    const project = body.project || "default";
-    const projectId = String(body.projectId || project || "").trim();
+    const projectId = String(body.projectId || body.project || "default").trim();
+    const project = projectId;
     const projectLibraries = projectId ? await getResourceLibraries(projectId) : [];
     const masterTm = projectLibraries.find((library) => library.kind === "translation_memory" && library.role === "master");
     let linkedTrajectory = null;
@@ -1510,7 +1558,7 @@ async function apiHandler(req, res, url) {
       contentTags,
       machineTranslation, polarity: "positive",
       status: "accepted", provenance: "human-accept",
-      sourceFile: body.sourceFile || "", sourceRow: body.sourceRow || null
+      sourceFile: body.sourceFile || "", sourceRow: body.sourceRow || null, projectId
     });
     const qaCaseApproved = body.qaCaseId ? await approveQaCase(String(body.qaCaseId)) : false;
     let termCandidateBatch = null;
@@ -1581,9 +1629,11 @@ async function apiHandler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/style-profiles") {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
     const status = String(url.searchParams.get("status") || "").trim() || null;
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
+    if (projectId && !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     const [profiles, evidence, qaRuns, learningRuns] = await Promise.all([
-      listStyleProfiles(locale, status),
-      getStyleEvidence(locale, { limit: 1_000 }),
+      listStyleProfiles(locale, status, { projectId }),
+      getStyleEvidence(locale, { projectId, limit: 1_000 }),
       getQaRuns(locale, { limit: 500 }),
       getStyleLearningRuns(locale, { limit: 30 })
     ]);
@@ -1675,6 +1725,12 @@ async function apiHandler(req, res, url) {
     const id = decodeURIComponent(url.pathname.slice("/api/style-profiles/".length, -"/activate".length));
     const body = await readJsonBody(req).catch(() => ({}));
     const located = await findStyleProfile(id);
+    const requestedProjectId = String(body.projectId || "").trim();
+    if (located?.kind === "user_profile" && String(located.projectId || "") !== requestedProjectId) {
+      const error = new Error("未找到当前项目的风格指南");
+      error.statusCode = 404;
+      throw error;
+    }
     // 有评测结论且结论反对时必须显式 force，并把这次越过闸门的事实记在规范上。
     if (located?.kind !== "user_profile" && located?.evaluation && located.evaluation.promotable !== true && body.force !== true) {
       const error = new Error(`评测结论不支持启用：${located.evaluation.conclusion || "未达晋升门槛"}。确认仍要启用请勾选“忽略评测结论”。`);
@@ -1697,6 +1753,13 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/style-profiles/") && url.pathname.endsWith("/reject")) {
     const id = decodeURIComponent(url.pathname.slice("/api/style-profiles/".length, -"/reject".length));
+    const body = await readJsonBody(req).catch(() => ({}));
+    const located = await findStyleProfile(id);
+    if (located?.kind === "user_profile" && String(located.projectId || "") !== String(body.projectId || "")) {
+      const error = new Error("未找到当前项目的风格指南");
+      error.statusCode = 404;
+      throw error;
+    }
     const rejected = await rejectStyleProfile(id);
     if (!rejected) {
       const error = new Error("无法拒绝该风格规范（可能已激活或不存在）");
@@ -1737,6 +1800,7 @@ async function apiHandler(req, res, url) {
       contentType: body.contentType || "general",
       domain: body.domain || "general",
       batchId: body.batchId || "",
+      projectId: String(body.projectId || ""),
       threshold: getSettings().learning.styleDistillThreshold,
       growthWindow: getSettings().learning.styleDistillGrowthWindow,
       positiveLimit: getSettings().learning.distillPositiveSamples,
@@ -2564,10 +2628,27 @@ async function apiHandler(req, res, url) {
     const project = body.projectId ? await getProject(String(body.projectId)) : null;
     const projectSettings = project?.settings || null;
     const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
+    const [memories, memoryLibraries] = await Promise.all([
+      getMemories(locale, { domain: "general", limit: -1, projectId: body.projectId || "" }),
+      body.projectId ? getResourceLibraries(String(body.projectId), { kind: "translation_memory" }) : []
+    ]);
+    const enabledMaster = memoryLibraries.find((library) => library.enabled && library.role === "master");
+    const masterMemories = enabledMaster
+      ? memories.filter((memory) => memory.libraryId === enabledMaster.id).map((memory) => ({ ...memory, libraryRole: "master", libraryName: enabledMaster.name, libraryPriority: enabledMaster.priority }))
+      : [];
     const segments = Array.isArray(body.segments) ? body.segments.filter((segment) => segment?.selected !== false) : [];
     const issues = segments.flatMap((segment, index) => {
       const matches = matchTerms(segment.source || "", assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
-      return runQa({ source: segment.source || "", translation: segment.translation || "", matches, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
+      const translationReferences = rankTranslationMemories(segment.source || "", masterMemories, {
+        limit: 20,
+        locale,
+        contentType: body.contentType || "general",
+        domain: body.domain || "general",
+        projectId: body.projectId || "",
+        catMinFuzzy: projectSettings?.tm?.catMinFuzzy || 60,
+        llmMinRelevance: projectSettings?.tm?.llmMinRelevance || 60
+      });
+      return runQa({ source: segment.source || "", translation: segment.translation || "", matches, translationReferences, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
     });
     const blocking = issues.filter((issue) => ["error", "critical"].includes(issue.severity));
     return json(res, 200, { ok: blocking.length === 0, blocking, warnings: issues.filter((issue) => !["error", "critical"].includes(issue.severity)), total: issues.length });
@@ -3327,7 +3408,7 @@ async function apiHandler(req, res, url) {
     const projectSettings = projectRecord?.settings || null;
     const domainResolution = resolveDomain(body.source, body.domain, { contentType: classification.contentType });
     const domain = domainResolution.domain;
-    const scope = learningScope({ locale, contentType: classification.contentType, domain, project: body.project || "default" });
+    const scope = learningScope({ locale, contentType: classification.contentType, domain, project: projectId || body.project || "default" });
     const translationSkill = await ensureChampionTranslationSkill(scope);
     const tuning = getSettings();
     const factory = DEFAULT_TRANSLATION_STRATEGY;
@@ -3350,7 +3431,7 @@ async function apiHandler(req, res, url) {
       getStyleProfile(locale, classification.contentType, domain),
       getQaCases(locale, { contentType: classification.contentType, domain: "general", limit: -1 }),
       getMemories(locale, { contentType: classification.contentType, domain: "general", limit: -1, exactContentType: true, projectId }),
-      getUserProfile(locale),
+      getUserProfile(locale, { projectId }),
       projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
     ]);
     const librariesById = new Map(projectLibraries.map((library) => [library.id, library]));
@@ -3436,7 +3517,13 @@ async function apiHandler(req, res, url) {
           styleProfileId: contextPack.styleProfile?.id || "",
           termIds: matches.map((item) => item.term?.id).filter(Boolean),
           memoryIds: translationReferences.map((item) => item.id).filter(Boolean),
-          qaCaseIds: qaGuidance.map((item) => item.id).filter(Boolean)
+          qaCaseIds: qaGuidance.map((item) => item.id).filter(Boolean),
+          entryId: body.entryId || "",
+          sourceFile: body.sourceFile || body.neighborContext?.document || "",
+          sourceRow: body.sourceRow || body.neighborContext?.row || null,
+          sheet: body.neighborContext?.sheet || "",
+          previousSource: body.previousSource || body.neighborContext?.previous || "",
+          nextSource: body.nextSource || body.neighborContext?.next || ""
         },
         model: routing.model || provider.model, promptVersion: TRANSLATION_PROMPT_VERSION,
         status: "running", events: [{ type: "started", at: new Date().toISOString(), routing }]
@@ -3455,7 +3542,7 @@ async function apiHandler(req, res, url) {
           providedReferences: translationReferences, passScore: routedPassScore, maxRevisions, projectSettings, projectId
         })
         : { translation: result.translation, issues: [
-          ...runQa({ source: body.source, translation: result.translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
+          ...runQa({ source: body.source, translation: result.translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
           ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation: result.translation, locale }), projectSettings || undefined)
         ], score: null, status: "disabled", iterations: 0, used: false, fallbackReason: "", references: [] };
       let qualityRoute = decideQualityRoute({
@@ -3537,7 +3624,7 @@ async function apiHandler(req, res, url) {
           }
         }
       }
-      const initialIssues = runQa({ source: body.source, translation: result.initial || result.translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings });
+      const initialIssues = runQa({ source: body.source, translation: result.initial || result.translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings });
       let completedTrajectory = trajectory;
       if (trajectory) {
         try {
@@ -3776,7 +3863,7 @@ const conflictScanner = createConflictScanner({
       const [styleProfile, translationSkill, userProfile] = await Promise.all([
         getStyleProfile(scope.locale, scope.contentType, scope.domain),
         ensureChampionTranslationSkill(scope),
-        getUserProfile(scope.locale)
+        getUserProfile(scope.locale, { projectId: scope.project })
       ]);
       return { styleProfile, translationSkill, userProfile };
     },

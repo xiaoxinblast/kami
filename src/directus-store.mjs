@@ -429,16 +429,18 @@ export async function getDirectusQaRuns(locale, options = {}) {
     }));
 }
 
-export async function getDirectusUserProfile(locale) {
+export async function getDirectusUserProfile(locale, { projectId = "" } = {}) {
   assertLocale(locale);
-  const params = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,name,target_locale,instructions,examples,version,parent_id,evidence_count,status,date_updated" });
+  const params = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,project_id,name,target_locale,instructions,examples,version,parent_id,evidence_count,status,date_updated" });
   params.set("filter[target_locale][_eq]", locale);
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  else params.set("filter[project_id][_empty]", "true");
   params.set("filter[status][_eq]", "active");
   const items = await request(`/items/user_profiles?${params}`);
   const profile = items[0];
   if (!profile) return null;
   return {
-    id: profile.id, name: profile.name, locale: profile.target_locale, instruction: profile.instructions,
+    id: profile.id, projectId: profile.project_id || "", name: profile.name, locale: profile.target_locale, instruction: profile.instructions,
     examples: arrayValue(profile.examples), version: Number(profile.version) || 1,
     evidenceCount: Number(profile.evidence_count) || 0, updatedAt: profile.date_updated
   };
@@ -446,12 +448,16 @@ export async function getDirectusUserProfile(locale) {
 
 export async function saveDirectusUserProfile(input) {
   const locale = assertLocale(input.locale);
+  const projectId = String(input.projectId || "");
   const params = new URLSearchParams({ limit: "1", sort: "-version,-date_updated", fields: "id,version,status" });
   params.set("filter[target_locale][_eq]", locale);
+  if (projectId) params.set("filter[project_id][_eq]", projectId);
+  else params.set("filter[project_id][_empty]", "true");
   const existing = await request(`/items/user_profiles?${params}`);
   const previous = existing[0];
   const saved = await request("/items/user_profiles", { method: "POST", body: {
     name: input.name || `${locale} 译者画像`,
+    project_id: projectId,
     target_locale: locale,
     instructions: input.instruction,
     review_rubric: input.reviewRubric || null,
@@ -462,7 +468,7 @@ export async function saveDirectusUserProfile(input) {
     status: input.status || "active"
   } });
   if (previous?.id && saved.status === "active") await request(`/items/user_profiles/${previous.id}`, { method: "PATCH", body: { status: "inactive" } });
-  return { id: saved.id, name: saved.name, locale, instruction: saved.instructions, examples: saved.examples || [], version: saved.version };
+  return { id: saved.id, projectId, name: saved.name, locale, instruction: saved.instructions, examples: saved.examples || [], version: saved.version };
 }
 
 export async function saveDirectusStyleProfile(input) {
@@ -1222,7 +1228,7 @@ export async function deleteDirectusBackgroundTask(id) {
 export async function findDirectusStyleProfile(id) {
   const fields = "id,name,target_locale,content_type,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,generated_by,source_batch_id,learning_run_id,evaluation,status,date_updated";
   const shape = (item, kind) => ({
-    id: item.id, name: item.name, locale: item.target_locale,
+    id: item.id, projectId: item.project_id || "", name: item.name, locale: item.target_locale,
     contentType: item.content_type || "", domain: item.domain || "general",
     instruction: item.instructions, reviewRubric: item.review_rubric || null, examples: arrayValue(item.examples), rules: arrayValue(item.rules),
     version: Number(item.version) || 1, parentId: item.parent_id || null,
@@ -1234,7 +1240,7 @@ export async function findDirectusStyleProfile(id) {
     if (item) return shape(item, "style");
   } catch { /* 不是风格规范就继续找译者画像 */ }
   try {
-    const item = await request(`/items/user_profiles/${encodeURIComponent(id)}?fields=id,name,target_locale,instructions,examples,version,parent_id,evidence_count,status,date_updated`);
+    const item = await request(`/items/user_profiles/${encodeURIComponent(id)}?fields=id,project_id,name,target_locale,instructions,examples,version,parent_id,evidence_count,status,date_updated`);
     if (item) return shape(item, "user_profile");
   } catch { /* 两张表都没有就是不存在 */ }
   return null;
@@ -1273,8 +1279,9 @@ export async function listDirectusStyleProfiles(locale, status, scope = null) {
     styleParams.set("filter[domain][_eq]", scope.domain || "general");
   }
   const styleProfiles = await request(`/items/style_profiles?${styleParams}`);
-  const profileParams = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,name,target_locale,instructions,examples,version,parent_id,evidence_count,status,date_updated" });
+  const profileParams = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,project_id,name,target_locale,instructions,examples,version,parent_id,evidence_count,status,date_updated" });
   profileParams.set("filter[target_locale][_eq]", locale);
+  if (scope?.projectId) profileParams.set("filter[project_id][_eq]", String(scope.projectId));
   if (status) profileParams.set("filter[status][_eq]", status);
   const userProfiles = await request(`/items/user_profiles?${profileParams}`);
   return {
@@ -1287,7 +1294,7 @@ export async function listDirectusStyleProfiles(locale, status, scope = null) {
       status: item.status, updatedAt: item.date_updated
     })),
     userProfiles: userProfiles.map((item) => ({
-      id: item.id, name: item.name, locale: item.target_locale, instruction: item.instructions, examples: arrayValue(item.examples), rules: arrayValue(item.rules),
+      id: item.id, projectId: item.project_id || "", name: item.name, locale: item.target_locale, instruction: item.instructions, examples: arrayValue(item.examples), rules: arrayValue(item.rules),
       version: Number(item.version) || 1, parentId: item.parent_id || null, evidenceCount: Number(item.evidence_count) || 0, status: item.status, updatedAt: item.date_updated
     }))
   };
@@ -1299,8 +1306,13 @@ export async function activateDirectusStyleProfile(id) {
     target = await request(`/items/style_profiles/${encodeURIComponent(id)}?fields=id,target_locale,content_type,domain,status`);
   } catch (error) {
     if (isMissingItem(error)) {
-      target = await request(`/items/user_profiles/${encodeURIComponent(id)}?fields=id,target_locale,status`);
-      const deactivate = await request(`/items/user_profiles?limit=-1&fields=id,status&filter[target_locale][_eq]=${target.target_locale}&filter[status][_eq]=active`);
+      target = await request(`/items/user_profiles/${encodeURIComponent(id)}?fields=id,project_id,target_locale,status`);
+      const deactivateParams = new URLSearchParams({ limit: "-1", fields: "id,status" });
+      deactivateParams.set("filter[target_locale][_eq]", target.target_locale);
+      if (target.project_id) deactivateParams.set("filter[project_id][_eq]", target.project_id);
+      else deactivateParams.set("filter[project_id][_empty]", "true");
+      deactivateParams.set("filter[status][_eq]", "active");
+      const deactivate = await request(`/items/user_profiles?${deactivateParams}`);
       if (deactivate.length) await request("/items/user_profiles", { method: "PATCH", body: deactivate.map((item) => ({ id: item.id, status: "inactive" })) });
       const saved = await request(`/items/user_profiles/${encodeURIComponent(id)}`, { method: "PATCH", body: { status: "active" } });
       return { id: saved.id, kind: "user_profile", status: "active" };

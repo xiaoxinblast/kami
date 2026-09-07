@@ -250,7 +250,7 @@
           <article class="panel asset-list-panel">
             <div class="panel-head"><div><span class="card-kicker">PROJECT TM</span><h2>记忆库 TM</h2><p class="panel-caption">主 TM 接收人工确认译文，工作 TM 接收通过 QA 的机器译文，参考 TM 只读参与检索。</p></div><div class="asset-count" id="memoryCount">0 条</div></div>
             <div class="task-toolbar"><label class="drop-zone compact"><input id="memoryFile" type="file" accept=".xliff,.mqxliff,.xlsx,.csv" hidden /><strong>导入人工 TM</strong><small>支持 XLSX / CSV / XLIFF / MQXLIFF</small></label><button class="button secondary" id="memoryImportButton" type="button" disabled>预检 TM</button></div>
-            <div class="mapping-note" id="memoryImportNote">选择文件后先预检，确认后写入主 TM。</div>
+            <div class="mapping-note" id="memoryImportNote">选择文件后先预检；memoQ 等工具审校后的双语文件会写入主 TM，并自动接回当前项目中可唯一定位的原翻译轨迹。</div>
             <div class="candidate-table-wrap" id="memoryImportPreview" hidden>
               <table class="candidate-table"><thead><tr><th>写入</th><th>条目 ID</th><th>日语原文</th><th>简体中文译文</th><th>来源</th></tr></thead><tbody id="memoryImportPreviewBody"></tbody></table>
               <div class="dialog-actions"><button class="button primary" id="memoryImportConfirm" type="button">确认写入主 TM</button></div>
@@ -267,7 +267,7 @@
             <div class="library-import-bar style-guide-import-bar">
               <label class="library-file-button"><input id="styleGuideFile" type="file" accept=".txt,.md,.docx" hidden /><span>选择风格指南</span><small>支持 TXT / Markdown / DOCX</small></label>
               <button class="button secondary" id="styleGuideImportButton" type="button" disabled>导入为待批准规范</button>
-              <small class="library-import-note" id="styleGuideImportNote">上传后先检查内容，批准并启用后才会用于翻译。</small>
+              <small class="library-import-note" id="styleGuideImportNote">上传后只进入当前项目；检查内容并启用后才会用于该项目翻译。</small>
             </div>
             <div class="style-explainer">
               <div><span>01</span><strong>收集同类双语句段</strong><small>表格导入的完整译例、人工采纳译文和 AIQA 复盘分别记账；短术语不会冒充风格。</small></div>

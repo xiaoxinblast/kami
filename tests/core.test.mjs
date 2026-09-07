@@ -227,6 +227,30 @@ test("QA 不把普通正式术语作为硬错误，但仍检查数字和禁用�
   assert.ok(issues.some((issue) => issue.type === "protected_token"));
 });
 
+test("主 TM 原文精确命中时按项目规则检查整句译文", () => {
+  const translationReferences = [{
+    source: "メンテナンスを開始します。",
+    target: "维护即将开始。",
+    libraryRole: "master",
+    qualityStatus: "human_approved",
+    catMatchRate: 100
+  }];
+  const mismatch = runQa({
+    source: "メンテナンスを開始します。",
+    translation: "现在开始维护。",
+    translationReferences,
+    locale: "zh-CN"
+  });
+  assert.equal(mismatch.some((issue) => issue.type === "tm_exact_target_mismatch" && issue.projectRule === "tm_exact_target_mismatch" && issue.severity === "error"), true);
+  const exact = runQa({ source: "メンテナンスを開始します。", translation: "维护即将开始。", translationReferences, locale: "zh-CN" });
+  assert.equal(exact.some((issue) => issue.type === "tm_exact_target_mismatch"), false);
+
+  const disabled = createDefaultProjectSettings();
+  disabled.qa.rules.tm_exact_target_mismatch.enabled = false;
+  const ignored = runQa({ source: "メンテナンスを開始します。", translation: "现在开始维护。", translationReferences, locale: "zh-CN", projectSettings: disabled });
+  assert.equal(ignored.some((issue) => issue.type === "tm_exact_target_mismatch"), false);
+});
+
 test("疑似术语 QA 保留自动裁决所需的源词和正式译法", () => {
   const issues = runQa({
     source: "追加豪华内容",

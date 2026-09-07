@@ -881,14 +881,17 @@ export async function alignSegmentsWithModel({ sourceSegments, translationSegmen
 
 /**
  * 语言正确性专项审查：只看译文本身，不对比原文、不评价翻译质量。
- * 检查拼写、语法（助词/时态/敬语一致/语序）、标点与空格，输出归入 basic 维度。
+ * 检查拼写、语法、标点与空格，输出归入 basic 维度。
  */
 export async function evaluateGrammarWithModel({ translation, locale, contentType = "general", onUsage = null }) {
   const language = LOCALE_NAMES[locale] || locale;
+  const grammarChecklist = locale === "zh-CN"
+    ? "错别字、成分搭配、语序、虚词、量词、指代、时态表达、中文标点和不当空格"
+    : "拼写/错字、语法错误（助词、时态、敬语一致、语序）、标点错误、空格错误";
   const messages = [
     {
       role: "system",
-      content: `你是${language}母语级语言审校员。只检查译文本身的语言正确性，不对比原文、不评价翻译质量、不讨论用词偏好。逐项检查：拼写/错字、语法错误（助词、时态、敬语一致、语序）、标点错误、空格错误。每一条给出错误片段 span、原因 message、可执行修改建议 suggestion。span 必须逐字引用${language}译文；category 使用 grammar、spelling、punctuation、orthography、spacing 中的英文代码；message 和 suggestion 必须全部使用简体中文，禁止用${language}解释问题。severity 只能是 critical、major、minor：句子完全无法理解或根本不是${language}才记 critical，明确语法/拼写错误记 major，其他不自然处记 minor。没有问题必须返回 {"issues":[]}；禁止输出空白、纯文本说明或 Markdown。输出严格 JSON：{"issues":[{"severity":"major","category":"grammar","span":"目标语言错误片段","message":"简体中文问题原因","suggestion":"简体中文修改建议","confidence":0.9}]}`
+      content: `你是${language}母语级语言审校员。只检查译文本身的语言正确性，不对比原文、不评价翻译质量、不讨论用词偏好。逐项检查：${grammarChecklist}。每一条给出错误片段 span、原因 message、可执行修改建议 suggestion。span 必须逐字引用${language}译文；category 使用 grammar、spelling、punctuation、orthography、spacing 中的英文代码；message 和 suggestion 必须全部使用简体中文，禁止用${language}解释问题。severity 只能是 critical、major、minor：句子完全无法理解或根本不是${language}才记 critical，明确语法/拼写错误记 major，其他不自然处记 minor。没有问题必须返回 {"issues":[]}；禁止输出空白、纯文本说明或 Markdown。输出严格 JSON：{"issues":[{"severity":"major","category":"grammar","span":"目标语言错误片段","message":"简体中文问题原因","suggestion":"简体中文修改建议","confidence":0.9}]}`
     },
     { role: "user", content: JSON.stringify({ translation, locale, contentType }) }
   ];
@@ -1082,7 +1085,7 @@ export function parseAiQaLineResponse(content) {
 
 export async function reviseTranslationWithQa({ contextPack, translation, issues, references = [], qaCases = [], onUsage = null }) {
   return chat([
-    { role: "system", content: "你是最终修订译者。只修复 QA 明确指出的问题，保留正确内容、数字、格式、占位符、强制术语和原有信息边界；若问题涉及表达不地道，就用更地道的说法改写，不要退回逐字直译；若原文带韵律结构（contextPack.rhymeLike 为 true），修订必须同时重现节奏与押韵。只输出完整修订译文，不要解释。" },
+    { role: "system", content: "你是最终修订译者。只修复 QA 明确指出的问题，保留正确内容、数字、格式、占位符、术语的语境判断结果、明确硬约束和原有信息边界；若问题涉及表达不地道，就用更地道的说法改写，不要退回逐字直译；若原文带韵律结构（contextPack.rhymeLike 为 true），修订必须同时重现节奏与押韵。只输出完整修订译文，不要解释。" },
     { role: "user", content: JSON.stringify({ contextPack, currentTranslation: translation, issues, references: references.slice(0, 5), qaCases: qaCases.slice(0, 3) }) }
   ], runtimeConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "AIQA 修订", onUsage });
 }
@@ -1264,7 +1267,7 @@ export async function classifyWithModel(text, { descriptor = "", location = "" }
   const content = await chat([
     {
       role: "system",
-      content: "你是游戏本地化内容分类器。只能从 verse, narrative, codex, dialogue, ui, tutorial, rules, item_name, item_description, store, announcement, marketing, social, general 中选择一个 contentType。诗词/韵文、故事叙事、图鉴设定、角色台词和商店说明必须彼此隔离；general 只用于确实无法确认用途的文本，不能充当通配类别。输入是 JSON，其中 text 是正文；如果带有\"用途\"或\"位置\"字段，那是需求表自己声明的文案用途，应当优先于从正文推测。输出严格 JSON：{\"contentType\":\"...\",\"confidence\":0到1,\"evidence\":[\"简短依据\"]}。"
+      content: "你是日语到简体中文游戏本地化项目的内容分类器，输入正文是日语。只能从 verse, narrative, codex, dialogue, ui, tutorial, rules, item_name, item_description, store, announcement, marketing, social, general 中选择一个 contentType。诗词/韵文、故事叙事、图鉴设定、角色台词和商店说明必须彼此隔离；general 只用于确实无法确认用途的文本，不能充当通配类别。输入是 JSON，其中 text 是正文；如果带有\"用途\"或\"位置\"字段，那是需求表自己声明的文案用途，应当优先于从正文推测。输出严格 JSON：{\"contentType\":\"...\",\"confidence\":0到1,\"evidence\":[\"简短依据\"]}。"
     },
     { role: "user", content: JSON.stringify({ text: String(text).slice(0, 8000), 用途: descriptor || undefined, 位置: location || undefined }) }
   ]);
@@ -1296,7 +1299,7 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
   ], callConfig, { temperature: 0.35, timeoutMs: 60_000, requestLabel: "翻译自检", onUsage });
   if (/^PASS[。.!]?$/i.test(reflection)) return { initial, translation: initial, reflection };
   const translation = await chat([
-    { role: "system", content: "你是最终修订译者。根据审校意见做最小必要修改，严格保留事实、格式和指定术语。只输出最终译文。" },
+    { role: "system", content: "你是最终修订译者。根据审校意见做最小必要修改，严格保留事实、格式、术语的语境判断结果和明确硬约束。只输出最终译文。" },
     { role: "user", content: `上下文要求：${JSON.stringify(contextPack)}\n\n初译：${initial}\n\n审校意见：${reflection}` }
   ], callConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "翻译修订", onUsage });
   return { initial, translation, reflection };
@@ -1315,7 +1318,7 @@ async function chooseTranslationCandidate(contextPack, candidates, config, onUsa
   if (candidates.length < 2) return { index: 0, reason: "只有一个有效候选" };
   try {
     const content = await chat([
-      { role: "system", content: "你是资深本地化主编。按原意忠实、事实完整、强制术语、目标语言自然度、当前语体和品牌风格选择最佳候选。不得改写候选。输出严格 JSON：{\"index\":0,\"reason\":\"简短理由\"}。index 从 0 开始。" },
+      { role: "system", content: "你是资深日语到简体中文本地化主编。按原意忠实、事实完整、术语在当前语境中的适用性、明确硬约束、简体中文自然度、当前语体和品牌风格选择最佳候选。不得改写候选。输出严格 JSON：{\"index\":0,\"reason\":\"简短理由\"}。index 从 0 开始。" },
       { role: "user", content: JSON.stringify({ source: contextPack.source, locale: contextPack.targetLocale, contentType: contextPack.contentType, facts: contextPack.factSchema || null, candidates }) }
     ], config, { temperature: 0, timeoutMs: 60_000, requestLabel: "候选择优", onUsage });
     const match = content.match(/\{[\s\S]*\}/);
@@ -1362,7 +1365,7 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
     const count = Math.min(3, Math.max(2, Number(plan.candidateCount) || 3));
     const directions = [
       "平衡忠实度与母语自然度，作为稳妥可发布版本。",
-      "在不改变事实与术语的前提下，提高目标语言感染力与节奏。",
+      "在不改变事实、正确判断术语语境适用性的前提下，提高简体中文感染力与节奏。",
       "优先目标平台和受众的自然表达，避免翻译腔与过度营销。"
     ];
     const generated = await Promise.all(directions.slice(0, count).map((direction, index) => chat([

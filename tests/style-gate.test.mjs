@@ -45,6 +45,22 @@ test("译者画像 draft 激活后 getUserProfile 返回新版本", async () => 
   assert.equal((await getUserProfile("ko-KR")).id, second.id);
 });
 
+test("上传风格指南按项目隔离版本、列表与激活状态", async () => {
+  const projectA = "project-style-a";
+  const projectB = "project-style-b";
+  const activeA = await saveUserProfile({ projectId: projectA, locale: "zh-CN", name: "A 项目指南", instruction: "A 项目规则", status: "active" });
+  const activeB = await saveUserProfile({ projectId: projectB, locale: "zh-CN", name: "B 项目指南", instruction: "B 项目规则", status: "active" });
+  const draftA = await saveUserProfile({ projectId: projectA, locale: "zh-CN", name: "A 项目指南 v2", instruction: "A 项目新规则", status: "draft" });
+
+  assert.equal((await getUserProfile("zh-CN", { projectId: projectA })).id, activeA.id);
+  assert.equal((await getUserProfile("zh-CN", { projectId: projectB })).id, activeB.id);
+  assert.equal((await listStyleProfiles("zh-CN", null, { projectId: projectA })).userProfiles.some((item) => item.id === activeB.id), false);
+
+  await activateStyleProfile(draftA.id);
+  assert.equal((await getUserProfile("zh-CN", { projectId: projectA })).id, draftA.id);
+  assert.equal((await getUserProfile("zh-CN", { projectId: projectB })).id, activeB.id, "启用 A 项目指南不能停用 B 项目指南");
+});
+
 test("review 状态 QA 案例：列出入库、采纳为反例、作废删除", async () => {
   const case1 = await saveQaCase({ locale: "ja-JP", source: "待处置案例一", rejectedTranslation: "bad1", correctedTranslation: "good1", contentType: "general", domain: "game", scoreBefore: 50, scoreAfter: 95, status: "review" });
   const case2 = await saveQaCase({ locale: "ja-JP", source: "待处置案例二", rejectedTranslation: "bad2", correctedTranslation: "good2", contentType: "general", domain: "game", scoreBefore: 55, scoreAfter: 96, status: "review" });

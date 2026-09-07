@@ -147,29 +147,29 @@ export async function distillStyleProfileIfReady({
   };
 }
 
-export async function distillUserProfileIfReady(locale, { threshold = PROFILE_THRESHOLD } = {}) {
-  const evidence = await getStyleEvidence(locale, { limit: 1_000 });
+export async function distillUserProfileIfReady(locale, { threshold = PROFILE_THRESHOLD, projectId = "" } = {}) {
+  const evidence = await getStyleEvidence(locale, { projectId, limit: 1_000 });
   // 画像描述"这位译者会怎么写"，只能由正例构成；反例走风格规范那条线。
   const accepted = positiveEvidenceOnly(evidence).filter((item) => item.provenance === "human-accept");
   if (accepted.length < threshold) return { profile: null, acceptedCount: accepted.length, threshold };
   const distilled = await distillUserProfileWithModel({ locale, examples: sampleEvidence(accepted).examples });
-  const profile = await saveUserProfile({ locale, ...distilled, evidenceCount: accepted.length, status: "draft" });
+  const profile = await saveUserProfile({ locale, projectId, ...distilled, evidenceCount: accepted.length, status: "draft" });
   return { profile, acceptedCount: accepted.length, threshold };
 }
 
 export async function runEvolutionReview({
-  locale, contentType, domain, batchId = "",
+  locale, contentType, domain, batchId = "", projectId = "",
   threshold = DISTILL_THRESHOLD, growthWindow = DISTILL_GROWTH_WINDOW,
   positiveLimit = 50, negativeLimit = 15, staleRounds = DEFAULT_STALE_ROUNDS
 }) {
   const [evidence, qaRunsRaw, previousProfile] = await Promise.all([
-    getStyleEvidence(locale, { contentType, domain, exactScope: true, limit: 1_000 }),
+    getStyleEvidence(locale, { projectId, contentType, domain, exactScope: true, limit: 1_000 }),
     getQaRuns(locale, { contentType, domain, limit: 60 }),
     getStyleProfile(locale, contentType, domain)
   ]);
   const qaRuns = dedupeQaRuns(qaRunsRaw);
   const result = {
-    locale, contentType, domain, batchId,
+    locale, contentType, domain, batchId, projectId,
     evidenceCount: evidence.length,
     qaRunsReviewed: qaRuns.length,
     distilled: null,
@@ -195,7 +195,7 @@ export async function runEvolutionReview({
     result.fallbackReasons.distill = error.message;
   }
   try {
-    const profileResult = await distillUserProfileIfReady(locale);
+    const profileResult = await distillUserProfileIfReady(locale, { projectId });
     if (profileResult.profile) result.profile = profileResult.profile;
     else result.profilePending = { acceptedCount: profileResult.acceptedCount, threshold: profileResult.threshold };
   } catch (error) {

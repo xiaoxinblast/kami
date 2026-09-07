@@ -1510,6 +1510,7 @@ async function runBatch() {
   if (!paused && segments.some((segment) => segment.status === "done")) {
     try {
       const review = await api("/api/evolution/review", { method: "POST", body: JSON.stringify({
+        ...projectPayload(),
         locale: state.workbenchLocale,
         contentType: state.batchClassification?.contentType || "general",
         domain: $("#domain").value,
@@ -2195,8 +2196,8 @@ async function updateAssetLocale(locale) {
 async function loadStyleProfiles(locale) {
   try {
     const [drafts, active, pending] = await Promise.all([
-      api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&status=draft`),
-      api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&status=active`),
+      api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&status=draft&projectId=${encodeURIComponent(state.activeProjectId)}`),
+      api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&status=active&projectId=${encodeURIComponent(state.activeProjectId)}`),
       api(`/api/qa-cases/pending?locale=${encodeURIComponent(locale)}`)
     ]);
     renderStyleProfiles(drafts, active, pending);
@@ -2295,7 +2296,7 @@ function renderStyleProfiles(drafts, active, pending) {
     if (button.dataset.action === "evaluate") {
       button.disabled = true;
       try {
-        const job = await api(`/api/style-profiles/${encodeURIComponent(id)}/evaluate`, { method: "POST", body: JSON.stringify({ project: "default" }) });
+        const job = await api(`/api/style-profiles/${encodeURIComponent(id)}/evaluate`, { method: "POST", body: JSON.stringify({ project: state.activeProjectId || "default" }) });
         toast(`风格评测已进入后台：${job.progress.requested} 组留出对照，只有风格规范一个变量`);
         const finished = await pollStyleEvaluation(job.jobId);
         if (finished?.status === "completed") toast(finished.result?.report?.conclusion || "风格评测完成");
@@ -2308,7 +2309,7 @@ function renderStyleProfiles(drafts, active, pending) {
       return;
     }
     try {
-      await api(`/api/style-profiles/${encodeURIComponent(id)}/${button.dataset.action}`, { method: "POST", body: JSON.stringify({}) });
+      await api(`/api/style-profiles/${encodeURIComponent(id)}/${button.dataset.action}`, { method: "POST", body: JSON.stringify(projectPayload()) });
       toast(button.dataset.action === "activate" ? "已激活，开始参与翻译" : "已拒绝该草稿");
       await loadStyleProfiles(state.assetLocale);
     } catch (error) {
@@ -2317,7 +2318,7 @@ function renderStyleProfiles(drafts, active, pending) {
 
 仍要启用吗？本次越过评测闸门会记录在该风格规范上。`)) {
         try {
-          await api(`/api/style-profiles/${encodeURIComponent(id)}/activate`, { method: "POST", body: JSON.stringify({ force: true }) });
+          await api(`/api/style-profiles/${encodeURIComponent(id)}/activate`, { method: "POST", body: JSON.stringify({ ...projectPayload(), force: true }) });
           toast("已忽略评测结论并启用，该决定已记录");
           await loadStyleProfiles(state.assetLocale);
           return;
@@ -2377,7 +2378,7 @@ function splitStyleRules(instruction) {
 
 async function loadStyleGuidance(locale = state.styleLocale) {
   const [profiles, pending] = await Promise.all([
-    api(`/api/style-profiles?locale=${encodeURIComponent(locale)}`),
+    api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&projectId=${encodeURIComponent(state.activeProjectId)}`),
     api(`/api/qa-cases/pending?locale=${encodeURIComponent(locale)}`)
   ]);
   state.styleData = { profiles, pending };
@@ -2424,7 +2425,7 @@ function renderStyleGuidance() {
     const action = button.dataset.action;
     button.disabled = true;
     try {
-      await api(`/api/style-profiles/${encodeURIComponent(id)}/${action === "activate" ? "activate" : "reject"}`, { method: "POST" });
+      await api(`/api/style-profiles/${encodeURIComponent(id)}/${action === "activate" ? "activate" : "reject"}`, { method: "POST", body: JSON.stringify(projectPayload()) });
       toast(action === "activate" ? "风格已启用，后续翻译将注入该规则" : "风格已关闭，历史版本仍保留但不参与翻译");
       await loadStyleGuidance(state.styleLocale);
     } catch (error) { button.disabled = false; toast(error.message); }
@@ -2529,7 +2530,7 @@ async function confirmAssetPreflight() {
     state.importCompleted = true;
     state.assetPreflight = null;
     $("#assetPreflightDialog").close();
-    $("#mappingNote").textContent = `导入完成：术语 ${result.summary?.terms || 0} 条，主 TM ${result.summary?.memories || 0} 条；确认前未写入的候选不会进入项目。`;
+    $("#mappingNote").textContent = `导入完成：术语 ${result.summary?.terms || 0} 条，主 TM ${result.summary?.memories || 0} 条，接回原翻译轨迹 ${result.summary?.trajectoriesLinked || 0} 条${result.summary?.trajectoryAmbiguous ? `，${result.summary.trajectoryAmbiguous} 条重复原文无法唯一定位` : ""}。`;
     await Promise.all([loadAssets(state.assetLocale), loadMemories(state.memoryLocale)]);
     toast("双语资产导入完成");
     if (returnView) switchView(returnView);
@@ -2562,7 +2563,7 @@ async function commitMemoryImport() {
   try {
     $("#memoryImportConfirm").disabled = true;
     const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: false }) });
-    $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${result.summary?.memories ?? result.imported?.length ?? 0} 条。`;
+    $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${result.summary?.memories ?? result.imported?.length ?? 0} 条；接回原翻译轨迹 ${result.summary?.trajectoriesLinked || 0} 条${result.summary?.trajectoryAmbiguous ? `，${result.summary.trajectoryAmbiguous} 条需人工确认归属` : ""}。`;
     $("#memoryImportPreview").hidden = true;
     state.memoryImportPreview = null;
     await loadMemories(state.memoryLocale);

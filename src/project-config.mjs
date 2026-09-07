@@ -116,6 +116,7 @@ export function projectQaRule(id, settings = DEFAULT_PROJECT_SETTINGS) {
 
 export function projectRuleIdForIssue(issue = {}) {
   const type = String(issue.type || "");
+  if (type === "tm_exact_target_mismatch") return "tm_exact_target_mismatch";
   if (type === "protected_token" || type.startsWith("fact_placeholder") || type.startsWith("fact_url")) return "protected_token_parity";
   if (["required_term", "preserved_term", "forbidden_term"].includes(type)) return "term_consistency";
   if (type.startsWith("aiqa_terminology")) return "term_consistency";

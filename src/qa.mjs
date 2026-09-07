@@ -1,10 +1,27 @@
 import { textContainsTerm } from "./asset-governance.mjs";
-import { digitSequence, digitsRecoverable, extractProtectedTokens } from "./text.mjs";
+import { digitSequence, digitsRecoverable, extractProtectedTokens, normalizeSource } from "./text.mjs";
 import { checkOrthography } from "./orthography.mjs";
 import { checkRegisterExpectation } from "./register-classifier.mjs";
 import { applyProjectQaPolicy } from "./project-config.mjs";
 
-export function runQa({ source, translation, matches = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null }) {
+export function checkExactMasterTm({ translation = "", translationReferences = [] } = {}) {
+  const exactMasterTargets = [...new Set((Array.isArray(translationReferences) ? translationReferences : [])
+    .filter((reference) => reference?.libraryRole === "master"
+      && reference?.qualityStatus === "human_approved"
+      && Number(reference?.catMatchRate) >= 100)
+    .map((reference) => String(reference.target || "").trim())
+    .filter(Boolean))];
+  if (!exactMasterTargets.length || exactMasterTargets.some((target) => normalizeSource(target) === normalizeSource(translation))) return [];
+  return [{
+    severity: "error",
+    type: "tm_exact_target_mismatch",
+    category: "terminology",
+    expectedTargets: exactMasterTargets,
+    message: `原文与主 TM 精确一致，当前译文未采用主 TM 译文：${exactMasterTargets.join(" / ")}`
+  }];
+}
+
+export function runQa({ source, translation, matches = [], translationReferences = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null }) {
   const issues = [];
   for (const token of extractProtectedTokens(source)) {
     if (!String(translation).includes(token)) {
@@ -45,6 +62,7 @@ export function runQa({ source, translation, matches = [], locale = "", titleOve
       }
     }
   }
+  issues.push(...checkExactMasterTm({ translation, translationReferences }));
   // 目标语言标点约定是确定性规则，交给本地检查而不是靠模型自觉。
   issues.push(...checkOrthography({ source, translation, locale, titleOverrides }));
   // 语域（太营销 / 太网感 / 太普通）走确定性分类器而不是模型自由判断：

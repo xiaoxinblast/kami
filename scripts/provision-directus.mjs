@@ -398,6 +398,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("name", "画像名称", { required: true, sort: 2 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 3 }),
       textField("instructions", "偏好规则", { required: true, multiline: true, sort: 4 }),

@@ -303,17 +303,19 @@ async function getJsonQaRuns(locale, options = {}) {
     .slice(0, options.limit || 100);
 }
 
-async function getJsonUserProfile(locale) {
+async function getJsonUserProfile(locale, { projectId = "" } = {}) {
   const profiles = await readJson(join(ROOT, "styles", "profiles.json"), []);
-  return profiles.filter((item) => item.locale === assertLocale(locale) && item.status === "active").sort((a, b) => b.version - a.version)[0] || null;
+  const scope = String(projectId || "");
+  return profiles.filter((item) => item.locale === assertLocale(locale) && String(item.projectId || "") === scope && item.status === "active").sort((a, b) => b.version - a.version)[0] || null;
 }
 
 async function saveJsonUserProfile(input) {
   const path = join(ROOT, "styles", "profiles.json");
   const profiles = await readJson(path, []);
-  const previous = profiles.filter((item) => item.locale === input.locale).sort((a, b) => b.version - a.version)[0];
+  const projectId = String(input.projectId || "");
+  const previous = profiles.filter((item) => item.locale === input.locale && String(item.projectId || "") === projectId).sort((a, b) => b.version - a.version)[0];
   if (previous && input.status !== "draft") previous.status = "inactive";
-  const profile = { id: randomUUID(), ...input, version: (previous?.version || 0) + 1, status: input.status || "active", updatedAt: new Date().toISOString() };
+  const profile = { id: randomUUID(), ...input, projectId, version: (previous?.version || 0) + 1, status: input.status || "active", updatedAt: new Date().toISOString() };
   profiles.unshift(profile);
   await writeJsonAtomic(path, profiles);
   return profile;
@@ -413,7 +415,7 @@ async function listJsonStyleProfiles(locale, status, scope = null) {
     : items;
   return {
     styleProfiles: pick(inScope(styleProfiles)),
-    userProfiles: pick(userProfiles.filter((item) => item.locale === locale))
+    userProfiles: pick(userProfiles.filter((item) => item.locale === locale && (!scope?.projectId || String(item.projectId || "") === String(scope.projectId))))
   };
 }
 
@@ -423,7 +425,7 @@ async function activateJsonStyleProfile(id) {
   if (located.kind === "user_profile") {
     for (const item of located.profiles) {
       if (item.id === id) item.status = "active";
-      else if (item.locale === located.target.locale && item.status === "active") item.status = "inactive";
+      else if (item.locale === located.target.locale && String(item.projectId || "") === String(located.target.projectId || "") && item.status === "active") item.status = "inactive";
     }
     located.target.status = "active";
     await writeJsonAtomic(located.path, located.profiles);
@@ -1432,8 +1434,8 @@ export async function getQaRuns(locale, options) {
   return usesDirectus() ? getDirectusQaRuns(locale, options) : getJsonQaRuns(locale, options);
 }
 
-export async function getUserProfile(locale) {
-  return usesDirectus() ? getDirectusUserProfile(locale) : getJsonUserProfile(locale);
+export async function getUserProfile(locale, options = {}) {
+  return usesDirectus() ? getDirectusUserProfile(locale, options) : getJsonUserProfile(locale, options);
 }
 
 export async function saveUserProfile(input) {
@@ -1548,7 +1550,7 @@ export async function deleteBackgroundTask(id) {
   return usesDirectus() ? deleteDirectusBackgroundTask(id) : deleteJsonBackgroundTask(id);
 }
 
-/** `scope` ({ contentType, domain }) narrows styleProfiles to one exact scope; userProfiles stay global. */
+/** `scope` narrows styleProfiles by contentType/domain and userProfiles by projectId. */
 export async function listStyleProfiles(locale, status, scope = null) {
   return usesDirectus() ? listDirectusStyleProfiles(locale, status, scope) : listJsonStyleProfiles(locale, status, scope);
 }
