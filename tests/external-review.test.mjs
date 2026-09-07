@@ -9,7 +9,7 @@ function trajectory(id, source, overrides = {}) {
 test("外部审校终稿以项目内唯一原文接回原轨迹", () => {
   const result = linkExternalReviewTrajectories(
     [{ source: "メンテナンスを開始します。", target: "维护即将开始。" }],
-    [trajectory("t-1", "メンテナンスを開始します。")] 
+    [trajectory("t-1", "メンテナンスを開始します。")]
   );
   assert.equal(result.links[0].trajectory.id, "t-1");
   assert.equal(result.links[0].method, "unique_source");
