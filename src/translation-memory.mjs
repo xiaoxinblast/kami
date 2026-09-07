@@ -84,6 +84,10 @@ export function rankTranslationMemories(source, memories = [], {
   contentType = "",
   domain = "",
   project = "",
+  projectId = "",
+  entryId = "",
+  previousSource = "",
+  nextSource = "",
   channel = "",
   platform = "",
   region = "",
@@ -93,7 +97,9 @@ export function rankTranslationMemories(source, memories = [], {
   sessionId = "",
   now = new Date(),
   workingWindowMs,
-  allowRecentWorking = false
+  allowRecentWorking = false,
+  catMinFuzzy = 0,
+  llmMinRelevance = 0
 } = {}) {
   const normalized = normalizeSource(source);
   const nowMs = now instanceof Date ? now.valueOf() : Date.parse(now);
@@ -101,16 +107,18 @@ export function rankTranslationMemories(source, memories = [], {
   // must explicitly request working_consistency and provide a batch/task/session
   // binding before a machine-verified draft can enter the reference list.
   const governed = partitionTranslationMemories(memories, {
-    locale, contentType, domain, project, channel, platform, region, batchId, taskId, sessionId
+    locale, contentType, domain, project, projectId, channel, platform, region, batchId, taskId, sessionId
   }, {
     purpose: retrievalPurpose,
     now,
     ...(workingWindowMs === undefined ? {} : { workingWindowMs }),
-    allowRecentWorking
+    allowRecentWorking,
+    allowProjectWorking: Boolean(projectId)
   });
   const ranked = governed.references
     .map((memory) => {
       const { edit, overlap, exact } = lexicalScore(normalized, memory);
+      const cat = classifyCatMatch(source, memory, { entryId, previousSource, nextSource });
       // 可信度决定一条译例能不能充当规范，相关度决定它是否属于当前句。
       // 两者不能相加：旧实现把 human_approved 的 0.18 在 lexical 和 blended
       // 中各加一次，导致完全无关的人工译例天然高于 0.28 检索门槛。
@@ -125,6 +133,9 @@ export function rankTranslationMemories(source, memories = [], {
       const affinity = contextAffinity(memory, { platform, region, channel, campaign, project }, nowMs);
       return {
         ...memory,
+        catMatchRate: cat.rate,
+        catMatchKind: cat.kind,
+        matchEvidence: cat.rate ? `CAT ${cat.rate}% · ${cat.kind}` : "语义/模糊匹配",
         similarity: Number(score.toFixed(3)),
         semantic: cosine === null ? null : Number(cosine.toFixed(3)),
         tagMatch: Number(tags.toFixed(3)),
@@ -135,12 +146,52 @@ export function rankTranslationMemories(source, memories = [], {
       };
     })
     .filter((memory) => memory.similarity >= 0.28)
+    .filter((memory) => !Number(catMinFuzzy) || memory.catMatchRate || memory.similarity * 100 >= Number(catMinFuzzy))
+    .filter((memory) => !Number(llmMinRelevance) || memory.similarity * 100 >= Number(llmMinRelevance))
     .sort((a, b) => b.rankScore - a.rankScore
       || b.similarity - a.similarity
       || (QUALITY_RANK[b.qualityStatus] ?? 0) - (QUALITY_RANK[a.qualityStatus] ?? 0)
       || (b.qaScore || 0) - (a.qaScore || 0));
   // 找不到可靠译例时宁可返回空数组，也不为了凑满 UI 数量注入无关内容。
-  return ranked.slice(0, limit);
+  return ranked.sort((a, b) => {
+    const roleRank = { master: 3, reference: 2, working: 1 };
+    return (roleRank[b.libraryRole] || 0) - (roleRank[a.libraryRole] || 0)
+      || Number(a.libraryPriority ?? 100) - Number(b.libraryPriority ?? 100)
+      || b.rankScore - a.rankScore
+      || b.similarity - a.similarity
+      || (QUALITY_RANK[b.qualityStatus] ?? 0) - (QUALITY_RANK[a.qualityStatus] ?? 0)
+      || (b.qaScore || 0) - (a.qaScore || 0);
+  }).slice(0, limit);
+}
+
+function catComparable(value) {
+  return normalizeSource(String(value || "").replace(/<tag\b[^<>]*\/>/giu, " "));
+}
+
+function nonBreakTagSignature(value) {
+  return [...String(value || "").matchAll(/<tag\b([^<>]*)\/>/giu)].map((match) => {
+    const attrs = Object.fromEntries([...match[1].matchAll(/\b(id|type|desc)\s*=\s*(['"])(.*?)\2/giu)].map((item) => [item[1].toLowerCase(), item[3]]));
+    const description = `${attrs.type || ""} ${attrs.desc || ""}`.toLowerCase();
+    return /\bbr\b|换行|line[-_ ]?break/.test(description) ? "" : `${attrs.type || ""}|${attrs.desc || ""}`;
+  }).filter(Boolean).join("\u0001");
+}
+
+function sameContextValue(left, right) {
+  return Boolean(String(left || "").trim() && String(right || "").trim() && catComparable(left) === catComparable(right));
+}
+
+export function classifyCatMatch(source, memory, { entryId = "", previousSource = "", nextSource = "" } = {}) {
+  const exact = catComparable(source) === catComparable(memory?.source)
+    && nonBreakTagSignature(source) === nonBreakTagSignature(memory?.source);
+  if (!exact) return { rate: null, kind: "fuzzy", idMatch: false, contextMatch: false };
+  const idMatch = Boolean(entryId && memory?.entryId && String(entryId) === String(memory.entryId));
+  const previousMatch = sameContextValue(previousSource, memory?.previousSource);
+  const nextMatch = sameContextValue(nextSource, memory?.nextSource);
+  const contextMatch = Boolean(previousSource || nextSource) && Boolean(memory?.previousSource || memory?.nextSource)
+    && (!previousSource || previousMatch) && (!nextSource || nextMatch);
+  if (idMatch && contextMatch) return { rate: 102, kind: "double_context", idMatch: true, contextMatch: true };
+  if (idMatch || contextMatch) return { rate: 101, kind: "context", idMatch, contextMatch };
+  return { rate: 100, kind: "exact", idMatch: false, contextMatch: false };
 }
 
 export function rankQaCases(source, cases = [], { limit = 3, queryEmbedding = null } = {}) {

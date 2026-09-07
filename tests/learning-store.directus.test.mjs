@@ -99,7 +99,7 @@ test("Directus implements the same trajectory, versioned skill and evaluation co
     assert.equal(rolledBack.rolledBack.status, "inactive");
     assert.equal((await listTranslationSkills({ locale: "ja-JP", contentType: "dialogue", domain: "integration", project })).filter((item) => item.status === "champion").length, 1);
   } finally {
-    const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+    const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
     const headers = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
     for (const [collection, id] of created.reverse()) {
       await fetch(`${base}/items/${collection}/${id}`, { method: "DELETE", headers });
@@ -112,7 +112,7 @@ test("Directus unique scope keys prevent duplicate versions and concurrent champ
   const project = `learning-race-${Date.now()}`;
   const scope = { locale: "th-TH", contentType: "ui", domain: "integration", project };
   const created = [];
-  const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+    const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
   const headers = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
   try {
     const champion = await saveTranslationSkill({ ...scope, name: "race baseline", status: "champion", strategy: {} });

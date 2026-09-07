@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { assertLocale, LOCALES } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
+import { createDefaultProjectSettings, sanitizeProjectSettings } from "./project-config.mjs";
 import {
   deleteDirectusAsset,
   getDirectusAssets,
@@ -79,6 +80,12 @@ import {
   saveDirectusTrainingRun,
   listDirectusTrainingRuns,
   getDirectusTrainingRun
+  ,getDirectusProjects
+  ,getDirectusProject
+  ,saveDirectusProject
+  ,getDirectusResourceLibraries
+  ,saveDirectusResourceLibrary
+  ,deleteDirectusResourceLibrary
 } from "./directus-store.mjs";
 
 const ROOT = process.env.KAMI_DATA_DIR || fileURLToPath(new URL("../data", import.meta.url));
@@ -129,6 +136,7 @@ async function initializeJsonStore() {
   await mkdir(join(ROOT, "qa"), { recursive: true });
   await mkdir(join(ROOT, "batches"), { recursive: true });
   await mkdir(join(ROOT, "learning"), { recursive: true });
+  await mkdir(join(ROOT, "projects"), { recursive: true });
   for (const locale of Object.keys(LOCALES)) {
     const path = assetPath(locale);
     const current = await readJson(path, null);
@@ -138,11 +146,114 @@ async function initializeJsonStore() {
   }
 }
 
+function projectPath(id) {
+  return join(ROOT, "projects", `${String(id)}.json`);
+}
+
+function resourceLibraryPath(projectId) {
+  return join(ROOT, "projects", `${String(projectId)}-libraries.json`);
+}
+
+async function getJsonProjects({ status = "active", limit = 100 } = {}) {
+  let files = [];
+  try { files = await readdir(join(ROOT, "projects")); } catch (error) { if (error.code !== "ENOENT") throw error; }
+  const records = [];
+  for (const file of files.filter((name) => name.endsWith(".json") && !name.endsWith("-libraries.json"))) {
+    const item = await readJson(join(ROOT, "projects", file), null);
+    if (item && (!status || item.status === status)) records.push(item);
+  }
+  return records.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, Math.max(1, Number(limit) || 100));
+}
+
+async function getJsonProject(id) {
+  return readJson(projectPath(id), null);
+}
+
+async function saveJsonProject(input = {}) {
+  const id = String(input.id || randomUUID());
+  const existing = await getJsonProject(id);
+  const name = String(input.name || existing?.name || "").trim();
+  if (!name) throw new Error("项目名称不能为空");
+  const now = new Date().toISOString();
+  const project = {
+    id,
+    name,
+    description: String(input.description ?? existing?.description ?? "").trim(),
+    status: String(input.status ?? existing?.status ?? "active"),
+    settings: sanitizeProjectSettings(input.settings ?? existing?.settings ?? createDefaultProjectSettings()),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now
+  };
+  await writeJsonAtomic(projectPath(id), project);
+  return project;
+}
+
+async function getJsonResourceLibraries(projectId, { kind = "", limit = 500 } = {}) {
+  const normalizedProjectId = String(projectId || "").trim();
+  if (!normalizedProjectId) return [];
+  const items = await readJson(resourceLibraryPath(normalizedProjectId), []);
+  return items.filter((item) => item.projectId === normalizedProjectId && (!kind || item.kind === kind))
+    .sort((a, b) => Number(a.priority) - Number(b.priority) || String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+    .slice(0, Math.max(1, Number(limit) || 500));
+}
+
+async function saveJsonResourceLibrary(input = {}) {
+  const projectId = String(input.projectId || "").trim();
+  const name = String(input.name || "").trim();
+  if (!projectId || !name) throw new Error("资源库必须绑定项目并填写名称");
+  const path = resourceLibraryPath(projectId);
+  const items = await readJson(path, []);
+  const id = String(input.id || randomUUID());
+  const existing = items.find((item) => item.id === id);
+  const now = new Date().toISOString();
+  const kind = ["term_base", "translation_memory"].includes(input.kind) ? input.kind : "term_base";
+  const role = kind === "translation_memory" && ["master", "working", "reference"].includes(input.role) ? input.role : "reference";
+  const record = {
+    id,
+    projectId,
+    name,
+    kind,
+    role,
+    enabled: input.enabled !== false,
+    priority: Math.max(1, Math.min(9999, Number(input.priority) || 100)),
+    description: String(input.description || "").trim(),
+    entryCount: Math.max(0, Number(input.entryCount) || 0),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now
+  };
+  if (record.kind === "translation_memory" && record.enabled && ["master", "working"].includes(record.role)) {
+    const duplicate = items.find((item) => item.id !== id && item.kind === record.kind && item.role === record.role && item.enabled !== false);
+    if (duplicate) {
+      throw new Error(record.role === "master" ? "一个项目只能启用一个主 TM" : "一个项目只能启用一个工作 TM");
+    }
+  }
+  if (existing) items[items.indexOf(existing)] = record;
+  else items.unshift(record);
+  await writeJsonAtomic(path, items);
+  return record;
+}
+
+async function deleteJsonResourceLibrary(projectId, libraryId) {
+  const normalizedProjectId = String(projectId || "").trim();
+  const normalizedLibraryId = String(libraryId || "").trim();
+  if (!normalizedProjectId || !normalizedLibraryId) return false;
+  const path = resourceLibraryPath(normalizedProjectId);
+  const items = await readJson(path, []);
+  const target = items.find((item) => item.id === normalizedLibraryId);
+  if (!target) return false;
+  if (target.role === "master" || target.role === "working") throw new Error("主 TM 和工作 TM 不能删除，请先停用或改为参考 TM");
+  const next = items.filter((item) => item.id !== normalizedLibraryId);
+  await writeJsonAtomic(path, next);
+  return true;
+}
+
 async function getJsonMemories(locale, options = {}) {
   assertLocale(locale);
   const items = await readJson(join(ROOT, "memories", `${locale}.json`), []);
+  const projectId = String(options.projectId || "").trim();
   return items.filter((item) =>
-    (!options.contentType || (options.exactContentType ? item.contentType === options.contentType : options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general"))
+    (!projectId || item.projectId === projectId)
+    && (!options.contentType || (options.exactContentType ? item.contentType === options.contentType : options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general"))
     && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
   );
 }
@@ -175,7 +286,8 @@ async function getJsonStyleEvidence(locale, options = {}) {
         ? (!options.contentType || item.contentType === options.contentType) && (!options.domain || item.domain === options.domain)
         : (!options.contentType || options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")
           && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general"))
-      && (!options.batchId || item.batchId === options.batchId))
+      && (!options.batchId || item.batchId === options.batchId)
+      && (!options.projectId || item.projectId === options.projectId))
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, options.limit || 1_000);
 }
@@ -215,6 +327,7 @@ async function saveJsonStyleEvidence(input) {
   const item = {
     id: randomUUID(),
     ...input,
+    projectId: String(input.projectId || ""),
     machineTranslation: String(input.machineTranslation || "").trim(),
     polarity: input.polarity === "negative" ? "negative" : "positive",
     note: String(input.note || "").trim(),
@@ -365,9 +478,12 @@ async function getJsonQaCases(locale, options = {}) {
   return items.filter((item) => item.locale === assertLocale(locale) && item.status === "human_approved" && (!options.contentType || item.contentType === options.contentType) && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general"));
 }
 
-async function getJsonAssets(locale) {
+async function getJsonAssets(locale, options = {}) {
   const path = assetPath(locale);
-  return readJson(path, { locale, revision: 1, terms: [], memories: [], styleExamples: [] });
+  const data = await readJson(path, { locale, revision: 1, terms: [], memories: [], styleExamples: [] });
+  if (!options.projectId) return data;
+  const projectId = String(options.projectId).trim();
+  return { ...data, terms: data.terms.filter((item) => item.projectId === projectId) };
 }
 
 async function saveJsonAsset(locale, input) {
@@ -383,7 +499,9 @@ async function saveJsonAsset(locale, input) {
     domains: [...new Set((input.domains || ["general"]).filter(Boolean))],
     contentTypes: [...new Set((input.contentTypes || ["general"]).filter(Boolean))],
     contentTags: [...new Set((input.contentTags || []).filter(Boolean))],
-    enforcement: input.enforcement || "required",
+    projectId: String(input.projectId || ""),
+    libraryId: String(input.libraryId || ""),
+    enforcement: input.enforcement || "preferred",
     note: String(input.note || "").trim(),
     status: input.status || "approved",
     provenance: input.provenance || "manual",
@@ -430,12 +548,12 @@ async function saveJsonCorpus(input) {
   return document;
 }
 
-async function demoteJsonMemories(locale, source, exceptId) {
+async function demoteJsonMemories(locale, source, exceptId, { projectId = "" } = {}) {
   const path = join(ROOT, "memories", `${assertLocale(locale)}.json`);
   const items = await readJson(path, []);
   let demoted = 0;
   for (const item of items) {
-    if (item.source !== source || item.id === exceptId || item.qualityStatus === "rejected") continue;
+    if (item.source !== source || item.id === exceptId || item.qualityStatus === "rejected" || (projectId && item.projectId !== projectId)) continue;
     item.qualityStatus = item.qualityStatus === "human_approved" ? "machine_verified" : "rejected";
     demoted += 1;
   }
@@ -487,6 +605,7 @@ async function saveJsonBatchRun(input) {
   await writeJsonAtomic(join(ROOT, "batches", `${batchId}.json`), {
     batchId,
     filename: String(input.filename || ""),
+    projectId: String(input.projectId || ""),
     locale: assertLocale(input.locale),
     contentType: String(input.contentType || "general"),
     domain: String(input.domain || "general"),
@@ -504,7 +623,7 @@ async function getJsonBatchRun(batchId) {
   return readJson(join(ROOT, "batches", `${String(batchId)}.json`), null);
 }
 
-async function listJsonBatchRuns({ locale = "", status = "", search = "", limit = 200 } = {}) {
+async function listJsonBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
   let files = [];
   try { files = await readdir(join(ROOT, "batches")); } catch (error) { if (error.code !== "ENOENT") throw error; }
   const runs = (await Promise.all(files.filter((file) => file.endsWith(".json")).map((file) => readJson(join(ROOT, "batches", file), null)))).filter(Boolean);
@@ -514,7 +633,7 @@ async function listJsonBatchRuns({ locale = "", status = "", search = "", limit 
     const failedSegments = selected.filter((segment) => segment.status === "error").length;
     const qaPending = selected.filter((segment) => Boolean(segment.result?.aiQa?.fallbackReason) || (Number.isFinite(segment.result?.qaScore) && segment.result.qaScore < 90) || (segment.result?.issues || []).length > 0).length;
     return { batchId: run.batchId, filename: run.filename || "未命名任务", locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general", format: run.format || "", segmentationMode: run.segmentationMode || "sentence", status: failedSegments ? "needs_attention" : completedSegments < selected.length ? "in_progress" : qaPending ? "review" : "completed", totalSegments: selected.length, completedSegments, failedSegments, qaPending, createdAt: run.createdAt || run.updatedAt, updatedAt: run.updatedAt };
-  }).filter((item) => (!locale || item.locale === locale) && (!status || item.status === status) && (!search || item.filename.toLowerCase().includes(String(search).toLowerCase()))).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
+  }).filter((item) => (!locale || item.locale === locale) && (!projectId || item.projectId === projectId) && (!status || item.status === status) && (!search || item.filename.toLowerCase().includes(String(search).toLowerCase()))).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
 }
 
 async function saveJsonQaTask(input) {
@@ -1201,6 +1320,32 @@ async function updateJsonSkillEvaluation(id, patch) {
 
 export const DATA_ROOT = ROOT;
 
+export async function getProjects(options = {}) {
+  return usesDirectus() ? getDirectusProjects(options) : getJsonProjects(options);
+}
+
+export async function getProject(id) {
+  return usesDirectus() ? getDirectusProject(id) : getJsonProject(id);
+}
+
+export async function saveProject(input = {}) {
+  return usesDirectus() ? saveDirectusProject(input) : saveJsonProject(input);
+}
+
+export async function getResourceLibraries(projectId, options = {}) {
+  return usesDirectus() ? getDirectusResourceLibraries(projectId, options) : getJsonResourceLibraries(projectId, options);
+}
+
+export async function saveResourceLibrary(input = {}) {
+  return usesDirectus() ? saveDirectusResourceLibrary(input) : saveJsonResourceLibrary(input);
+}
+
+export async function deleteResourceLibrary(projectId, libraryId) {
+  return usesDirectus()
+    ? deleteDirectusResourceLibrary(projectId, libraryId)
+    : deleteJsonResourceLibrary(projectId, libraryId);
+}
+
 function usesDirectus() {
   return process.env.KAMI_STORE === "directus";
 }
@@ -1233,8 +1378,8 @@ export async function initializeStore() {
   }
 }
 
-export async function getAssets(locale) {
-  return usesDirectus() ? getDirectusAssets(locale) : getJsonAssets(locale);
+export async function getAssets(locale, options = {}) {
+  return usesDirectus() ? getDirectusAssets(locale, options) : getJsonAssets(locale, options);
 }
 
 export async function getAssetStats(locale) {
@@ -1331,8 +1476,8 @@ export async function rebuildEmbeddings(locale, options = {}) {
   return usesDirectus() ? rebuildDirectusEmbeddings(locale, options) : rebuildJsonEmbeddings(locale, model, options);
 }
 
-export async function demoteMemories(locale, source, exceptId) {
-  return usesDirectus() ? demoteDirectusMemories(locale, source, exceptId) : demoteJsonMemories(locale, source, exceptId);
+export async function demoteMemories(locale, source, exceptId, options = {}) {
+  return usesDirectus() ? demoteDirectusMemories(locale, source, exceptId, options) : demoteJsonMemories(locale, source, exceptId, options);
 }
 
 export async function approveQaCase(id) {

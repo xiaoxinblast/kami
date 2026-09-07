@@ -42,6 +42,9 @@ h3 { margin: 0; font-size: 13px; }
 .page-description { margin: 0; color: var(--muted); font-size: 14px; }
 .command-dock { min-height: 46px; padding: 5px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.76); box-shadow: 0 8px 22px rgba(20,44,33,.05); display: flex; align-items: center; gap: 6px; }
 .system-actions { display: flex; gap: 2px; }
+.project-switcher { display: inline-flex; align-items: center; gap: 5px; padding: 0 6px; color: #59665f; font-size: 11px; font-weight: 750; white-space: nowrap; }
+.project-switcher select { max-width: 150px; min-height: 30px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; color: var(--forest); background: var(--soft); font-size: 12px; font-weight: 700; }
+.resource-library-actions { display: flex; gap: 8px; margin: 8px 0 12px; }
 .text-action { border: 0; padding: 8px 9px; color: #59665f; background: transparent; text-decoration: none; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .text-action:hover { color: var(--forest); }
 .command-divider { width: 1px; height: 24px; margin: 0 3px; background: var(--line); }
@@ -572,7 +575,7 @@ select { min-width: 150px; }
 .learning-evidence-item .learning-evidence-target { color: #305d48; }
 
 dialog { width: min(560px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: 15px; box-shadow: var(--shadow); }
-dialog::backdrop { background: rgba(14,28,22,.45); backdrop-filter: blur(3px); }
+dialog::backdrop { background: rgba(14,28,22,.45); }
 .dialog-card { padding: 21px; }
 .dialog-head { display: flex; justify-content: space-between; margin-bottom: 17px; }
 .dialog-card > label { display: block; margin-top: 12px; }
@@ -964,6 +967,11 @@ select { min-width: 170px; }
 .asset-list-panel, .task-center-panel, .style-guidance-panel, .style-qa-panel, .import-learning-panel,
 .learning-champion-panel, .learning-candidates-panel, .learning-evaluation-panel, .learning-evidence-panel { max-width: none; }
 .asset-search { margin: 18px 0 7px; }
+.library-import-bar { display: flex; align-items: center; gap: 12px; margin: 18px 0 4px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--soft); }
+.library-file-button { display: flex; flex-direction: column; gap: 3px; min-width: 230px; cursor: pointer; }
+.library-file-button span { color: var(--forest); font-size: 13px; font-weight: 800; }
+.library-file-button small, .library-import-note { color: var(--muted); font-size: 11px; }
+.style-guide-import-bar .library-import-note { flex: 1; }
 .asset-row { grid-template-columns: 1fr 38px; gap: 12px; padding: 16px 5px; }
 .asset-row-main { grid-template-columns: minmax(180px,.8fr) 30px minmax(220px,1fr); gap: 10px; }
 .asset-row-main strong { font-size: 14px; }
@@ -1096,6 +1104,8 @@ dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 36px); 
 }
 
 @media (max-width: 760px) {
+  .library-import-bar { align-items: stretch; flex-direction: column; }
+  .library-file-button { min-width: 0; }
   .app-shell { display: block; }
   .learning-conflict-sides { grid-template-columns: 1fr; }
   .sidebar { position: sticky; top: 0; z-index: 15; width: 100%; height: auto; padding: 8px 10px; display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 8px; align-items: center; box-shadow: 0 6px 20px rgba(10,35,27,.16); }

@@ -8,7 +8,6 @@ const HEADER_SCAN_LIMIT = 12;
 const MAX_ROWS = 10_000;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const DOMAINS = new Set(["game", "marketing", "community", "general"]);
-const ENFORCEMENTS = new Set(["required", "preferred"]);
 const SHEET_MODES = new Set(["dialogue", "glossary", "mixed"]);
 const TERM_CATEGORIES = new Set([
   "proper_name",
@@ -26,6 +25,7 @@ const TERM_CATEGORIES = new Set([
 const PROPER_NAME_CATEGORIES = new Set(["proper_name", "character_name", "place_name", "organization_name"]);
 
 const SOURCE_HEADERS = ["日语", "日语原文", "日文", "日文原文", "日本语", "日本語", "ja", "ja-jp", "ja_jp", "japanese", "源文", "原文", "source", "source text"];
+const ID_HEADERS = ["id", "entry id", "entry_id", "条目id", "条目 ID", "句段id", "segment id", "key", "键"];
 const TARGET_HEADERS = Object.freeze({
   "zh-CN": ["中文", "简中", "简体中文", "简体", "zh-cn", "zh_cn", "chinese", "chinese simp", "chinese simplified"]
 });
@@ -96,13 +96,14 @@ function findHeader(worksheet, requestedLocale) {
   for (let rowNumber = 1; rowNumber <= Math.min(HEADER_SCAN_LIMIT, worksheet.rowCount); rowNumber += 1) {
     const values = rowValues(worksheet, rowNumber);
     const sourceColumn = values.findIndex((value) => headerMatches(value, SOURCE_HEADERS));
+    const idColumn = values.findIndex((value) => headerMatches(value, ID_HEADERS));
     const targetColumns = {};
     for (const [locale, aliases] of Object.entries(TARGET_HEADERS)) {
       const index = values.findIndex((value) => headerMatches(value, aliases));
       if (index >= 0 && (!requestedLocale || requestedLocale === locale)) targetColumns[locale] = index + 1;
     }
     const score = (sourceColumn >= 0 ? 4 : 0) + Object.keys(targetColumns).length * 4 + values.filter(Boolean).length * 0.05;
-    if (!best || score > best.score) best = { rowNumber, sourceColumn: sourceColumn + 1, targetColumns, score, values };
+    if (!best || score > best.score) best = { rowNumber, sourceColumn: sourceColumn + 1, idColumn: idColumn >= 0 ? idColumn + 1 : null, targetColumns, score, values };
   }
   return best;
 }
@@ -129,7 +130,7 @@ function inferColumns(worksheet, header, requestedLocale) {
     const fallback = columns.find((column) => column !== sourceColumn);
     if (fallback) targetColumns[requestedLocale] = fallback;
   }
-  return { startRow, sourceColumn, targetColumns };
+  return { startRow, sourceColumn, idColumn: header?.idColumn || null, targetColumns };
 }
 
 function averageColumnScore(worksheet, column, startRow, endRow, scorer) {
@@ -261,8 +262,10 @@ export function classifyImportCandidate(candidate) {
       : inferContentTags(next.parentSource || next.source, next.contentType, { sourceFile: next.sourceFile || next.filename || next.sheet || "" });
     next.contentTypeSource = next.contentTypeSource || "rules";
     next.domain = inferDomain(next, next.contentType);
-    next.enforcement = Number(next.score) >= 0.82 ? "required" : "preferred";
-    next.reasons = [...(next.reasons || []), `自动归类：术语 / ${next.domain} / ${next.enforcement === "required" ? "强制采用" : "优先参考"}`];
+    next.enforcement = "preferred";
+    next.reasons = [...(next.reasons || []), next.candidateOrigin === "ai-term-extraction"
+      ? `自动归类：句内候选术语 / ${next.domain} / 仅供参考`
+      : `自动归类：正式术语 / ${next.domain} / 精确命中后结合语境采用`];
   }
   return next;
 }
@@ -279,9 +282,11 @@ function analysisMapping(worksheet, analysis, requestedLocale) {
   }
   if (!Object.keys(targetColumns).length) return null;
   const headerRow = Number(analysis.headerRow);
+  const idColumn = Number(analysis.idColumn);
   return {
     startRow: Number.isInteger(headerRow) && headerRow > 0 ? headerRow + 1 : 1,
     sourceColumn,
+    idColumn: Number.isInteger(idColumn) && idColumn > 0 && idColumn <= worksheet.columnCount ? idColumn : null,
     targetColumns
   };
 }
@@ -311,6 +316,9 @@ function extractWorksheet(worksheet, requestedLocale, modelAnalysis, filename = 
     for (const [locale, column] of Object.entries(mapping.targetColumns)) {
       const target = compact(cellText(worksheet.getRow(rowNumber).getCell(column)));
       if (!target) continue;
+      const entryId = mapping.idColumn && mapping.idColumn !== mapping.sourceColumn
+        ? compact(cellText(worksheet.getRow(rowNumber).getCell(mapping.idColumn)))
+        : "";
       const candidateKey = `${stableKey(worksheet.name)}:${rowNumber}:${locale}:${stableKey(`${source}\u0000${target}`)}`;
       raw.push({
         locale,
@@ -321,6 +329,7 @@ function extractWorksheet(worksheet, requestedLocale, modelAnalysis, filename = 
         sheetModeConfidence: Number(mode.confidence.toFixed(2)),
         sheetModeSource: mode.source,
         candidateKey,
+        entryId,
         candidateRole: "full_pair",
         rowNumber,
         ...quality(source, target, locale, mode.mode)
@@ -476,7 +485,7 @@ export function validateNestedTerms(candidate, nestedTerms = []) {
       source,
       target,
       category,
-      enforcement: ENFORCEMENTS.has(String(raw.enforcement || "")) ? String(raw.enforcement) : (PROPER_NAME_CATEGORIES.has(category) ? "required" : "preferred"),
+      enforcement: "preferred",
       confidence: Number(confidence.toFixed(2)),
       sourceSpan: { start: sourceStart, end: sourceStart + source.length, text: source },
       targetSpan: { start: targetStart, end: targetStart + target.length, text: target },
@@ -511,7 +520,7 @@ export function applyModelDecisions(candidates, decisions = []) {
       ? "dialogue"
       : (modelAssetType === "memory" && Object.hasOwn(CONTENT_TYPES, String(model.contentType || "")) ? String(model.contentType) : candidate.contentType);
     const modelDomain = DOMAINS.has(String(model.domain || "")) ? String(model.domain) : candidate.domain;
-    const modelEnforcement = modelAssetType === "term" && ENFORCEMENTS.has(String(model.enforcement || "")) ? String(model.enforcement) : (modelAssetType === "term" ? candidate.enforcement : "preferred");
+    const modelEnforcement = modelAssetType === "term" ? candidate.enforcement : "preferred";
     const next = {
       ...candidate,
       assetType: modelAssetType,
@@ -563,7 +572,6 @@ export function expandNestedTermCandidates(candidates = []) {
           current.occurrences += 1;
         }
         current.score = Math.max(current.score, nested.confidence);
-        if (nested.enforcement === "required") current.enforcement = "required";
         continue;
       }
       grouped.set(key, {
@@ -588,7 +596,7 @@ export function expandNestedTermCandidates(candidates = []) {
         extractionConfidence: nested.confidence,
         sourceSpan: nested.sourceSpan,
         targetSpan: nested.targetSpan,
-        enforcement: nested.enforcement,
+        enforcement: "preferred",
         contentType: parent.contentType || "general",
         contentTags: parent.contentTags || [],
         contentTypeSource: "ai-nested-term",

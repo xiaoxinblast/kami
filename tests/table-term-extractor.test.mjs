@@ -63,31 +63,38 @@ test("AI 决策只能调整候选结论，不改写中外文本", () => {
   assert.equal(reviewed[0].decision, "excluded");
 });
 
-test("AI 清洗可以逐条修正资产类型、语体、领域与约束级别", () => {
+test("AI 清洗可以修正语体与领域，但不能把正式术语升级成硬约束", () => {
   const candidates = [
     { assetType: "memory", source: "限时七折优惠现已开启！", target: "期間限定30％オフを開催中です！", locale: "ja-JP", contentType: "general", contentTypeSource: "heuristic", score: 0.8, decision: "ready", reasons: [] },
     { assetType: "term", source: "高级通行证", target: "プレミアムパス", locale: "ja-JP", contentType: "general", domain: "game", enforcement: "preferred", score: 0.8, decision: "ready", reasons: [] }
   ];
   const reviewed = applyModelDecisions(candidates, [
     { index: 0, keep: true, confidence: 0.95, contentType: "marketing", reason: "宣发文案" },
-    { index: 1, keep: true, confidence: 0.95, assetType: "term", contentType: "marketing", domain: "game", enforcement: "required", reason: "官方固定名称" }
+    { index: 1, keep: true, confidence: 0.95, assetType: "term", contentType: "marketing", domain: "game", enforcement: "preferred", reason: "官方固定名称" }
   ]);
   assert.equal(reviewed[0].contentType, "marketing");
   assert.equal(reviewed[0].contentTypeSource, "ai");
   assert.equal(reviewed[1].contentType, "general");
-  assert.equal(reviewed[1].enforcement, "required");
+  assert.equal(reviewed[1].enforcement, "preferred");
   assert.equal(reviewed[1].domain, "game");
 });
 
 test("本地回退也会给每条候选生成安全的零设置分类", () => {
   const term = classifyImportCandidate({ assetType: "term", source: "高级通行证", target: "プレミアムパス", score: 0.94, reasons: [] });
   const announcement = classifyImportCandidate({ assetType: "memory", source: "维护将于明日上午十点开始，请提前退出游戏。", target: "メンテナンスは明日午前10時に開始します。", score: 0.8, reasons: [] });
-  assert.deepEqual({ type: term.assetType, contentType: term.contentType, domain: term.domain, enforcement: term.enforcement }, { type: "term", contentType: "item_name", domain: "game", enforcement: "required" });
+  assert.deepEqual({ type: term.assetType, contentType: term.contentType, domain: term.domain, enforcement: term.enforcement }, { type: "term", contentType: "item_name", domain: "game", enforcement: "preferred" });
   assert.equal(announcement.contentType, "announcement");
   assert.equal(announcement.domain, "game");
   assert.equal(announcement.enforcement, "preferred");
   const dialogue = classifyImportCandidate({ assetType: "memory", sheetMode: "dialogue", sheetModeConfidence: 0.96, source: "高级通行证现已开放。", target: "プレミアムパスが開放された。", score: 0.8, reasons: [] });
   assert.equal(dialogue.contentType, "dialogue");
+});
+
+test("直接导入与句内提取的术语都默认作为语境参考", () => {
+  const direct = classifyImportCandidate({ assetType: "term", source: "メンテナンス", target: "维护", score: 0.5, reasons: [] });
+  const nested = classifyImportCandidate({ assetType: "term", candidateOrigin: "ai-term-extraction", source: "王都", target: "王都", score: 0.99, reasons: [] });
+  assert.equal(direct.enforcement, "preferred");
+  assert.equal(nested.enforcement, "preferred");
 });
 
 test("工作表模式和中文源文决定父资产类型，目标语言长度不会造成跨语言漂移", async () => {

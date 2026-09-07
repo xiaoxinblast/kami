@@ -13,12 +13,13 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
 import { applyModelDecisions, classifyImportCandidate, expandNestedTermCandidates, extractTermPairs } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
 import { exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
+import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
 import { DEFAULT_TRANSLATION_STRATEGY, createDefaultTranslationSkill, effectiveStrategyValue, evaluateSkillPromotion, normalizedEditDistance, selectSkillHoldout, summarizeTrajectoryAttribution, validateCandidatePromotionState } from "./src/learning-engine.mjs";
 import { benchmarkTranslationSkill, createBenchmarkSnapshot } from "./src/skill-benchmark.mjs";
@@ -35,15 +36,19 @@ import { proposeChallengerSkill, selectProposalTrajectories } from "./src/skill-
 import { finalizeShareGlossGeneration } from "./src/share-gloss.mjs";
 import { buildAdoptedStyleEvidence, buildKnownIssueFeedbackRequest, presentKnownIssue, selectKnownIssues } from "./src/share-feedback.mjs";
 import { checkFactSchema, detectDeliveryContext, extractFactSchema } from "./src/fact-schema.mjs";
+import { applyProjectQaPolicy, projectRuleMetadata } from "./src/project-config.mjs";
 import { assessTranslationRisk, decideQualityRoute, qualityThresholdForRisk, selectTranslationRoute, TRANSLATION_ROUTES } from "./src/translation-routing.mjs";
-import { deriveTermCandidatesFromHumanFinal } from "./src/asset-governance.mjs";
+import { deriveTermCandidatesFromHumanFinal, MEMORY_PURPOSES } from "./src/asset-governance.mjs";
 import { buildReviewReceipt, normalizeReviewDecision } from "./src/review-receipt.mjs";
 import { createRegressionCandidateFromQaCase, decideRegressionCandidate, normalizeGoldSet, normalizeRegressionSuite } from "./src/gold-regression.mjs";
 import { decideReleaseGate, evaluateGoldRun, evaluateRegressionRun, resolveGateAssets } from "./src/quality-gate.mjs";
 import { buildTrainingExport, datasetToJsonl } from "./src/training-export.mjs";
 import { advanceTrainingRun, buildTrainingManifest, canTransition, createTrainingRun, freezeTrainingDataset } from "./src/training-pipeline.mjs";
+import { WorkbenchSessionMonitor, shutdownDockerDesktop } from "./src/workbench-lifecycle.mjs";
+import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public", import.meta.url));
+const PROJECT_ROOT = fileURLToPath(new URL("./", import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
 const AUTO_QA_EMBEDDING_SEGMENT_LIMIT = 80;
 const AUTO_QA_MODEL_ALIGNMENT_SEGMENT_LIMIT = 24;
@@ -52,6 +57,11 @@ const TERM_AI_CONCURRENCY = 5;
 const TERM_AI_BATCH_SIZE = 24;
 const TRANSLATION_PROMPT_VERSION = "kami-translation-v3";
 const importProgress = new Map();
+const AUTO_SHUTDOWN_ENABLED = process.env.KAMI_AUTO_SHUTDOWN === "1";
+const WORKBENCH_IDLE_SHUTDOWN_MS = 15_000;
+const WORKBENCH_SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
+let workbenchSessionMonitor = null;
+let workbenchShutdownStarted = false;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -396,7 +406,7 @@ function assertTrajectoryBinding(existing, { locale, source, contentType, domain
 }
 
 function trajectoryMetricsFromIssues(issues = [], score = null, matches = []) {
-  const required = matches.filter((item) => item.mode === "exact" && item.term?.enforcement === "required");
+  const required = matches.filter((item) => item.mode === "exact" && !item.scopeMismatch);
   const missing = new Set(issues.filter((item) => item.type === "required_term").map((item) => item.message));
   return {
     qaScore: Number.isFinite(score) ? score : null,
@@ -480,6 +490,16 @@ async function readJsonBody(req) {
   }
 }
 
+function readWorkbenchSessionId(body) {
+  const id = String(body?.id || "").trim();
+  if (!WORKBENCH_SESSION_ID_PATTERN.test(id)) {
+    const error = new Error("工作台页面标识无效");
+    error.statusCode = 400;
+    throw error;
+  }
+  return id;
+}
+
 async function classify(body) {
   // 表格自带的"位置/描述"列是比正文更强的用途信号，优先于文本启发式。
   const { descriptor, location } = descriptorFromContext(body.neighborContext);
@@ -506,22 +526,65 @@ function concreteDomain(value, { text = "", contentType = "general" } = {}) {
   return resolveDomain(text, value, { contentType }).domain;
 }
 
+/** Load only enabled term libraries for a project and decorate each term with
+ * the library metadata that is shown to the model and used for conflict order.
+ * A project id is an isolation boundary: an unassigned/disabled library entry
+ * must not leak into another project's match candidates. */
+async function getProjectAssets(locale, projectId = "") {
+  const normalizedProjectId = String(projectId || "").trim();
+  const assets = await getAssets(locale, { projectId: normalizedProjectId });
+  if (!normalizedProjectId) return { assets, libraries: [] };
+  const libraries = await getResourceLibraries(normalizedProjectId, { kind: "term_base" });
+  const byId = new Map(libraries.map((library) => [library.id, library]));
+  return {
+    libraries,
+    assets: {
+      ...assets,
+      terms: (assets.terms || [])
+        .map((term) => ({ ...term, library: byId.get(term.libraryId) || null }))
+        .filter((term) => term.library?.enabled === true)
+        .map((term) => ({
+          ...term,
+          libraryId: term.library.id,
+          libraryName: term.library.name,
+          libraryPriority: term.library.priority,
+          libraryEnabled: term.library.enabled
+        }))
+    }
+  };
+}
 
-async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, contentType, domain, batchId, providedReferences = null, humanDecisions = [], passScore = 90, maxRevisions = 2 }) {
+
+async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, contentType, domain, batchId, providedReferences = null, humanDecisions = [], passScore = 90, maxRevisions = 2, projectSettings = null, projectId = "" }) {
   const queryEmbedding = await embedSource(contextPack.source);
-  const references = providedReferences || rankTranslationMemories(
-    contextPack.source,
-    await getMemories(locale, { contentType, domain, limit: -1, exactContentType: true }),
-    { limit: 5, queryEmbedding, contentTags: contextPack.contentTags || [] }
-  );
+  let references = providedReferences;
+  if (!references) {
+    const [memories, libraries] = await Promise.all([
+      getMemories(locale, { contentType, domain, limit: -1, exactContentType: true, projectId }),
+      projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
+    ]);
+    const librariesById = new Map(libraries.map((library) => [library.id, library]));
+    const scopedMemories = memories.map((memory) => {
+      const library = librariesById.get(memory.libraryId);
+      return library ? { ...memory, libraryName: library.name, libraryRole: library.role, libraryPriority: library.priority, libraryEnabled: library.enabled } : memory;
+    }).filter((memory) => !projectId || memory.libraryEnabled === true);
+    references = rankTranslationMemories(contextPack.source, scopedMemories, {
+      limit: 5,
+      queryEmbedding,
+      contentTags: contextPack.contentTags || [],
+      projectId,
+      catMinFuzzy: projectSettings?.tm?.catMinFuzzy || 60,
+      llmMinRelevance: projectSettings?.tm?.llmMinRelevance || 60
+    });
+  }
   // 审校环节只能引用人工批准的译例；本系统自己 QA 通过后写回的机器译文另开一档，
   // 否则一次错误会在下一次审校里被当成"已批准"的规范。
   const { approved: approvedReferences, machineDrafts } = splitReferenceAuthority(references);
   const qaCases = contextPack.qaGuidance || [];
   let translation = initialTranslation;
   const deterministicIssues = (value) => [
-    ...runQa({ source: contextPack.source, translation: value, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.classification?.contentType || contentType || "general", registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null }),
-    ...checkFactSchema({ schema: contextPack.factSchema || extractFactSchema({ source: contextPack.source }), translation: value, locale })
+    ...runQa({ source: contextPack.source, translation: value, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: contextPack.classification?.contentType || contentType || "general", registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
+    ...applyProjectQaPolicy(checkFactSchema({ schema: contextPack.factSchema || extractFactSchema({ source: contextPack.source }), translation: value, locale }), projectSettings || undefined)
   ];
   let hardIssues = deterministicIssues(translation);
   let aiIssues = [];
@@ -717,7 +780,7 @@ async function previewTermImport(body, onProgress = () => {}) {
   let candidates = extracted.candidates.map((candidate) => classifyImportCandidate({ ...candidate, sourceFile: body.filename || "" }));
   const assetsByLocale = {};
   const locales = [...new Set(candidates.map((candidate) => candidate.locale))];
-  await Promise.all(locales.map(async (locale) => { assetsByLocale[locale] = (await getAssets(locale)).terms; }));
+  await Promise.all(locales.map(async (locale) => { assetsByLocale[locale] = (await getProjectAssets(locale, body.projectId)).assets.terms; }));
 
   const ai = { requested: useModel, used: false, reviewed: 0, total: candidates.length, missing: candidates.length, retries: 0, fallbackReason: "" };
   if (useModel) {
@@ -759,12 +822,92 @@ async function previewTermImport(body, onProgress = () => {}) {
   ai.nestedTerms = nestedTerms.length;
   ai.candidateTotal = candidates.length;
   extracted.candidates = candidates;
+  extracted.projectId = String(body.projectId || "").trim();
   extracted.statistics = { ...extracted.statistics, ...importStatistics(candidates) };
   extracted.ai = ai;
   onProgress({ phase: "saving", message: "正在写入 Directus 审核队列", percent: 92, completed: 0, total: 1 });
   const saved = await saveImportPreview(extracted);
   onProgress({ phase: "completed", message: "识别与清洗完成", percent: 100, completed: 1, total: 1 });
   return { ...extracted, ...saved };
+}
+
+/** Local-only multi-file bilingual asset preflight.  It deliberately does not
+ * call a model or write a candidate to the asset tables; the caller must send
+ * the returned candidates to the commit endpoint after reviewing the defaults. */
+async function previewBilingualAssets(body = {}) {
+  const projectId = String(body.projectId || "").trim();
+  if (!projectId || !(await getProject(projectId))) throw Object.assign(new Error("项目不存在"), { statusCode: 404 });
+  const files = Array.isArray(body.files) ? body.files.slice(0, 50) : [];
+  if (!files.length) throw Object.assign(new Error("没有待预检的双语资产文件"), { statusCode: 400 });
+  const previews = [];
+  const candidates = [];
+  for (const file of files) {
+    const filename = String(file?.filename || "").trim();
+    const encoded = String(file?.base64 || "").replace(/^data:[^;]+;base64,/u, "");
+    if (!filename || !encoded) {
+      previews.push({ filename, type: "unknown", entries: 0, anomalies: ["文件名或内容为空"], defaultPurpose: "tm" });
+      continue;
+    }
+    try {
+      const lower = filename.toLowerCase();
+      let pairs;
+      let type;
+      let defaultPurpose = "tm";
+      if (/\.(xliff|mqxliff)$/iu.test(lower)) {
+        type = lower.endsWith(".mqxliff") ? "mqxliff" : "xliff";
+        pairs = extractXliffPairs(Buffer.from(encoded, "base64"), filename);
+      } else if (/\.(xlsx|csv)$/iu.test(lower)) {
+        type = lower.endsWith(".csv") ? "csv" : "xlsx";
+        const extracted = await extractTermPairs({ filename, base64: encoded, locale: "zh-CN" });
+        defaultPurpose = extracted.fileMode === "glossary" ? "term_cleaning" : "tm";
+        pairs = extracted.candidates.map((candidate) => ({
+          entryId: candidate.entryId || "",
+          source: candidate.source,
+          target: candidate.target,
+          sourceRow: candidate.rowNumber || null,
+          sheet: candidate.sheet || "",
+          context: candidate.sheetModeReason || candidate.sheet || ""
+        }));
+      } else {
+        previews.push({ filename, type: "unsupported", entries: 0, anomalies: ["仅支持 .xlsx、.csv、.xliff、.mqxliff"], defaultPurpose: "tm" });
+        continue;
+      }
+      const fileCandidates = pairs.map((pair, index) => ({
+        ...pair,
+        locale: "zh-CN",
+        assetType: defaultPurpose === "term_cleaning" ? "term" : "memory",
+        purpose: defaultPurpose,
+        styleEvidence: false,
+        decision: "ready",
+        selected: true,
+        rowNumber: pair.sourceRow || index + 1,
+        score: 1,
+        contentType: "general",
+        domain: "general",
+        sourceFile: filename,
+        sourceRow: pair.sourceRow || index + 1
+      }));
+      candidates.push(...fileCandidates);
+      previews.push({
+        filename,
+        type,
+        entries: fileCandidates.length,
+        anomalies: fileCandidates.length ? [] : ["未找到完整双语条目"],
+        defaultPurpose,
+        defaults: { termCleanup: defaultPurpose === "term_cleaning", styleEvidence: false, tm: defaultPurpose === "tm" }
+      });
+    } catch (error) {
+      previews.push({ filename, type: "invalid", entries: 0, anomalies: [error.message], defaultPurpose: "tm" });
+    }
+  }
+  return {
+    batchId: randomUUID(),
+    projectId,
+    files: previews,
+    candidates,
+    statistics: { files: previews.length, entries: candidates.length, anomalies: previews.filter((file) => file.anomalies?.length).length },
+    write: { modelCalled: false, databaseWritten: false }
+  };
 }
 
 async function commitTermImport(body, onProgress = null) {
@@ -777,6 +920,10 @@ async function commitTermImport(body, onProgress = null) {
     if (typeof onProgress === "function") onProgress(update);
   };
   const total = body.candidates.length;
+  const projectId = String(body.projectId || "").trim();
+  const projectLibraries = projectId ? await getResourceLibraries(projectId) : [];
+  const masterTm = projectLibraries.find((library) => library.kind === "translation_memory" && library.role === "master");
+  const termLibrary = projectLibraries.find((library) => library.kind === "term_base" && library.enabled) || projectLibraries.find((library) => library.kind === "term_base");
   let done = 0;
   const imported = [];
   const skipped = [];
@@ -795,6 +942,7 @@ async function commitTermImport(body, onProgress = null) {
       const target = String(candidate.target || "").trim();
       if (!source || !target) throw new Error("源词或译法为空");
       const fallback = classifyImportCandidate({ ...candidate, source, target, sourceFile: body.filename || candidate.sourceFile || "" });
+      const sourceFile = String(candidate.sourceFile || body.filename || "").trim();
       const requestedContentType = String(body.contentType || "auto");
       const contentType = requestedContentType !== "auto" && Object.hasOwn(CONTENT_TYPES, requestedContentType)
         ? requestedContentType
@@ -805,28 +953,32 @@ async function commitTermImport(body, onProgress = null) {
       const domain = ["game", "marketing", "community", "general"].includes(String(body.domain || ""))
         ? String(body.domain)
         : (["game", "marketing", "community", "general"].includes(candidate.domain) ? candidate.domain : fallback.domain);
-      const enforcement = ["required", "preferred"].includes(String(body.enforcement || ""))
-        ? String(body.enforcement)
-        : (["required", "preferred"].includes(candidate.enforcement) ? candidate.enforcement : fallback.enforcement);
+      const enforcement = "preferred";
       if (candidate.assetType === "memory") {
+        if (projectId && !masterTm) throw new Error("当前项目没有启用主 TM，无法写入人工确认译文");
         const memory = await saveMemory(locale, {
           source, target, domain, contentType,
           contentTags,
-          qualityStatus: "human_approved", qaScore: 100, provenance: "table-import", sourceFile: body.filename,
-          batchId: body.batchId, sourceRow: candidate.rowNumber
+          qualityStatus: "human_approved", qaScore: 100, provenance: "table-import", sourceFile,
+          batchId: body.batchId, sourceRow: candidate.rowNumber, projectId, project: projectId, libraryId: masterTm?.id || "",
+          entryId: candidate.entryId || "", previousSource: candidate.previousSource || "", nextSource: candidate.nextSource || ""
         });
-        const evidence = await saveStyleEvidence({
+        const allowStyleEvidence = candidate.styleEvidence === true || (candidate.styleEvidence === undefined && body.styleEvidence !== false);
+        const evidence = allowStyleEvidence ? await saveStyleEvidence({
           locale, source, target, contentType, domain,
           contentTags,
-          batchId: body.batchId, sourceFile: body.filename, sourceRow: candidate.rowNumber, status: "accepted", provenance: "table-import"
-        });
-        const scopeKey = `${locale}\u0000${contentType}\u0000${domain}`;
-        const evidenceGroup = styleEvidenceByScope.get(scopeKey) || [];
-        evidenceGroup.push({ ...candidate, evidenceId: evidence.id });
-        styleEvidenceByScope.set(scopeKey, evidenceGroup);
+          batchId: body.batchId, sourceFile, sourceRow: candidate.rowNumber, projectId, status: "accepted", provenance: "table-import"
+        }) : null;
+        if (evidence) {
+          const scopeKey = `${locale}\u0000${contentType}\u0000${domain}`;
+          const evidenceGroup = styleEvidenceByScope.get(scopeKey) || [];
+          evidenceGroup.push({ ...candidate, evidenceId: evidence.id });
+          styleEvidenceByScope.set(scopeKey, evidenceGroup);
+        }
         imported.push({ id: memory.id, source, target, locale, assetType: "memory", contentType, domain });
       } else {
-        const current = (await getAssets(locale)).terms.filter((term) => term.source.toLocaleLowerCase() === source.toLocaleLowerCase());
+        if (projectId && !termLibrary) throw new Error("当前项目没有启用术语库，无法写入术语");
+        const current = (await getProjectAssets(locale, projectId)).assets.terms.filter((term) => term.source.toLocaleLowerCase() === source.toLocaleLowerCase());
         if (current.some((term) => term.target.toLocaleLowerCase() === target.toLocaleLowerCase())) {
           skipped.push({ source, locale, reason: "已存在相同对照" });
           decisions.push(decision);
@@ -840,8 +992,9 @@ async function commitTermImport(body, onProgress = null) {
         const term = await saveAsset(locale, {
           source, target, aliases: [], forbidden: [], domains: [domain], contentTypes: [contentType || "general"], contentTags,
           enforcement, status: "approved",
-          provenance: `table-import:${String(body.filename || "unknown").slice(0, 120)}`,
-          note: `批次 ${body.batchId} · 原表第 ${candidate.rowNumber || "?"} 行 · 清洗分 ${candidate.score ?? "-"}`
+          provenance: `table-import:${String(sourceFile || "unknown").slice(0, 120)}`,
+          note: `批次 ${body.batchId} · 原表第 ${candidate.rowNumber || "?"} 行 · 清洗分 ${candidate.score ?? "-"}`,
+          projectId, libraryId: termLibrary?.id || ""
         });
         imported.push({ id: term.id, source, target, locale, assetType: "term", domain, enforcement });
       }
@@ -922,6 +1075,16 @@ async function apiHandler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/health") {
     return json(res, 200, { ok: true, version: "0.7.0", locales: ACTIVE_LOCALES, backend: getStoreMetadata() });
   }
+  if (req.method === "POST" && url.pathname === "/api/workbench-session") {
+    const sessionId = readWorkbenchSessionId(await readJsonBody(req));
+    const accepted = workbenchSessionMonitor ? workbenchSessionMonitor.touch(sessionId) : true;
+    return json(res, accepted ? 200 : 409, { ok: accepted, managed: Boolean(workbenchSessionMonitor) });
+  }
+  if (req.method === "POST" && url.pathname === "/api/workbench-session/close") {
+    const sessionId = readWorkbenchSessionId(await readJsonBody(req));
+    const accepted = workbenchSessionMonitor ? workbenchSessionMonitor.close(sessionId) : true;
+    return json(res, accepted ? 200 : 409, { ok: accepted, managed: Boolean(workbenchSessionMonitor) });
+  }
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
     const assets = {};
     for (const locale of ACTIVE_LOCALES) {
@@ -930,14 +1093,73 @@ async function apiHandler(req, res, url) {
     }
     return json(res, 200, { locales: Object.fromEntries(ACTIVE_LOCALES.map((locale) => [locale, LOCALES[locale]])), contentTypes: CONTENT_TYPES, contentTags: CONTENT_TAGS, provider: getProviderConfig(), backend: getStoreMetadata(), assets });
   }
+  if (req.method === "GET" && url.pathname === "/api/projects") {
+    return json(res, 200, { projects: await getProjects({ status: url.searchParams.get("status") || "active" }) });
+  }
+  if (req.method === "POST" && url.pathname === "/api/projects") {
+    const body = await readJsonBody(req);
+    const project = await saveProject({ name: body.name, description: body.description, settings: body.settings });
+    const libraries = [];
+    for (const seed of [
+      { name: "术语库", kind: "term_base", role: "reference", priority: 1 },
+      { name: "主 TM", kind: "translation_memory", role: "master", priority: 1 },
+      { name: "工作 TM", kind: "translation_memory", role: "working", priority: 2 }
+    ]) libraries.push(await saveResourceLibrary({ projectId: project.id, ...seed }));
+    return json(res, 201, { project, libraries });
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/projects/") && url.pathname.endsWith("/libraries")) {
+    const projectId = decodeURIComponent(url.pathname.slice("/api/projects/".length, -"/libraries".length));
+    const project = await getProject(projectId);
+    if (!project) return json(res, 404, { error: "项目不存在" });
+    return json(res, 200, { projectId, libraries: await getResourceLibraries(projectId) });
+  }
+  if (req.method === "POST" && url.pathname.startsWith("/api/projects/") && url.pathname.endsWith("/libraries")) {
+    const projectId = decodeURIComponent(url.pathname.slice("/api/projects/".length, -"/libraries".length));
+    if (!await getProject(projectId)) return json(res, 404, { error: "项目不存在" });
+    const body = await readJsonBody(req);
+    return json(res, 201, { library: await saveResourceLibrary({ ...body, projectId }) });
+  }
+  if ((req.method === "PATCH" || req.method === "DELETE") && url.pathname.startsWith("/api/projects/") && url.pathname.includes("/libraries/")) {
+    const prefix = "/api/projects/";
+    const marker = "/libraries/";
+    const rest = url.pathname.slice(prefix.length);
+    const markerIndex = rest.indexOf(marker);
+    const projectId = decodeURIComponent(markerIndex >= 0 ? rest.slice(0, markerIndex) : "");
+    const libraryId = decodeURIComponent(markerIndex >= 0 ? rest.slice(markerIndex + marker.length) : "");
+    if (!projectId || !libraryId || !(await getProject(projectId))) return json(res, 404, { error: "项目或资源库不存在" });
+    if (req.method === "DELETE") {
+      const deleted = await deleteResourceLibrary(projectId, libraryId);
+      return deleted ? json(res, 200, { ok: true, projectId, libraryId }) : json(res, 404, { error: "资源库不存在" });
+    }
+    const body = await readJsonBody(req);
+    const existing = (await getResourceLibraries(projectId)).find((library) => library.id === libraryId);
+    if (!existing) return json(res, 404, { error: "资源库不存在" });
+    return json(res, 200, { library: await saveResourceLibrary({ ...existing, ...body, id: libraryId, projectId }) });
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/projects/")) {
+    const projectId = decodeURIComponent(url.pathname.slice("/api/projects/".length));
+    const project = await getProject(projectId);
+    return project ? json(res, 200, { ...project, qaRuleMetadata: projectRuleMetadata() }) : json(res, 404, { error: "项目不存在" });
+  }
+  if (req.method === "PATCH" && url.pathname.startsWith("/api/projects/")) {
+    const projectId = decodeURIComponent(url.pathname.slice("/api/projects/".length));
+    const body = await readJsonBody(req);
+    const project = await getProject(projectId);
+    if (!project) return json(res, 404, { error: "项目不存在" });
+    return json(res, 200, await saveProject({ ...project, ...body, id: projectId }));
+  }
+  if (req.method === "GET" && url.pathname === "/api/memories") {
+    const locale = assertActiveLocale(url.searchParams.get("locale") || "zh-CN");
+    return json(res, 200, { memories: await getMemories(locale, { projectId: url.searchParams.get("projectId") || "", contentType: "general", domain: "general", limit: 500 }) });
+  }
   if (req.method === "GET" && url.pathname === "/api/assets") {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
-    return json(res, 200, await getAssets(locale));
+    return json(res, 200, (await getProjectAssets(locale, url.searchParams.get("projectId") || "")).assets);
   }
   if (req.method === "POST" && url.pathname === "/api/assets") {
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale);
-    return json(res, 201, await saveAsset(locale, body.term || {}));
+    return json(res, 201, await saveAsset(locale, { ...(body.term || {}), projectId: body.projectId || body.term?.projectId || "" }));
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/assets/")) {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
@@ -1016,7 +1238,13 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/match") {
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale);
-    const assets = await getAssets(locale);
+    const projectId = String(body.projectId || "").trim();
+    const assets = (await getProjectAssets(locale, projectId)).assets;
+    if (projectId && !(await getProject(projectId))) {
+      const error = new Error("项目不存在");
+      error.statusCode = 404;
+      throw error;
+    }
     return json(res, 200, {
       locale,
       matches: matchTerms(body.text, assets, { contentType: body.contentType, domain: body.domain, ...deliveryContext(body, body.text) })
@@ -1031,6 +1259,93 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     const refined = refineCorpus(body.text, body.options);
     return json(res, 201, await saveCorpus({ ...body, ...refined }));
+  }
+  if (req.method === "POST" && url.pathname === "/api/tm-import/preview") {
+    const body = await readJsonBody(req);
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    const filename = String(body.filename || "").trim();
+    if (!/\.(xlsx|csv|xliff|mqxliff)$/iu.test(filename)) return json(res, 400, { error: "人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff" });
+    const encoded = String(body.base64 || "").replace(/^data:[^;]+;base64,/u, "");
+    const pairs = /\.(xlsx|csv)$/iu.test(filename)
+      ? (await extractTermPairs({ filename, base64: encoded, locale: "zh-CN" })).candidates.map((candidate) => ({
+        entryId: candidate.entryId || "",
+        source: candidate.source,
+        target: candidate.target,
+        previousSource: "",
+        nextSource: "",
+        context: candidate.sheet || "",
+        sourceRow: candidate.rowNumber || null,
+        sheet: candidate.sheet || ""
+      }))
+      : extractXliffPairs(Buffer.from(encoded, "base64"), filename);
+    const candidates = pairs.map((pair, index) => ({
+      ...pair, locale: "zh-CN", assetType: "memory", decision: "ready", selected: true,
+      rowNumber: index + 1, score: 1, contentType: "general", domain: "general",
+      sourceFile: filename, sourceRow: index + 1
+    }));
+    const fileType = filename.toLowerCase().endsWith(".mqxliff") ? "mqxliff" : filename.toLowerCase().endsWith(".xliff") ? "xliff" : filename.toLowerCase().endsWith(".csv") ? "csv" : "xlsx";
+    return json(res, 200, {
+      batchId: randomUUID(),
+      filename,
+      fileType: "tm",
+      sourceFileType: fileType,
+      projectId,
+      candidates,
+      statistics: { rowsScanned: pairs.length, pairedRows: pairs.length },
+      write: { modelCalled: false, databaseWritten: false }
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/api/assets-import/preview") {
+    return json(res, 200, await previewBilingualAssets(await readJsonBody(req)));
+  }
+  if (req.method === "POST" && url.pathname === "/api/assets-import/commit") {
+    const body = await readJsonBody(req);
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    if (!body.batchId || !Array.isArray(body.candidates)) return json(res, 400, { error: "预检批次或候选无效" });
+    const candidates = body.candidates.map((candidate) => ({
+      ...candidate,
+      selected: candidate.selected !== false,
+      // 用户在预检弹窗里可以把单个文件改成术语清洗、TM 或风格证据。
+      assetType: candidate.purpose === "term_cleaning" ? "term" : "memory"
+    }));
+    const persisted = await saveImportPreview({
+      batchId: body.batchId,
+      projectId,
+      filename: body.filename || candidates[0]?.sourceFile || "双语资产导入",
+      fileType: "multi",
+      requestedLocale: "zh-CN",
+      candidates,
+      statistics: { rowsScanned: candidates.length, pairedRows: candidates.length },
+      fileMode: "multi",
+      ai: { used: false, requested: false }
+    });
+    return json(res, 200, await commitTermImport({
+      ...body,
+      projectId,
+      batchId: persisted.batchId,
+      candidates: persisted.candidates,
+      // 资产预检默认不蒸馏风格证据，只有用户显式打开时才写入。
+      styleEvidence: body.styleEvidence === true || candidates.some((candidate) => candidate.styleEvidence === true)
+    }));
+  }
+  if (req.method === "POST" && url.pathname === "/api/tm-import/commit") {
+    const body = await readJsonBody(req);
+    if (!body.batchId || !Array.isArray(body.candidates)) return json(res, 400, { error: "TM 导入批次或候选无效" });
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    const persisted = await saveImportPreview({
+      filename: body.filename || "人工 TM 导入",
+      fileType: body.sourceFileType || "tm",
+      requestedLocale: "zh-CN",
+      projectId,
+      candidates: body.candidates,
+      statistics: { rowsScanned: body.candidates.length, pairedRows: body.candidates.length },
+      fileMode: "tm",
+      ai: { used: false, requested: false }
+    });
+    return json(res, 200, await commitTermImport({ ...body, projectId, batchId: persisted.batchId, candidates: persisted.candidates }));
   }
   if (req.method === "POST" && url.pathname === "/api/term-import/preview") {
     const body = await readJsonBody(req);
@@ -1080,7 +1395,7 @@ async function apiHandler(req, res, url) {
     }
     const assetsByLocale = {};
     const locales = [...new Set((preview.candidates || []).map((candidate) => candidate.locale).filter(Boolean))];
-    await Promise.all(locales.map(async (locale) => { assetsByLocale[locale] = (await getAssets(locale)).terms; }));
+    await Promise.all(locales.map(async (locale) => { assetsByLocale[locale] = (await getProjectAssets(locale, preview.projectId)).assets.terms; }));
     return json(res, 200, { ...preview, candidates: markExistingTermCandidates(preview.candidates || [], assetsByLocale) });
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/term-import/progress/")) {
@@ -1164,6 +1479,9 @@ async function apiHandler(req, res, url) {
     const contentType = body.contentType || "general";
     const domain = concreteDomain(body.domain, { text: source, contentType });
     const project = body.project || "default";
+    const projectId = String(body.projectId || project || "").trim();
+    const projectLibraries = projectId ? await getResourceLibraries(projectId) : [];
+    const masterTm = projectLibraries.find((library) => library.kind === "translation_memory" && library.role === "master");
     let linkedTrajectory = null;
     if (body.trajectoryId) {
       linkedTrajectory = assertTrajectoryBinding(
@@ -1178,10 +1496,10 @@ async function apiHandler(req, res, url) {
       source, target: translation, domain, contentType,
       contentTags,
       qualityStatus: "human_approved", qaScore: 100, provenance: "human-accept",
-      styleProfileId: body.styleProfileId || "", batchId: body.batchId || "",
-      sourceFile: body.sourceFile || "", sourceRow: body.sourceRow || null
+      styleProfileId: body.styleProfileId || "", batchId: body.batchId || "", projectId, project: projectId, libraryId: masterTm?.id || "",
+      sourceFile: body.sourceFile || "", sourceRow: body.sourceRow || null, projectId
     });
-    const demoted = await demoteMemories(locale, source, memory.id);
+    const demoted = await demoteMemories(locale, source, memory.id, { projectId });
     // 机器初稿只从轨迹取，不接受客户端提交：与终稿的差异是风格信号本身，
     // 必须来自服务端记录的那一版，否则蒸馏学到的是可以被伪造的"改动"。
     const machineTranslation = linkedTrajectory
@@ -1198,7 +1516,7 @@ async function apiHandler(req, res, url) {
     let termCandidateBatch = null;
     let termCandidateWarning = "";
     try {
-      const assets = await getAssets(locale);
+      const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
       const matches = matchTerms(source, assets, { contentType, domain, ...deliveryContext(body, source) });
       const termCandidates = deriveTermCandidatesFromHumanFinal({
         locale,
@@ -2057,8 +2375,10 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale || "zh-CN");
     const analyzeSpreadsheet = body.useAiStructure === false ? undefined : (snapshot, ruleAnalysis) => analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysis, locale);
-    const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet });
-    const { batchId } = await saveBatchRun({ ...prepared, locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments });
+    const project = body.projectId ? await getProject(String(body.projectId)) : null;
+    if (body.projectId && !project) return json(res, 404, { error: "项目不存在" });
+    const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet, batch: project?.settings?.batch || {} });
+    const { batchId } = await saveBatchRun({ ...prepared, projectId: body.projectId || "", locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments });
     return json(res, 200, { ...prepared, batchId });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
@@ -2071,9 +2391,10 @@ async function apiHandler(req, res, url) {
     const requestedLocale = url.searchParams.get("locale") || "";
     const locale = requestedLocale ? assertActiveLocale(requestedLocale) : ACTIVE_LOCALES[0];
     const status = url.searchParams.get("status") || "";
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
     const search = url.searchParams.get("search") || "";
     const limit = Number(url.searchParams.get("limit")) || 200;
-    const batches = type === "autoqa" || type === "share" || type === "background" ? [] : await listBatchRuns({ locale, status, search, limit });
+    const batches = type === "autoqa" || type === "share" || type === "background" ? [] : await listBatchRuns({ locale, projectId, status, search, limit });
     const qaTasks = type === "batch" || type === "share" || type === "background" ? [] : await listQaTasks({ locale, status, search, limit });
     const shares = type === "batch" || type === "autoqa" || type === "background" ? [] : (await listShares({})).map((share) => ({
       id: share.token,
@@ -2192,7 +2513,7 @@ async function apiHandler(req, res, url) {
     }
     assertActiveLocale(run.locale);
     const [assets, qaRuns] = await Promise.all([
-      getAssets(run.locale),
+      getProjectAssets(run.locale, run.projectId).then((result) => result.assets),
       getQaRuns(run.locale, { contentType: run.contentType, domain: run.domain, batchId: run.batchId, limit: 500 })
     ]);
     const latestRunBySource = new Map();
@@ -2218,6 +2539,38 @@ async function apiHandler(req, res, url) {
       };
     });
     return json(res, 200, { ...run, segments });
+  }
+  if (req.method === "POST" && url.pathname === "/api/style-guides/import") {
+    const body = await readJsonBody(req);
+    const locale = assertActiveLocale(body.locale || "zh-CN");
+    const projectId = String(body.projectId || "").trim();
+    if (projectId && !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    const guide = await extractStyleGuideFile({ filename: body.filename, base64: body.base64 });
+    const profile = await saveUserProfile({
+      locale,
+      name: `风格指南 · ${guide.name}`,
+      instruction: guide.text,
+      examples: [],
+      evidenceCount: 0,
+      status: "draft",
+      generatedBy: "style-guide-import",
+      projectId
+    });
+    return json(res, 201, { profile, filename: guide.filename, characters: guide.characters });
+  }
+  if (req.method === "POST" && url.pathname === "/api/batch/export/preflight") {
+    const body = await readJsonBody(req);
+    const locale = assertActiveLocale(body.locale || "zh-CN");
+    const project = body.projectId ? await getProject(String(body.projectId)) : null;
+    const projectSettings = project?.settings || null;
+    const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
+    const segments = Array.isArray(body.segments) ? body.segments.filter((segment) => segment?.selected !== false) : [];
+    const issues = segments.flatMap((segment, index) => {
+      const matches = matchTerms(segment.source || "", assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
+      return runQa({ source: segment.source || "", translation: segment.translation || "", matches, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
+    });
+    const blocking = issues.filter((issue) => ["error", "critical"].includes(issue.severity));
+    return json(res, 200, { ok: blocking.length === 0, blocking, warnings: issues.filter((issue) => !["error", "critical"].includes(issue.severity)), total: issues.length });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/export") {
     const body = await readJsonBody(req);
@@ -2255,7 +2608,7 @@ async function apiHandler(req, res, url) {
         { locale, source, contentType, domain, project, batchId: body.batchId || "" }
       );
     }
-    const assets = await getAssets(locale);
+    const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
     const matches = matchTerms(source, assets, { contentType, domain, ...deliveryContext(body, source) });
     const classification = await classify({ text: source, hint: contentType, useModel: false });
     const styleProfile = await getStyleProfile(locale, contentType, domain);
@@ -2298,7 +2651,7 @@ async function apiHandler(req, res, url) {
       decision = normalizeReviewDecision({ ...decision, afterTranslation: revisedTranslation });
       humanDecisions[humanDecisions.length - 1] = decision;
       const aiQa = await runAiQaLoop({
-        contextPack, initialTranslation: revisedTranslation, matches, locale, contentType, domain, batchId, humanDecisions
+        contextPack, initialTranslation: revisedTranslation, matches, locale, contentType, domain, batchId, humanDecisions, projectId: body.projectId || ""
       });
       const receipt = buildReviewReceipt({
         id: randomUUID(), taskId: body.trajectoryId || batchId, taskName: body.taskName || "翻译 QA",
@@ -2357,18 +2710,20 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/qa") {
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale);
-    const assets = await getAssets(locale);
+    const projectRecord = body.projectId ? await getProject(String(body.projectId)) : null;
+    const projectSettings = projectRecord?.settings || null;
+    const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
     const contentType = body.contentType || "general";
     const domain = concreteDomain(body.domain, { text: body.source || "", contentType });
     const matches = matchTerms(body.source || "", assets, { contentType, domain, ...deliveryContext(body, body.source || "") });
-    if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType }) });
+    if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings }) });
     const classification = await classify({ text: body.source || "", hint: contentType, useModel: false });
     const styleProfile = await getStyleProfile(locale, contentType, domain);
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project: body.project || "default" }));
     const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(body.source || "") });
     const contextPack = buildContextPack({
       titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance });
-    const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck" });
+    const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", projectSettings, projectId: body.projectId || "" });
     return json(res, 200, { matches, translation: aiQa.translation, issues: aiQa.issues, qaScore: aiQa.score, aiQa, styleProfile: contextPack.styleProfile });
   }
   if (req.method === "POST" && url.pathname === "/api/auto-qa") {
@@ -2392,7 +2747,9 @@ async function apiHandler(req, res, url) {
       error.statusCode = 400;
       throw error;
     }
-    const assets = await getAssets(locale);
+    const projectRecord = body.projectId ? await getProject(String(body.projectId)) : null;
+    const projectSettings = projectRecord?.settings || null;
+    const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
     const classification = await classify({ text: cleanSource, hint: contentType, useModel: false });
     const scopeContentType = classification.contentType || "general";
     const settings = getSettings();
@@ -2484,7 +2841,7 @@ async function apiHandler(req, res, url) {
       const pairSource = pair.sourceIndices.map((index) => sourceSegments[index]).join("\n");
       const pairTranslation = pair.translationIndices.map((index) => translationSegments[index]).join("\n");
       const segmentMatches = matchTerms(pairSource, assets, { contentType: scopeContentType, domain, ...deliveryContext(body, pairSource) });
-      const basicIssues = runBasicQa({ source: pairSource, translation: pairTranslation, matches: segmentMatches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: scopeContentType });
+      const basicIssues = runBasicQa({ source: pairSource, translation: pairTranslation, matches: segmentMatches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: scopeContentType, projectSettings });
       const [grammarResult, aiResult] = await Promise.allSettled([
         evaluateGrammarWithModel({ translation: pairTranslation, locale, contentType: scopeContentType }),
         evaluateAutoQaWithModel({
@@ -2959,7 +3316,15 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     const classification = await classify({ text: body.source, hint: body.contentType, useModel: body.useModelClassification, neighborContext: body.neighborContext });
-    const assets = await getAssets(locale);
+    const projectId = String(body.projectId || "").trim();
+    const assets = (await getProjectAssets(locale, projectId)).assets;
+    const projectRecord = projectId ? await getProject(projectId) : null;
+    if (projectId && !projectRecord) {
+      const error = new Error("项目不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const projectSettings = projectRecord?.settings || null;
     const domainResolution = resolveDomain(body.source, body.domain, { contentType: classification.contentType });
     const domain = domainResolution.domain;
     const scope = learningScope({ locale, contentType: classification.contentType, domain, project: body.project || "default" });
@@ -2981,17 +3346,36 @@ async function apiHandler(req, res, url) {
       ...delivery
     });
     const queryEmbedding = await embedSource(body.source);
-    const [storedStyleProfile, localeQaCases, localeMemories, userProfile] = await Promise.all([
+    const [storedStyleProfile, localeQaCases, localeMemories, userProfile, projectLibraries] = await Promise.all([
       getStyleProfile(locale, classification.contentType, domain),
       getQaCases(locale, { contentType: classification.contentType, domain: "general", limit: -1 }),
-      getMemories(locale, { contentType: classification.contentType, domain: "general", limit: -1, exactContentType: true }),
-      getUserProfile(locale)
+      getMemories(locale, { contentType: classification.contentType, domain: "general", limit: -1, exactContentType: true, projectId }),
+      getUserProfile(locale),
+      projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
     ]);
+    const librariesById = new Map(projectLibraries.map((library) => [library.id, library]));
+    const scopedMemories = localeMemories.map((memory) => {
+      const library = librariesById.get(memory.libraryId);
+      return library ? { ...memory, libraryName: library.name, libraryRole: library.role, libraryPriority: library.priority, libraryEnabled: library.enabled } : null;
+    }).filter((memory) => memory?.libraryEnabled === true);
     const narrowedQaCases = narrowByDomain(localeQaCases, domain);
-    const narrowedMemories = narrowByDomain(localeMemories, domain);
+    const narrowedMemories = narrowByDomain(scopedMemories, domain);
     domainResolution.relaxedRetrieval = narrowedMemories.relaxed || narrowedQaCases.relaxed;
     const qaGuidance = rankQaCases(body.source, narrowedQaCases.items, { limit: qaCaseLimit, queryEmbedding });
-    const translationReferences = rankTranslationMemories(body.source, narrowedMemories.items, { limit: memoryLimit, queryEmbedding, contentTags: classification.contentTags || [], locale, contentType: classification.contentType, domain, campaign: String(body.campaign || ""), ...delivery });
+    const translationReferences = rankTranslationMemories(body.source, narrowedMemories.items, {
+      limit: memoryLimit,
+      queryEmbedding,
+      contentTags: classification.contentTags || [],
+      locale,
+      contentType: classification.contentType,
+      domain,
+      projectId,
+      campaign: String(body.campaign || ""),
+      retrievalPurpose: projectId ? MEMORY_PURPOSES.WORKING_CONSISTENCY : undefined,
+      catMinFuzzy: projectSettings?.tm?.catMinFuzzy || 60,
+      llmMinRelevance: projectSettings?.tm?.llmMinRelevance || 60,
+      ...delivery
+    });
     // 批次排比/韵文检测：同一批次的多行共用一种句式时，注入模板约束；
     // 客户端顺序翻译时还会带上本批已定稿译文作为风格锚点。
     let batchVerse = null;
@@ -3022,6 +3406,7 @@ async function apiHandler(req, res, url) {
       translationReferences,
       batchVerse,
       batchReferences: body.batchReferences || [],
+      batchGroupEntries: body.batchGroupEntries || [],
       factSchema
     });
     const provider = getProviderConfig();
@@ -3067,11 +3452,11 @@ async function apiHandler(req, res, url) {
         ? await runAiQaLoop({
           contextPack, initialTranslation: result.translation, matches, locale,
           contentType: classification.contentType, domain, batchId: body.batchId || "",
-          providedReferences: translationReferences, passScore: routedPassScore, maxRevisions
+          providedReferences: translationReferences, passScore: routedPassScore, maxRevisions, projectSettings, projectId
         })
         : { translation: result.translation, issues: [
-          ...runQa({ source: body.source, translation: result.translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null }),
-          ...checkFactSchema({ schema: factSchema, translation: result.translation, locale })
+          ...runQa({ source: body.source, translation: result.translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
+          ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation: result.translation, locale }), projectSettings || undefined)
         ], score: null, status: "disabled", iterations: 0, used: false, fallbackReason: "", references: [] };
       let qualityRoute = decideQualityRoute({
         qaScore: aiQa.score,
@@ -3096,7 +3481,7 @@ async function apiHandler(req, res, url) {
         aiQa = await runAiQaLoop({
           contextPack, initialTranslation: result.translation, matches, locale,
           contentType: classification.contentType, domain, batchId: body.batchId || "",
-          providedReferences: translationReferences, passScore: routedPassScore, maxRevisions
+          providedReferences: translationReferences, passScore: routedPassScore, maxRevisions, projectSettings, projectId
         });
         const combinedCandidates = [...(result.candidates || []), ...(previousResult.candidates || [])]
           .filter((item, index, list) => list.findIndex((other) => other.translation === item.translation) === index)
@@ -3124,7 +3509,35 @@ async function apiHandler(req, res, url) {
         }
       }
       const termSuggestions = resolveTermSuggestions(aiQa.translation, suggestionCandidates, modelSuggestions);
-      const initialIssues = runQa({ source: body.source, translation: result.initial || result.translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null });
+      if (projectId && aiQa.translation && !(aiQa.issues || []).some((issue) => ["error", "critical"].includes(issue.severity))) {
+        const workingLibrary = projectLibraries.find((library) => library.role === "working" && library.enabled);
+        if (workingLibrary) {
+          try {
+            await saveMemory(locale, {
+              source: body.source,
+              target: aiQa.translation,
+              domain,
+              contentType: classification.contentType,
+              qualityStatus: "machine_verified",
+              assetTier: "working",
+              project: projectId,
+              projectId,
+              libraryId: workingLibrary.id,
+              qaScore: aiQa.score,
+              provenance: "batch-working-tm",
+              batchId: body.batchId || "",
+              entryId: body.entryId || "",
+              previousSource: body.previousSource || "",
+              nextSource: body.nextSource || "",
+              sourceFile: body.sourceFile || body.neighborContext?.document || "",
+              sourceRow: body.sourceRow || body.neighborContext?.row || null
+            });
+          } catch (error) {
+            learningCaptureError = learningCaptureError || `工作 TM 写入失败：${error.message}`;
+          }
+        }
+      }
+      const initialIssues = runQa({ source: body.source, translation: result.initial || result.translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings });
       let completedTrajectory = trajectory;
       if (trajectory) {
         try {
@@ -3453,10 +3866,53 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+function closeServerForAutomaticShutdown() {
+  return new Promise((resolve) => {
+    let completed = false;
+    let timeout = null;
+    const finish = () => {
+      if (completed) return;
+      completed = true;
+      if (timeout) clearTimeout(timeout);
+      resolve();
+    };
+    timeout = setTimeout(finish, 3_000);
+    timeout.unref?.();
+    server.close((error) => {
+      if (error && error.code !== "ERR_SERVER_NOT_RUNNING") console.error("[Kami] 关闭工作台 HTTP 服务失败", error);
+      finish();
+    });
+    server.closeAllConnections?.();
+  });
+}
+
+async function shutdownManagedWorkbench() {
+  if (workbenchShutdownStarted) return;
+  workbenchShutdownStarted = true;
+  workbenchSessionMonitor?.dispose();
+  console.log("[Kami] 最后一个工作台页面已关闭，正在停止工作台与 Docker Desktop。");
+  await closeServerForAutomaticShutdown();
+  try {
+    await shutdownDockerDesktop({ cwd: PROJECT_ROOT });
+  } catch (error) {
+    console.error(`[Kami] 自动停止 Docker Desktop 失败：${error.message}`);
+  } finally {
+    process.exit(0);
+  }
+}
+
 const HOST = process.env.KAMI_HOST || "127.0.0.1";
 server.listen(PORT, HOST, () => {
   console.log(`Kami Localization Workbench: http://127.0.0.1:${PORT}`);
   rescheduleConflictScan();
+  if (AUTO_SHUTDOWN_ENABLED) {
+    workbenchSessionMonitor = new WorkbenchSessionMonitor({
+      idleMs: WORKBENCH_IDLE_SHUTDOWN_MS,
+      onIdle: shutdownManagedWorkbench
+    });
+    workbenchSessionMonitor.start();
+    console.log(`[Kami] 页面全部关闭 ${WORKBENCH_IDLE_SHUTDOWN_MS / 1000} 秒后将自动停止。`);
+  }
   if (HOST !== "127.0.0.1" && HOST !== "localhost") {
     for (const url of lanShareUrls("")) console.log(`局域网访问（分享给同事可用）：${url.replace(/\/share\/$/, "")}`);
   }

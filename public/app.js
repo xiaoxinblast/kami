@@ -1,9 +1,16 @@
 import { renderTranslationMarkup } from "./term-highlighter.js";
 import { normalizePastedText, shouldRoutePasteToBatch } from "./paste-routing.js";
 import { learningEvaluationResult } from "./learning-utils.js";
+import { startWorkbenchSession } from "./session-lifecycle.js";
+import { createProjectSettingsPanel } from "./project-settings.js";
+
+startWorkbenchSession();
 
 const state = {
   bootstrap: null,
+  projects: [],
+  activeProjectId: "",
+  activeProject: null,
   serverVersion: "0.0.0",
   view: "workbench",
   workbenchLocale: "zh-CN",
@@ -11,6 +18,7 @@ const state = {
   styleLocale: "zh-CN",
   learningLocale: "zh-CN",
   autoQaLocale: "zh-CN",
+  memoryLocale: "zh-CN",
   learningData: null,
   learningLoading: false,
   learningSelectedSkillId: "",
@@ -23,8 +31,16 @@ const state = {
   feedbackStatusFilter: "pending",
   styleData: null,
   assets: {},
+  memories: [],
+  memoryImportFile: null,
+  memoryImportPreview: null,
+  styleGuideFile: null,
   lastResult: null,
   importFile: null,
+  importFiles: [],
+  assetPreflight: null,
+  assetImportIntent: "auto",
+  assetImportReturnView: "",
   importPreview: null,
   importCompleted: false,
   importCandidateTab: "terms",
@@ -39,7 +55,8 @@ const state = {
   batchRunning: false,
   batchPaused: false,
   batchClassification: null,
-  batchStyleProfile: null
+  batchStyleProfile: null,
+  projectSettings: null
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -59,6 +76,91 @@ async function api(path, options = {}) {
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+}
+
+function projectPayload() {
+  return state.activeProjectId ? { projectId: state.activeProjectId } : {};
+}
+
+function renderProjectSelector() {
+  const select = $("#projectSelect");
+  if (!select) return;
+  select.innerHTML = state.projects.length
+    ? state.projects.map((project) => `<option value="${escapeHtml(project.id)}"${project.id === state.activeProjectId ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("")
+    : '<option value="">暂无项目</option>';
+  select.disabled = !state.projects.length;
+}
+
+async function loadProjects() {
+  const payload = await api("/api/projects");
+  state.projects = Array.isArray(payload.projects) ? payload.projects : [];
+  if (!state.projects.length) {
+    const created = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: "默认项目", description: "日语到简体中文本地化项目" }) });
+    state.projects = [created.project];
+  }
+  const saved = localStorage.getItem("kami-project-id");
+  state.activeProjectId = state.projects.some((project) => project.id === saved) ? saved : state.projects[0].id;
+  state.activeProject = state.projects.find((project) => project.id === state.activeProjectId) || state.projects[0];
+  state.projectSettings = state.activeProject.settings || null;
+  localStorage.setItem("kami-project-id", state.activeProjectId);
+  renderProjectSelector();
+}
+
+async function selectProject(projectId) {
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project || project.id === state.activeProjectId) return;
+  state.activeProjectId = project.id;
+  state.activeProject = project;
+  state.projectSettings = project.settings || null;
+  localStorage.setItem("kami-project-id", project.id);
+  renderProjectSelector();
+  state.assets = {};
+  await loadAssets(state.assetLocale);
+  await loadMemories(state.memoryLocale);
+  toast(`已切换到项目：${project.name}`);
+}
+
+async function createProjectFromDialog(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    const created = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: form.get("name"), description: form.get("description") }) });
+    state.projects = [...state.projects, created.project];
+    state.activeProjectId = created.project.id;
+    state.activeProject = created.project;
+    state.projectSettings = created.project.settings || null;
+    localStorage.setItem("kami-project-id", created.project.id);
+    renderProjectSelector();
+    event.currentTarget.reset();
+    $("#projectDialog").close();
+    await loadAssets(state.assetLocale);
+    toast(`项目已创建：${created.project.name}`);
+  } catch (error) { toast(error.message); }
+}
+
+let projectSettingsPanel;
+async function openProjectSettings() {
+  if (!state.activeProjectId) return toast("请先选择项目");
+  const button = $("#openProjectSettings");
+  button.disabled = true;
+  try {
+    const [project, libraryPayload] = await Promise.all([
+      api(`/api/projects/${encodeURIComponent(state.activeProjectId)}`),
+      api(`/api/projects/${encodeURIComponent(state.activeProjectId)}/libraries`)
+    ]);
+    projectSettingsPanel ||= createProjectSettingsPanel($("#projectSettingsDialog"), {
+      api,
+      onSaved(project) {
+        state.activeProject = project;
+        state.projectSettings = project.settings;
+        state.projects = state.projects.map((item) => item.id === project.id ? project : item);
+        renderProjectSelector();
+        toast("项目设置已保存");
+      }
+    });
+    projectSettingsPanel.open(project, Array.isArray(libraryPayload.libraries) ? libraryPayload.libraries : []);
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
 }
 
 let toastTimer;
@@ -134,8 +236,9 @@ function pageCopy(view) {
     autoqa: ["AUTO QA", "Auto QA", "逐句切分对齐后，按基本检查、语义忠实性（着重）与 nuance 一致性三层独立审查。"],
     feedback: ["FEEDBACK CENTER", "反馈中心", "同事在分享验证页提出的要求：逐条批准入风格或忽略。"],
     tasks: ["TASK CENTER", "任务中心", "查看、恢复、审校并导出日语→简体中文翻译任务。"],
-    import: ["TERM INGESTION", "术语导入", "只需拖入日语与简体中文对照表，系统会自动分类并生成待确认结果。"],
+    import: ["BILINGUAL ASSET INGESTION", "双语资产导入", "先预检文件类型与资产去向，确认后再写入当前项目。"],
     assets: ["TERM ASSETS", "术语库", "查看日语→简体中文的物理隔离术语集合。"],
+    memories: ["PROJECT TM", "记忆库 TM", "查看当前项目的主 TM、工作 TM 与参考 TM。"],
     styles: ["STYLE GUIDANCE", "风格指导", "查看并控制已沉淀的翻译风格规则。"]
   }[view];
 }
@@ -173,14 +276,16 @@ function refreshActions() {
       }
     }
   } else if (state.view === "import") {
-    primary.textContent = state.importPreview && !state.importCompleted ? "确认选中项入库" : state.importFile ? "重新智能识别" : "等待拖入表格";
-    primary.disabled = state.importCompleted || (!state.importPreview && !state.importFile);
+    primary.textContent = state.assetPreflight ? "打开导入预检" : state.importPreview && !state.importCompleted ? "确认选中项入库" : state.importFile ? "重新预检" : "等待拖入双语资产";
+    primary.disabled = state.importCompleted || (!state.assetPreflight && !state.importPreview && !state.importFile);
     if (state.importFile || state.importPreview) {
       secondary.hidden = false;
       secondary.textContent = "重新选择";
     }
   } else if (state.view === "assets") {
     primary.textContent = "新增单条";
+  } else if (state.view === "memories") {
+    primary.textContent = "刷新 TM";
   } else if (state.view === "tasks") {
     primary.textContent = "刷新任务";
   } else if (state.view === "styles") {
@@ -231,6 +336,7 @@ function switchView(view) {
   $("#viewTitle").textContent = title;
   $("#viewDescription").textContent = description;
   if (view === "assets") updateAssetLocale(state.assetLocale);
+  if (view === "memories") updateMemoryLocale(state.memoryLocale);
   if (view === "tasks") loadTasks().catch((error) => toast(error.message));
   if (view === "styles") loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message));
   if (view === "workbench") setTranslationMode(state.translationMode);
@@ -292,7 +398,7 @@ function renderMatches(matches) {
   }
   $("#termMatches").className = "term-matches";
   $("#termMatches").innerHTML = matches.map(({ term, score, mode, matchPhrase }) => `
-    <div class="term-chip ${mode === "exact" ? "" : "potential"}"><div><strong>${escapeHtml(term.source)} → ${escapeHtml(term.target)}</strong><small>${mode === "exact" ? "精确或别名匹配" : mode === "smart" ? `智能近似：${escapeHtml(matchPhrase)}` : `字符近似：${escapeHtml(matchPhrase)}`} · ${mode === "exact" && term.enforcement === "required" ? "强制采用" : "待判断"}</small></div><span class="match-score">${Math.round(score * 100)}</span></div>
+    <div class="term-chip ${mode === "exact" ? "" : "potential"}"><div><strong>${escapeHtml(term.source)} → ${escapeHtml(term.target)}</strong><small>${mode === "exact" ? "正式术语精确命中 · 结合句义判断" : mode === "smart" ? `智能近似：${escapeHtml(matchPhrase)} · 待判断` : `字符近似：${escapeHtml(matchPhrase)} · 待判断`}</small></div><span class="match-score">${Math.round(score * 100)}</span></div>
   `).join("");
 }
 
@@ -519,6 +625,7 @@ async function runAutoQa() {
     const payload = await api("/api/auto-qa", {
       method: "POST",
       body: JSON.stringify({
+        ...projectPayload(),
         source, translation,
         locale: state.autoQaLocale,
         contentType: $("#autoQaContentType").value,
@@ -784,6 +891,7 @@ async function selectTranslationCandidate(index, button) {
   button.disabled = true;
   try {
     const qa = await api("/api/qa", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       source: $("#sourceText").value.trim(),
       translation: candidate.translation,
       locale: state.workbenchLocale,
@@ -825,6 +933,7 @@ async function acceptSingleTranslation() {
   setBusy(true, "采纳中…");
   try {
     const result = await api("/api/feedback/accept", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       source: $("#sourceText").value.trim(),
       translation,
       locale: state.workbenchLocale,
@@ -861,6 +970,7 @@ async function applyTermSuggestion() {
   state.activeSuggestion = null;
   try {
     const qa = await api("/api/qa", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       source: $("#sourceText").value,
       translation: state.lastResult.translation,
       locale: state.workbenchLocale,
@@ -891,7 +1001,7 @@ function previewClassificationAndMatches() {
     try {
       const classification = await api("/api/classify", { method: "POST", body: JSON.stringify({ text, hint: $("#contentType").value, domain: $("#domain").value }) });
       const resolvedDomain = classification.domainResolution?.domain || $("#domain").value;
-      const matched = await api("/api/match", { method: "POST", body: JSON.stringify({ text, locale: state.workbenchLocale, contentType: classification.contentType, domain: resolvedDomain }) });
+      const matched = await api("/api/match", { method: "POST", body: JSON.stringify({ ...projectPayload(), text, locale: state.workbenchLocale, contentType: classification.contentType, domain: resolvedDomain }) });
       $("#classificationPreview").innerHTML = `<span class="pulse-dot"></span><span>${resolutionSummary(classification, classification.domainResolution)} · 置信度 ${Math.round(classification.confidence * 100)}% · 命中 ${matched.matches.length} 条术语</span>`;
       renderMatches(matched.matches);
     } catch (error) {
@@ -907,6 +1017,7 @@ async function translate() {
   setTranslationStatus("warning", "处理中");
   try {
     const result = await api("/api/translate", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       source, locale: state.workbenchLocale, contentType: $("#contentType").value, domain: $("#domain").value,
       neighborContext: $("#neighborContext").value, reflect: $("#reflect").checked, route: $("#translationRoute").value, useModelClassification: true
     }) });
@@ -940,6 +1051,7 @@ async function loadPastedTextAsBatch(value) {
   state.batchPreview = null;
   state.batchClassification = null;
   state.batchStyleProfile = null;
+  updateBatchSegmentationOptions("粘贴长文.txt");
   localStorage.removeItem("kami-batch-id");
   $("#batchFile").value = "";
   $("#batchPasteText").value = pasted;
@@ -963,6 +1075,7 @@ async function setBatchFile(file) {
   state.batchPreview = null;
   state.batchClassification = null;
   state.batchStyleProfile = null;
+  updateBatchSegmentationOptions(file.name);
   $("#batchPasteText").value = "";
   $("#batchFilePrompt").textContent = file.name;
   $("#batchFileMeta").textContent = `${(file.size / 1024).toFixed(1)} KB · 正在智能识别`;
@@ -982,6 +1095,7 @@ function resetBatch() {
   state.batchRunning = false;
   state.batchClassification = null;
   state.batchStyleProfile = null;
+  updateBatchSegmentationOptions("粘贴长文.txt");
   localStorage.removeItem("kami-batch-id");
   $("#batchFile").value = "";
   $("#batchPasteText").value = "";
@@ -1207,6 +1321,7 @@ async function retrySegmentQa(segmentId) {
   if (button) { button.disabled = true; button.textContent = "AIQA 重试中…"; }
   try {
     const qa = await api("/api/qa", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       source: segment.source,
       translation: segment.translation,
       locale: state.workbenchLocale,
@@ -1243,6 +1358,7 @@ async function prepareBatch() {
   try {
     state.batchBase64 = state.batchFile ? await fileToBase64(state.batchFile) : "";
     const prepared = await api("/api/batch/prepare", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       filename: state.batchFile?.name || "粘贴长文.txt",
       base64: state.batchBase64 || undefined,
       text: state.batchFile ? undefined : pasted,
@@ -1269,6 +1385,32 @@ async function prepareBatch() {
   finally { setBusy(false); }
 }
 
+function structuredContextGroups(segments) {
+  const maxEntries = Math.max(2, Number(state.projectSettings?.batch?.groupMaxEntries) || 10);
+  const maxChars = Math.max(300, Number(state.projectSettings?.batch?.groupMaxChars) || 1500);
+  const groups = [];
+  let current = [];
+  let chars = 0;
+  let boundary = "";
+  for (const segment of segments) {
+    const length = [...String(segment.source || "")].length;
+    const nextBoundary = `${segment.locator?.type || ""}\u0000${segment.locator?.sheet || segment.context?.sheet || ""}`;
+    if (current.length && (current.length >= maxEntries || chars + length > maxChars || (boundary && nextBoundary !== boundary))) {
+      groups.push(current);
+      current = [];
+      chars = 0;
+      boundary = "";
+    }
+    current.push(segment);
+    chars += length;
+    boundary ||= nextBoundary;
+  }
+  if (current.length) groups.push(current);
+  const byId = new Map();
+  groups.forEach((group, index) => group.forEach((segment) => byId.set(segment.id, { index, group })));
+  return byId;
+}
+
 async function runBatch() {
   if (!state.batchPreview || state.batchRunning) return;
   const segments = state.batchPreview.segments;
@@ -1278,6 +1420,8 @@ async function runBatch() {
   state.batchPaused = false;
   refreshActions();
   renderBatchSegments();
+  const structuredGroupMode = state.batchPreview.segmentationMode === "group";
+  const groupById = structuredGroupMode ? structuredContextGroups(queue) : new Map();
   if (!state.batchClassification) {
     const documentText = segments.filter((segment) => segment.selected).map((segment) => segment.source).join("\n").slice(0, 8_000);
     try {
@@ -1307,18 +1451,25 @@ async function runBatch() {
     segment.error = "";
     renderBatchSegments();
     const position = segments.indexOf(segment);
+    const groupContext = groupById.get(segment.id);
     const context = {
       ...(segment.context || {}),
-      previous: segments[position - 1]?.source || "",
-      next: segments[position + 1]?.source || "",
+      previous: segment.context?.previous || segments[position - 1]?.source || "",
+      next: segment.context?.next || segments[position + 1]?.source || "",
       document: state.batchPreview.filename,
       segmentIndex: position + 1,
       segmentCount: segments.length
     };
     try {
       // 本批已定稿译文作为风格锚点：后续各行严格仿照同一句式与用词。
-      const batchReferences = segments.slice(0, position).filter((item) => item.translation).slice(-3).map((item) => ({ source: item.source, target: item.translation }));
+      const anchorCount = Math.max(0, Number(state.projectSettings?.tm?.contextAnchorCount ?? 5));
+      const contextKey = `${segment.locator?.type || ""}\u0000${segment.locator?.sheet || segment.context?.sheet || ""}`;
+      const batchReferences = segments.slice(0, position)
+        .filter((item) => item.translation && `${item.locator?.type || ""}\u0000${item.locator?.sheet || item.context?.sheet || ""}` === contextKey)
+        .slice(-anchorCount)
+        .map((item) => ({ source: item.source, target: item.translation }));
       const result = await api("/api/translate", { method: "POST", body: JSON.stringify({
+        ...projectPayload(),
         source: segment.source,
         locale: state.workbenchLocale,
         contentType: state.batchClassification.contentType,
@@ -1327,7 +1478,13 @@ async function runBatch() {
         styleProfile: state.batchStyleProfile,
         batchId: state.batchPreview.batchId || state.batchPreview.filename,
         segmentId: segment.id,
+        entryId: segment.locator?.unitId || segment.locator?.entryId || segment.context?.entryId || "",
+        sourceFile: state.batchPreview.filename || "",
+        sourceRow: segment.locator?.row || segment.context?.row || null,
+        previousSource: context.previous || "",
+        nextSource: context.next || "",
         batchReferences,
+        batchGroupEntries: groupContext?.group.map((item) => ({ id: item.id, source: item.source, context: item.context })) || [],
         route: $("#translationRoute").value,
         reflect: $("#reflect").checked,
         useModelClassification: false
@@ -1401,6 +1558,7 @@ async function loadTasks() {
   if ($("#taskLocale")?.value) query.set("locale", $("#taskLocale").value);
   if ($("#taskStatus")?.value) query.set("status", $("#taskStatus").value);
   if ($("#taskSearch")?.value.trim()) query.set("search", $("#taskSearch").value.trim());
+  if (state.activeProjectId) query.set("projectId", state.activeProjectId);
   state.tasks = await api(`/api/tasks?${query}`);
   renderTasks();
 }
@@ -1795,6 +1953,7 @@ function applyStoredBatchRun(run) {
   };
   state.batchClassification = { contentType: run.contentType || "general", source: "restored" };
   state.batchStyleProfile = null;
+  updateBatchSegmentationOptions(run.filename || "");
   state.workbenchLocale = run.locale || state.workbenchLocale;
   $("#domain").value = run.domain || "game";
   $("#contentType").value = run.contentType || "auto";
@@ -1839,13 +1998,23 @@ async function exportBatch() {
   setBusy(true, "正在合并文件…");
   try {
     const restoredWithoutSource = !state.batchBase64 && ["docx", "xlsx", "xliff", "mqxliff"].includes(state.batchPreview.format);
+    const exportSegments = state.batchPreview.segments.map(({ id, source, selected, translation }) => ({ id, source, selected, translation }));
+    const gate = await api("/api/batch/export/preflight", { method: "POST", body: JSON.stringify({
+      ...projectPayload(), locale: state.workbenchLocale, contentType: state.batchClassification?.contentType || "general", domain: $("#domain").value, segments: exportSegments
+    }) });
+    if (!gate.ok) {
+      toast(`导出被 QA 阻断：${gate.blocking.length} 项，请先修复或重新 QA`);
+      return;
+    }
+    if (gate.warnings.length && !confirm(`导出前发现 ${gate.warnings.length} 条警告，仍要继续导出吗？`)) return;
     const payload = await api("/api/batch/export", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       filename: state.batchPreview.filename,
       locale: state.workbenchLocale,
       format: restoredWithoutSource ? "task-xlsx" : state.batchPreview.format,
       structure: state.batchPreview.structure,
       base64: state.batchBase64 || undefined,
-      segments: state.batchPreview.segments.map(({ id, source, selected, translation }) => ({ id, source, selected, translation }))
+      segments: exportSegments
     }) });
     downloadBase64File(payload);
     toast(restoredWithoutSource ? `原文件未随历史任务保存，已导出可继续编辑的任务 Excel：${payload.filename}` : `已导出 ${payload.filename}`);
@@ -1862,6 +2031,7 @@ async function acceptSegment(segmentId) {
   if (!segment || !segment.translation) return;
   try {
     const result = await api("/api/feedback/accept", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       source: segment.source,
       translation: segment.translation,
       locale: state.workbenchLocale,
@@ -1891,6 +2061,7 @@ async function acceptAllSegments() {
   for (const segment of pending) {
     try {
       await api("/api/feedback/accept", { method: "POST", body: JSON.stringify({
+        ...projectPayload(),
         source: segment.source,
         translation: segment.translation,
         locale: state.workbenchLocale,
@@ -1921,6 +2092,7 @@ async function saveBatchProgress() {
   const preview = state.batchPreview;
   localStorage.setItem("kami-batch-id", preview.batchId);
   const payload = {
+      ...projectPayload(),
       batchId: preview.batchId,
       filename: preview.filename,
       locale: state.workbenchLocale,
@@ -2172,6 +2344,33 @@ async function updateStyleLocale(locale) {
   await loadStyleGuidance(locale);
 }
 
+async function importStyleGuide() {
+  const file = state.styleGuideFile;
+  if (!file) return;
+  if (!/\.(txt|md|docx)$/iu.test(file.name)) return toast("风格指南仅支持 .txt、.md、.docx");
+  if (file.size > 5 * 1024 * 1024) return toast("风格指南不能超过 5MB");
+  const button = $("#styleGuideImportButton");
+  button.disabled = true;
+  $("#styleGuideImportNote").textContent = "正在读取并创建待批准规范……";
+  try {
+    const result = await api("/api/style-guides/import", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
+      locale: state.styleLocale,
+      filename: file.name,
+      base64: await fileToBase64(file)
+    }) });
+    state.styleGuideFile = null;
+    $("#styleGuideFile").value = "";
+    $("#styleGuideImportNote").textContent = `${result.filename} · ${result.characters} 字 · 已进入待批准规范`;
+    await loadStyleGuidance(state.styleLocale);
+    toast("风格指南已导入，请检查后批准启用");
+  } catch (error) {
+    button.disabled = false;
+    $("#styleGuideImportNote").textContent = error.message;
+    toast(error.message);
+  }
+}
+
 function splitStyleRules(instruction) {
   return String(instruction || "").split(/\r?\n|；/u).map((item) => item.trim()).filter(Boolean).slice(0, 24);
 }
@@ -2191,7 +2390,7 @@ function renderStyleGuidance() {
   const learningRuns = learningRunsFromPayload(profiles);
   const statusFilter = $("#styleStatus")?.value || "";
   const items = [
-    ...(profiles.userProfiles || []).map((item) => ({ ...item, kind: "user", scopeLabel: "全局译者画像" })),
+    ...(profiles.userProfiles || []).map((item) => ({ ...item, kind: "user", scopeLabel: "全局风格规范" })),
     ...(profiles.styleProfiles || []).map((item) => ({ ...item, kind: "style", scopeLabel: `${contentTypeLabel(item.contentType)} · ${item.domain}` }))
   ].filter((item) => !statusFilter || item.status === statusFilter);
   const activeCount = [...(profiles.userProfiles || []), ...(profiles.styleProfiles || [])].filter((item) => item.status === "active").length;
@@ -2210,7 +2409,7 @@ function renderStyleGuidance() {
     const sourceBatchId = item.sourceBatchId || item.source_batch_id || "";
     const learningSummary = item.learningSummary || item.learning_summary || "";
     return `<article class="style-guidance-card ${escapeHtml(item.status)}" data-profile-id="${escapeHtml(item.id)}">
-      <div class="style-guidance-head"><div><strong>${escapeHtml(item.name)}</strong><small>适用范围：${escapeHtml(state.bootstrap.locales[state.styleLocale].label)} × ${escapeHtml(item.scopeLabel)} · v${item.version}</small><small>生成方式：${escapeHtml(item.name.includes("复盘修订") ? "AIQA 复盘结合已沉淀语料" : "同类双语语料自动精炼")} · ${item.evidenceCount} 条证据${sourceBatchId ? ` · 来源批次 ${escapeHtml(String(sourceBatchId).slice(0, 8))}` : ""}</small></div><span class="style-state ${escapeHtml(item.status)}">${item.status === "active" ? "已启用" : item.status === "draft" ? "待批准" : "已停用"}</span></div>
+      <div class="style-guidance-head"><div><strong>${escapeHtml(item.name)}</strong><small>适用范围：${escapeHtml(state.bootstrap.locales[state.styleLocale].label)} × ${escapeHtml(item.scopeLabel)} · v${item.version}</small><small>生成方式：${escapeHtml(item.name.startsWith("风格指南 · ") ? "人工上传，正文未被改写" : item.name.includes("复盘修订") ? "AIQA 复盘结合已沉淀语料" : "同类双语语料自动精炼")} · ${item.evidenceCount} 条证据${sourceBatchId ? ` · 来源批次 ${escapeHtml(String(sourceBatchId).slice(0, 8))}` : ""}</small></div><span class="style-state ${escapeHtml(item.status)}">${item.status === "active" ? "已启用" : item.status === "draft" ? "待批准" : "已停用"}</span></div>
       ${learningSummary ? `<p class="style-learning-summary">本批浓缩：${escapeHtml(learningSummary)}</p>` : ""}
       <div class="style-rule-list">${rules.length ? rules.map((rule, index) => `<div><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}</p></div>`).join("") : '<div class="batch-detail-empty">该版本没有可展示的规则条目</div>'}</div>
       ${examples.length ? `<details class="style-examples"><summary>查看 ${examples.length} 个正反例</summary>${examples.map((example) => `<div><strong>${example.type === "negative" ? "反例" : "正例"}</strong><p>${escapeHtml(example.source || "")}</p><p>${escapeHtml(example.target || "")}</p><small>${escapeHtml(example.reason || "")}</small></div>`).join("")}</details>` : ""}
@@ -2241,10 +2440,146 @@ function renderStyleGuidance() {
 }
 
 async function loadAssets(locale) {
-  const assets = await api(`/api/assets?locale=${encodeURIComponent(locale)}`);
+  const projectQuery = state.activeProjectId ? `&projectId=${encodeURIComponent(state.activeProjectId)}` : "";
+  const assets = await api(`/api/assets?locale=${encodeURIComponent(locale)}${projectQuery}`);
   state.assets[locale] = assets;
   $("#assetRevision").textContent = `${assets.terms.length} 条`;
   renderAssets();
+}
+
+function updateBatchSegmentationOptions(filename = "") {
+  const structured = /\.(xlsx|csv|xliff|mqxliff)$/iu.test(String(filename));
+  const select = $("#batchSegmentationMode");
+  if (!select) return;
+  for (const option of select.options) option.hidden = structured ? !["unit", "group"].includes(option.value) : ["unit", "group"].includes(option.value);
+  if (structured && !["unit", "group"].includes(select.value)) select.value = "unit";
+  if (!structured && !["sentence", "paragraph"].includes(select.value)) select.value = "sentence";
+  const label = select.closest("label")?.querySelector("span");
+  if (label) label.textContent = structured ? "结构化文件翻译方式" : "翻译单元";
+}
+
+async function updateMemoryLocale(locale) {
+  state.memoryLocale = locale;
+  renderLocaleStrip($("#memoryLocales"), locale, updateMemoryLocale);
+  await loadMemories(locale);
+}
+
+async function loadMemories(locale) {
+  const params = new URLSearchParams({ locale });
+  if (state.activeProjectId) params.set("projectId", state.activeProjectId);
+  const payload = await api(`/api/memories?${params}`);
+  state.memories = payload.memories || [];
+  $("#memoryCount").textContent = `${state.memories.length} 条`;
+  renderMemories();
+}
+
+async function setImportFiles(files = [], { intent = "auto", returnView = "" } = {}) {
+  const selected = Array.from(files).filter(Boolean);
+  if (!selected.length) return;
+  const supported = /\.(xlsx|csv|xliff|mqxliff)$/iu;
+  const invalid = selected.find((file) => !supported.test(file.name));
+  if (invalid) return toast(`${invalid.name} 不是支持的双语资产格式`);
+  if (selected.some((file) => file.size > 10 * 1024 * 1024)) return toast("单个导入文件不能超过 10MB");
+  state.importFiles = selected;
+  state.importFile = selected[0];
+  state.assetPreflight = null;
+  state.assetImportIntent = intent;
+  state.assetImportReturnView = returnView;
+  $("#filePrompt").textContent = selected.length === 1 ? selected[0].name : `已选择 ${selected.length} 个文件`;
+  $("#fileMeta").textContent = "正在进行本地预检；不会调用模型，也不会写入数据库";
+  $("#dropZone").classList.add("has-file");
+  try {
+    const preview = await api("/api/assets-import/preview", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
+      files: await Promise.all(selected.map(async (file) => ({ filename: file.name, base64: await fileToBase64(file) })))
+    }) });
+    state.assetPreflight = preview;
+    renderAssetPreflight();
+    $("#assetPreflightDialog").showModal();
+  } catch (error) { toast(error.message); }
+}
+
+function renderAssetPreflight() {
+  const preview = state.assetPreflight;
+  if (!preview) return;
+  $("#assetPreflightBody").innerHTML = (preview.files || []).map((file, index) => {
+    const purpose = state.assetImportIntent === "terms" ? "term_cleaning" : file.defaultPurpose;
+    const locked = state.assetImportIntent === "terms" ? " disabled" : "";
+    return `<tr><td>${escapeHtml(file.filename)}</td><td>${escapeHtml(file.type || "未知")}</td><td>${Number(file.entries) || 0}</td><td><select data-asset-purpose="${index}"${locked}><option value="tm"${purpose === "tm" ? " selected" : ""}>写入人工主 TM</option><option value="term_cleaning"${purpose === "term_cleaning" ? " selected" : ""}>清洗后写入术语库</option></select></td><td><label><input type="checkbox" data-asset-style="${index}" ${state.assetImportIntent === "terms" ? "disabled" : ""}/> 作为风格证据</label><small>${escapeHtml((file.anomalies || []).join("；") || "未发现异常")}</small></td></tr>`;
+  }).join("") || '<tr><td colspan="5" class="table-empty">没有可预检的文件</td></tr>';
+  $("#assetPreflightSummary").textContent = `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。确认前不会清洗或入库。`;
+}
+
+async function confirmAssetPreflight() {
+  const preview = state.assetPreflight;
+  if (!preview) return;
+  const candidates = (preview.candidates || []).map((candidate) => {
+    const fileIndex = (preview.files || []).findIndex((file) => file.filename === candidate.sourceFile);
+    const purpose = $(`[data-asset-purpose="${fileIndex}"]`)?.value || candidate.purpose || "tm";
+    const styleEvidence = Boolean($(`[data-asset-style="${fileIndex}"]`)?.checked);
+    return { ...candidate, purpose, styleEvidence, assetType: purpose === "term_cleaning" ? "term" : "memory" };
+  });
+  if (!candidates.length) return toast("没有可入库的双语条目");
+  try {
+    $("#assetPreflightConfirm").disabled = true;
+    const result = await api("/api/assets-import/commit", { method: "POST", body: JSON.stringify({
+      ...projectPayload(), batchId: preview.batchId, filename: state.importFile?.name || "双语资产导入", candidates
+    }) });
+    const returnView = state.assetImportReturnView;
+    state.importCompleted = true;
+    state.assetPreflight = null;
+    $("#assetPreflightDialog").close();
+    $("#mappingNote").textContent = `导入完成：术语 ${result.summary?.terms || 0} 条，主 TM ${result.summary?.memories || 0} 条；确认前未写入的候选不会进入项目。`;
+    await Promise.all([loadAssets(state.assetLocale), loadMemories(state.memoryLocale)]);
+    toast("双语资产导入完成");
+    if (returnView) switchView(returnView);
+  } catch (error) { toast(error.message); }
+  finally { $("#assetPreflightConfirm").disabled = false; }
+}
+
+async function previewMemoryImport() {
+  const file = state.memoryImportFile;
+  if (!file) return;
+  if (!/\.(xlsx|csv|xliff|mqxliff)$/iu.test(file.name)) return toast("人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff");
+  try {
+    $("#memoryImportNote").textContent = "正在读取双语条目……";
+    const preview = await api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({ ...projectPayload(), filename: file.name, base64: await fileToBase64(file) }) });
+    preview.candidates = (preview.candidates || []).map((candidate) => ({ ...candidate, selected: candidate.selected !== false }));
+    state.memoryImportPreview = preview;
+    $("#memoryImportNote").textContent = `本地预检识别 ${preview.candidates.length} 条双语 TM；尚未调用模型，也尚未写入数据库。请检查后确认。`;
+    $("#memoryImportPreview").hidden = false;
+    $("#memoryImportPreviewBody").innerHTML = preview.candidates.slice(0, 500).map((candidate, index) => `<tr><td><input type="checkbox" data-memory-index="${index}" ${candidate.selected ? "checked" : ""} /></td><td>${escapeHtml(candidate.entryId || "")}</td><td>${escapeHtml(candidate.source)}</td><td>${escapeHtml(candidate.target)}</td><td>${escapeHtml([candidate.sourceFile, candidate.sourceRow ? `第 ${candidate.sourceRow} 行` : ""].filter(Boolean).join(" · "))}</td></tr>`).join("") || '<tr><td colspan="5" class="table-empty">没有可写入的双语条目</td></tr>';
+    $("#memoryImportConfirm").disabled = !preview.candidates.length;
+  } catch (error) { $("#memoryImportNote").textContent = error.message; toast(error.message); }
+}
+
+async function commitMemoryImport() {
+  const preview = state.memoryImportPreview;
+  if (!preview) return;
+  const checked = new Set($$("#memoryImportPreviewBody [data-memory-index]").filter((input) => input.checked).map((input) => Number(input.dataset.memoryIndex)));
+  const candidates = preview.candidates.map((candidate, index) => ({ ...candidate, selected: checked.has(index) }));
+  if (!candidates.some((candidate) => candidate.selected)) return toast("请至少选择一条 TM");
+  try {
+    $("#memoryImportConfirm").disabled = true;
+    const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: false }) });
+    $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${result.summary?.memories ?? result.imported?.length ?? 0} 条。`;
+    $("#memoryImportPreview").hidden = true;
+    state.memoryImportPreview = null;
+    await loadMemories(state.memoryLocale);
+    toast("人工 TM 导入完成");
+  } catch (error) {
+    $("#memoryImportConfirm").disabled = false;
+    $("#memoryImportNote").textContent = error.message;
+    toast(error.message);
+  }
+}
+
+function renderMemories() {
+  const query = $("#memorySearch")?.value.trim().toLowerCase() || "";
+  const items = (state.memories || []).filter((item) => [item.source, item.target].some((value) => String(value || "").toLowerCase().includes(query)));
+  $("#memoryList").innerHTML = items.length ? items.map((item) => `
+    <div class="asset-row"><div class="asset-row-main"><strong>${escapeHtml(item.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(item.target)}</strong><div class="asset-meta"><span>${item.qualityStatus === "human_approved" ? "主 TM / 人工确认" : item.qualityStatus === "machine_verified" ? "工作 TM / 机器译文" : "候选"}</span>${item.sourceFile ? `<span>${escapeHtml(item.sourceFile)}</span>` : ""}${item.sourceRow ? `<span>第 ${item.sourceRow} 行</span>` : ""}${item.catMatchKind ? `<span>${escapeHtml(item.catMatchKind)}</span>` : ""}</div></div></div>
+  `).join("") : '<div class="empty-list">当前项目没有匹配的 TM 条目</div>';
 }
 
 function renderAssets() {
@@ -2253,11 +2588,12 @@ function renderAssets() {
   const query = $("#assetSearch").value.trim().toLowerCase();
   const terms = data.terms.filter((term) => [term.source, term.target, ...(term.aliases || [])].some((value) => value.toLowerCase().includes(query)));
   $("#assetList").innerHTML = terms.length ? terms.map((term) => `
-    <div class="asset-row"><div class="asset-row-main"><strong>${escapeHtml(term.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(term.target)}</strong><div class="asset-meta"><span>${term.enforcement === "required" ? "强制" : "优先"}</span>${(term.contentTypes || []).map((type) => `<span>${escapeHtml(state.bootstrap.contentTypes[type]?.label || type)}</span>`).join("")}${(term.contentTags || []).map((tag) => `<span>${escapeHtml(Object.values(state.bootstrap.contentTags || {}).find((group) => group[tag])?.[tag] || tag)}</span>`).join("")}${term.provenance ? `<span>${escapeHtml(term.provenance)}</span>` : ""}</div></div><button class="delete-term" data-id="${term.id}" title="删除术语" aria-label="删除术语">×</button></div>
+    <div class="asset-row"><div class="asset-row-main"><strong>${escapeHtml(term.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(term.target)}</strong><div class="asset-meta"><span>正式术语</span>${(term.contentTypes || []).map((type) => `<span>${escapeHtml(state.bootstrap.contentTypes[type]?.label || type)}</span>`).join("")}${(term.contentTags || []).map((tag) => `<span>${escapeHtml(Object.values(state.bootstrap.contentTags || {}).find((group) => group[tag])?.[tag] || tag)}</span>`).join("")}${term.provenance ? `<span>${escapeHtml(term.provenance)}</span>` : ""}</div></div><button class="delete-term" data-id="${term.id}" title="删除术语" aria-label="删除术语">×</button></div>
   `).join("") : '<div class="empty-list asset-empty">当前筛选没有术语</div>';
   $$(".delete-term").forEach((button) => button.addEventListener("click", async () => {
     if (!confirm("确认从日语→简体中文术语库删除这条术语？")) return;
-    await api(`/api/assets/${encodeURIComponent(button.dataset.id)}?locale=${encodeURIComponent(state.assetLocale)}`, { method: "DELETE" });
+    const projectQuery = state.activeProjectId ? `&projectId=${encodeURIComponent(state.activeProjectId)}` : "";
+    await api(`/api/assets/${encodeURIComponent(button.dataset.id)}?locale=${encodeURIComponent(state.assetLocale)}${projectQuery}`, { method: "DELETE" });
     await loadAssets(state.assetLocale);
     toast("已从日语→简体中文术语库删除");
   }));
@@ -2292,14 +2628,18 @@ async function setImportFile(file) {
 
 function resetImport() {
   state.importFile = null;
+  state.importFiles = [];
+  state.assetPreflight = null;
+  state.assetImportIntent = "auto";
+  state.assetImportReturnView = "";
   state.importPreview = null;
   state.importCompleted = false;
   state.importCandidateTab = "terms";
   state.importVisibleCount = { terms: 150, styles: 150 };
   state.importBatchLearning = [];
   $("#termFile").value = "";
-  $("#filePrompt").textContent = "拖入或点击选择 .xlsx / .csv";
-  $("#fileMeta").textContent = "拖入后自动识别；不要求表头，支持日语列与简体中文列";
+  $("#filePrompt").textContent = "拖入或点击选择双语资产文件";
+  $("#fileMeta").textContent = "支持多选 .xlsx / .csv / .xliff / .mqxliff；先本地预检，再确认导入";
   $("#dropZone").classList.remove("has-file");
   $("#mappingNote").textContent = "拖入表格后会自动识别结构并生成审核队列。";
   $("#importSummary").innerHTML = "<span>尚未清洗</span>";
@@ -2311,6 +2651,7 @@ function resetImport() {
   $("#styleImportCandidates").innerHTML = '<tr><td colspan="6" class="table-empty">还没有完整译例</td></tr>';
   $("#importBatchLearningPanel").hidden = true;
   $("#importBatchLearningList").innerHTML = '<div class="empty-list">提交译例后显示本批风格学习结果</div>';
+  if ($("#assetPreflightDialog")?.open) $("#assetPreflightDialog").close();
   setImportCandidateTab("terms");
   refreshActions();
 }
@@ -2405,7 +2746,7 @@ function renderImportCandidateRows(entries, kind) {
     const nested = Boolean(candidate.nested || candidate.parentCandidateKey || candidate.parent_candidate_key);
     const evidenceMeta = nested && Number(candidate.occurrences) > 1 ? ` · ${candidate.occurrences} 条父句证据` : "";
     const meta = kind === "terms"
-      ? `${nested ? "句内提取术语" : "独立术语"} · ${candidate.domain || "general"} · ${candidate.enforcement === "required" ? "强制采用" : "优先参考"}${evidenceMeta} · ${rowLabel}`
+      ? `${nested ? "句内参考候选" : "正式术语"} · ${candidate.domain || "general"}${evidenceMeta} · ${rowLabel}`
       : `${contentTypeLabel(candidate.contentType || "general")} · ${candidate.domain || "general"} · ${rowLabel}`;
     const sourceEditor = kind === "terms"
       ? `<input class="table-input candidate-source" data-index="${index}" value="${escapeHtml(candidate.source)}" ${disabled ? "disabled" : ""} />`
@@ -3445,6 +3786,7 @@ async function cleanTable() {
   const progressWatcher = watchImportProgress(progressId, progressControl);
   try {
     const result = await api("/api/term-import/preview", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       filename: state.importFile.name,
       base64: await fileToBase64(state.importFile),
       progressId
@@ -3478,6 +3820,7 @@ async function commitImport() {
   setBusy(true, "正在分库写入…");
   try {
     const result = await api("/api/term-import/commit", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
       batchId: state.importPreview.batchId,
       filename: state.importPreview.filename,
       candidates: state.importPreview.candidates,
@@ -3522,8 +3865,9 @@ function bindEvents() {
       renderBatchSegments();
     }
     else if (state.view === "workbench") state.batchPreview ? runBatch() : prepareBatch();
-    else if (state.view === "import") state.importPreview && !state.importCompleted ? commitImport() : cleanTable();
+    else if (state.view === "import") state.assetPreflight ? $("#assetPreflightDialog").showModal() : state.importPreview && !state.importCompleted ? commitImport() : state.importFiles.length ? setImportFiles(state.importFiles) : cleanTable();
     else if (state.view === "tasks") loadTasks().catch((error) => toast(error.message));
+    else if (state.view === "memories") loadMemories(state.memoryLocale).catch((error) => toast(error.message));
     else if (state.view === "styles") loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message));
     else if (state.view === "learning") generateLearningSkill();
     else if (state.view === "autoqa") runAutoQa().catch((error) => toast(error.message));
@@ -3603,6 +3947,20 @@ function bindEvents() {
   $("#batchDropZone").addEventListener("dragleave", () => $("#batchDropZone").classList.remove("dragging"));
   $("#batchDropZone").addEventListener("drop", (event) => { event.preventDefault(); $("#batchDropZone").classList.remove("dragging"); setBatchFile(event.dataTransfer.files[0]); });
   $("#assetSearch").addEventListener("input", renderAssets);
+  $("#termLibraryFile").addEventListener("change", (event) => {
+    const files = event.target.files;
+    if (!files.length) return;
+    switchView("import");
+    setImportFiles(files, { intent: "terms", returnView: "assets" }).finally(() => { event.target.value = ""; });
+  });
+  $("#memorySearch").addEventListener("input", renderMemories);
+  $("#memoryFile").addEventListener("change", (event) => {
+    state.memoryImportFile = event.target.files[0] || null;
+    $("#memoryImportButton").disabled = !state.memoryImportFile;
+    $("#memoryImportNote").textContent = state.memoryImportFile ? `${state.memoryImportFile.name} · 等待预检` : "选择文件后先预检，确认后写入主 TM。";
+  });
+  $("#memoryImportButton").addEventListener("click", () => previewMemoryImport());
+  $("#memoryImportConfirm").addEventListener("click", () => commitMemoryImport());
   $("#taskLocale").addEventListener("change", loadTasks);
   $("#taskStatus").addEventListener("change", loadTasks);
   $("#taskType").addEventListener("change", loadTasks);
@@ -3610,6 +3968,14 @@ function bindEvents() {
   $("#refreshTasks").addEventListener("click", () => loadTasks().catch((error) => toast(error.message)));
   $("#styleStatus").addEventListener("change", renderStyleGuidance);
   $("#refreshStyles").addEventListener("click", () => loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message)));
+  $("#styleGuideFile").addEventListener("change", (event) => {
+    state.styleGuideFile = event.target.files[0] || null;
+    $("#styleGuideImportButton").disabled = !state.styleGuideFile;
+    $("#styleGuideImportNote").textContent = state.styleGuideFile
+      ? `${state.styleGuideFile.name} · 等待导入`
+      : "上传后先检查内容，批准并启用后才会用于翻译。";
+  });
+  $("#styleGuideImportButton").addEventListener("click", () => importStyleGuide());
   $("#retryLearning").addEventListener("click", () => loadLearning(state.learningLocale));
   $("#learningContentType").addEventListener("change", () => loadLearning(state.learningLocale));
   $("#learningDomain").addEventListener("change", () => loadLearning(state.learningLocale));
@@ -3621,10 +3987,11 @@ function bindEvents() {
   $("#learningExportSft").addEventListener("click", (event) => downloadTrainingDataset("sft", event.currentTarget));
   $("#learningExportDpo").addEventListener("click", (event) => downloadTrainingDataset("dpo", event.currentTarget));
   $("#trainingCreate").addEventListener("click", (event) => createTrainingRunFromUi(event.currentTarget));
-  $("#termFile").addEventListener("change", (event) => setImportFile(event.target.files[0]));
+  $("#termFile").addEventListener("change", (event) => setImportFiles(event.target.files));
   $("#dropZone").addEventListener("dragover", (event) => { event.preventDefault(); $("#dropZone").classList.add("dragging"); });
   $("#dropZone").addEventListener("dragleave", () => $("#dropZone").classList.remove("dragging"));
-  $("#dropZone").addEventListener("drop", (event) => { event.preventDefault(); $("#dropZone").classList.remove("dragging"); setImportFile(event.dataTransfer.files[0]); });
+  $("#dropZone").addEventListener("drop", (event) => { event.preventDefault(); $("#dropZone").classList.remove("dragging"); setImportFiles(event.dataTransfer.files); });
+  $("#assetPreflightConfirm").addEventListener("click", () => confirmAssetPreflight());
   $$('[data-import-candidate-tab]').forEach((button) => button.addEventListener("click", () => setImportCandidateTab(button.dataset.importCandidateTab)));
   [["#selectAllTermCandidates", "terms"], ["#selectAllStyleCandidates", "styles"]].forEach(([selector, kind]) => $(selector).addEventListener("change", (event) => {
     indexedImportCandidates(kind).forEach(({ candidate }) => { if (!candidate.existing && candidate.decision !== "excluded") candidate.selected = event.target.checked; });
@@ -3634,9 +4001,9 @@ function bindEvents() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
-      await api("/api/assets", { method: "POST", body: JSON.stringify({ locale: state.assetLocale, term: {
+      await api("/api/assets", { method: "POST", body: JSON.stringify({ ...projectPayload(), locale: state.assetLocale, term: {
         source: form.get("source"), target: form.get("target"), aliases: String(form.get("aliases") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean),
-        forbidden: String(form.get("forbidden") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean), contentTypes: [form.get("contentType")], domains: ["game"], enforcement: form.get("enforcement"), note: form.get("note")
+        forbidden: String(form.get("forbidden") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean), contentTypes: [form.get("contentType")], domains: ["game"], enforcement: "preferred", note: form.get("note")
       } }) });
       event.currentTarget.reset();
       $("#assetDialog").close();
@@ -3689,6 +4056,10 @@ function bindEvents() {
   $("#acceptTranslation").addEventListener("click", acceptSingleTranslation);
   $("#sendToAutoQa").addEventListener("click", sendCurrentTranslationToAutoQa);
   $("#openSettings").addEventListener("click", openSettingsPanel);
+  $("#projectSelect").addEventListener("change", (event) => selectProject(event.target.value).catch((error) => toast(error.message)));
+  $("#newProject").addEventListener("click", () => $("#projectDialog").showModal());
+  $("#openProjectSettings").addEventListener("click", openProjectSettings);
+  $("#projectForm").addEventListener("submit", createProjectFromDialog);
   $("#settingsForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try { await submitSettings({ settings: collectSettingsForm() }); }
@@ -3709,6 +4080,7 @@ async function initialize() {
     const [bootstrap, health] = await Promise.all([api("/api/bootstrap"), api("/api/health")]);
     state.bootstrap = bootstrap;
     state.serverVersion = health.version || "0.0.0";
+    await loadProjects();
     // 资产后台不可用时服务端直接拒绝启动，界面不会再出现"已回退到 JSON"的降级态。
     const batchModeButton = $('.translation-mode[data-translation-mode="batch"]');
     if (!supportsBatchApi(state.serverVersion)) {
@@ -3725,12 +4097,15 @@ async function initialize() {
     populateSelects();
     renderLocaleStrip($("#workbenchLocales"), state.workbenchLocale, updateWorkbenchLocale);
     renderLocaleStrip($("#assetLocales"), state.assetLocale, updateAssetLocale);
+    renderLocaleStrip($("#memoryLocales"), state.memoryLocale, updateMemoryLocale);
     renderLocaleStrip($("#styleLocales"), state.styleLocale, updateStyleLocale);
     renderLocaleStrip($("#learningLocales"), state.learningLocale, loadLearning);
     renderLocaleStrip($("#autoQaLocales"), state.autoQaLocale, updateAutoQaLocale);
     bindEvents();
+    updateBatchSegmentationOptions("粘贴长文.txt");
     setTranslationMode("single");
     await loadAssets(state.assetLocale);
+    await loadMemories(state.memoryLocale);
     updateWorkbenchLocale(state.workbenchLocale);
     updateAutoQaLocale(state.autoQaLocale);
     startFeedbackPolling();

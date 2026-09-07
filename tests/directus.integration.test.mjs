@@ -48,7 +48,7 @@ test("日语到简体中文的术语与翻译记忆使用独立集合", { skip: 
     qaScore: 100,
     provenance: "integration-test"
   });
-  const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+  const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
   const headers = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
   try {
     const assets = await getAssets("zh-CN");
@@ -103,7 +103,7 @@ test("日语到简体中文的翻译记忆、风格版本和 AIQA 资产形成�
     await disposeQaCase(qaCase.id);
     assert.equal((await getQaCases("zh-CN", { contentType: "marketing", domain: "integration" })).some((item) => item.id === qaCase.id), false);
   } finally {
-    const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+    const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
     const headers = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
     for (const [collection, id] of created.reverse()) await fetch(`${base}/items/${collection}/${id}`, { method: "DELETE", headers });
   }
@@ -112,7 +112,7 @@ test("日语到简体中文的翻译记忆、风格版本和 AIQA 资产形成�
 test("Directus 批次进度首次创建后可继续 PATCH 更新", { skip: !enabled }, async () => {
   await initializeStore();
   const batchId = crypto.randomUUID();
-  const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+  const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
   const headers = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
   try {
     await saveBatchRun({ batchId, filename: "首次保存.txt", locale: "zh-CN", contentType: "announcement", domain: "game", format: "text", segmentationMode: "sentence", segments: [{ id: "1", source: "最初の文。", status: "pending" }] });
@@ -141,7 +141,7 @@ test("Directus 候选队列保存完整句段与句内术语的父子血缘", { 
       { source: "水簾洞", target: "水帘洞", locale: "zh-CN", assetType: "term", contentType: "general", domain: "game", enforcement: "required", contentTypeConfidence: 0.91, contentTypeSource: "ai", candidateKey: `${candidateKey}-term`, candidateRole: "embedded_term", parentCandidateKey: candidateKey, parentCandidateKeys: [candidateKey], parentRowNumber: 2, parentEvidence: [{ parentCandidateKey: candidateKey, parentRowNumber: 2, sourceSpan: { start: 2, end: 5 }, targetSpan: { start: 3, end: 6 } }], candidateOrigin: "ai-term-extraction", termCategory: "location", extractionConfidence: 0.93, sourceSpan: { start: 2, end: 5 }, targetSpan: { start: 3, end: 6 }, rowNumber: 2, occurrences: 1, score: 0.91, decision: "review", reasons: ["句内专名"] }
     ]
   });
-  const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+  const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
   const headers = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
   try {
     const response = await fetch(`${base}/items/term_candidates?limit=-1&filter[batch_id][_eq]=${preview.batchId}&fields=id,candidate_key,candidate_role,parent_candidate_key,parent_candidate_keys,parent_row_number,parent_evidence,candidate_origin,term_category,extraction_confidence,source_span,target_span`, { headers });
@@ -195,7 +195,7 @@ test("激活与拒绝译者画像都不会被 Directus 的缺失项 403 挡住",
     assert.equal(activated.status, "active");
     assert.equal(activated.kind, "user_profile");
   } finally {
-    const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+    const base = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
     const headers = { Authorization: `Bearer ${process.env.DIRECTUS_ADMIN_TOKEN}` };
     for (const id of [activationDraft.id, rejectionDraft.id]) {
       await fetch(`${base}/items/user_profiles/${id}`, { method: "DELETE", headers });

@@ -210,8 +210,9 @@ function recentEnough(asset, now, windowMs) {
  * hint. Same-batch references are bounded by the batch itself; other recent
  * references require an explicit task/session binding, or `allowRecentWorking`.
  */
-export function isWorkingMemoryAllowed(asset, context = {}, { now = new Date(), workingWindowMs = DEFAULT_WORKING_WINDOW_MS, allowRecentWorking = false } = {}) {
+export function isWorkingMemoryAllowed(asset, context = {}, { now = new Date(), workingWindowMs = DEFAULT_WORKING_WINDOW_MS, allowRecentWorking = false, allowProjectWorking = false } = {}) {
   const nowMs = now instanceof Date ? now.valueOf() : Date.parse(now);
+  if (allowProjectWorking && sameNonEmpty(asset.projectId ?? asset.project_id ?? asset.project, context.projectId ?? context.project)) return true;
   if (sameNonEmpty(asset.batchId ?? asset.batch_id, context.batchId)) return true;
   const boundToTask = sameNonEmpty(asset.taskId ?? asset.task_id, context.taskId)
     || sameNonEmpty(asset.sessionId ?? asset.session_id, context.sessionId);

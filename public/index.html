@@ -7,6 +7,7 @@
     <title>Kami 本地化工作台</title>
     <link rel="icon" type="image/png" href="/assets/kami-favicon-v2.png" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/project-settings.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -17,8 +18,9 @@
           <button class="nav-item" data-view="autoqa"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z" /><path d="M8.5 12l2.2 2.2 4.8-5" /></svg></span><span>Auto QA</span></button>
           <button class="nav-item" data-view="tasks"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 4h6M9 3h6v3H9zM7 5H5.5A1.5 1.5 0 0 0 4 6.5v13A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 18.5 5H17M8 11l1.5 1.5L12 10M14 12h3M8 16l1.5 1.5L12 15M14 17h3" /></svg></span><span>任务中心</span></button>
           <button class="nav-item" data-view="feedback"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4V5zM9 10h6M9 13h4" /></svg></span><span>反馈中心</span><span class="nav-badge" id="feedbackNavBadge" hidden>0</span></button>
-          <button class="nav-item" data-view="import"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5h18l-7 8v6l-4 2v-8L3 5zM17.5 2v5M15.5 5l2 2 2-2" /></svg></span><span>术语导入</span></button>
+          <button class="nav-item" data-view="import"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5h18l-7 8v6l-4 2v-8L3 5zM17.5 2v5M15.5 5l2 2 2-2" /></svg></span><span>双语资产导入</span></button>
           <button class="nav-item" data-view="assets"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 5.5A3.5 3.5 0 0 1 7 4h4a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H7a3.5 3.5 0 0 0-3.5 1.5v-14zM20.5 5.5A3.5 3.5 0 0 0 17 4h-2a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h2a3.5 3.5 0 0 1 3.5 1.5v-14z" /></svg></span><span>术语库</span></button>
+          <button class="nav-item" data-view="memories"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 8h10M7 12h7M7 16h5" /></svg></span><span>记忆库 TM</span></button>
           <button class="nav-item" data-view="styles"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 20c4.5-1 8.5-4.2 11-8.5L19 4l1 1-7.5 4C8.2 11.5 5 15.5 4 20zM9 15l-2-2M17.5 13.5v4M15.5 15.5h4" /></svg></span><span>风格指导</span></button>
           <button class="nav-item" data-view="learning"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 15.5V20h4.5M20 8.5V4h-4.5M6.2 9A7 7 0 0 1 18.7 6M17.8 15A7 7 0 0 1 5.3 18M12 8v8M8 12h8" /></svg></span><span>学习中心</span></button>
         </nav>
@@ -37,13 +39,16 @@
           </div>
           <div class="command-dock" aria-label="页面操作">
             <div class="system-actions">
+              <label class="project-switcher"><span>项目</span><select id="projectSelect" aria-label="当前项目"><option value="">正在读取…</option></select></label>
+              <button class="text-action" id="newProject" type="button">新建项目</button>
+              <button class="text-action" id="openProjectSettings" type="button">项目设置</button>
               <div class="feedback-bell-wrap">
                 <button class="icon-button feedback-bell" id="feedbackBell" title="同事反馈" aria-label="同事反馈">
                   <svg viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.7 6.2 2 6.4H4c.3-.2 2-1.9 2-6.4zM10 19a2 2 0 0 0 4 0" /></svg>
                 </button>
                 <span class="feedback-bell-badge" id="feedbackBellBadge" hidden>0</span>
               </div>
-              <a class="text-action" id="openAdmin" href="http://127.0.0.1:8055/admin/content/terms_zh_cn" target="_blank" rel="noreferrer">Directus 后台</a>
+              <a class="text-action" id="openAdmin" href="http://127.0.0.1:18055/admin/content/terms_zh_cn" target="_blank" rel="noreferrer">Directus 后台</a>
               <button class="text-action" id="openProvider">模型设置</button><button class="text-action" id="openSettings" type="button">参数设置</button>
             </div>
             <span class="command-divider"></span>
@@ -98,7 +103,7 @@
               </article>
               <article class="panel batch-policy-panel">
                 <span class="card-kicker">SEGMENT POLICY</span><h2>分段与翻译策略</h2>
-                <label><span>翻译单元</span><select id="batchSegmentationMode"><option value="sentence" selected>逐句翻译 · 精细</option><option value="paragraph">自然段翻译 · 连贯</option></select></label>
+                <label><span>翻译单元 / 联译方式</span><select id="batchSegmentationMode"><option value="sentence" selected>逐句翻译 · 精细</option><option value="paragraph">自然段翻译 · 连贯</option><option value="unit">按文件条目翻译 · 一格 / 一个 trans-unit</option><option value="group">相邻条目联译 · 按 ID 分别写回</option></select></label>
                 <div class="batch-policy-list">
                   <div><strong>01</strong><span>按完整句子或自然段切分，不再按固定字数机械截断。</span></div>
                   <div><strong>02</strong><span>每个单元携带明确的上文、下文和文档位置。</span></div>
@@ -171,19 +176,19 @@
         <section class="view" id="view-import">
           <div class="step-banner">
             <span class="step-badge">全自动导入</span>
-            <div><h2>只需拖入表格，其余全部自动完成</h2><p>自动识别语言和正文列，并逐条区分术语、翻译记忆、语体、领域及约束级别。</p></div>
+            <div><h2>只需拖入表格，其余全部自动完成</h2><p>自动识别语言和正文列，并逐条区分正式术语、翻译记忆、语体与领域。</p></div>
           </div>
           <div class="smart-import-entry">
             <article class="panel upload-panel smart-upload-panel">
               <span class="card-kicker">01 · DROP FILE</span><h2>上传日语与简体中文对照表</h2>
               <label class="drop-zone" id="dropZone" for="termFile">
-                <input id="termFile" type="file" accept=".xlsx,.csv" hidden />
-                <span class="upload-mark">↑</span><strong id="filePrompt">拖入或点击选择 .xlsx / .csv</strong><small id="fileMeta">拖入后自动识别；不要求表头，支持日语列与简体中文列</small>
+                <input id="termFile" type="file" accept=".xlsx,.csv,.xliff,.mqxliff" multiple hidden />
+                <span class="upload-mark">↑</span><strong id="filePrompt">拖入或点击选择双语资产文件</strong><small id="fileMeta">支持多选 .xlsx / .csv / .xliff / .mqxliff；先本地预检，再确认导入</small>
               </label>
               <div class="smart-import-capabilities" aria-label="自动识别能力">
                 <div><span>01</span><strong>识别表格结构</strong><small>无表头也能找到日语列与简体中文列，排除位置、DDL 和字符限制。</small></div>
                 <div><span>02</span><strong>逐条分流资产</strong><small>短术语进入术语库；完整句段进入翻译记忆和风格证据池。</small></div>
-                <div><span>03</span><strong>自动确定规则</strong><small>识别语体、领域与强制/优先级；异常项才留给人工确认。</small></div>
+                <div><span>03</span><strong>自动匹配资源</strong><small>正式术语精确命中后结合当前句义采用；保留原文和禁用译法执行硬检查。</small></div>
               </div>
               <p class="smart-import-fallback">系统会自动清洗内容；模型暂时不可用时改用本地规则并明确标记，不会卡住导入。</p>
             </article>
@@ -230,10 +235,28 @@
         <section class="view" id="view-assets">
           <div class="locale-strip" id="assetLocales" aria-label="资产语言"></div>
           <article class="panel asset-list-panel">
-            <div class="panel-head"><div><span class="card-kicker">PHYSICALLY ISOLATED COLLECTION</span><h2 id="assetListTitle">简体中文术语库</h2></div><div class="asset-count" id="assetRevision">0 条</div></div>
+            <div class="panel-head"><div><span class="card-kicker">PHYSICALLY ISOLATED COLLECTION</span><h2 id="assetListTitle">简体中文术语库</h2><p class="panel-caption">精确命中的正式术语会作为高优先级参考，翻译与模型 QA 根据当前句义判断是否采用；无需逐条设置强制级别。</p></div><div class="asset-count" id="assetRevision">0 条</div></div>
+            <div class="library-import-bar">
+              <label class="library-file-button"><input id="termLibraryFile" type="file" accept=".xlsx,.csv" multiple hidden /><span>上传术语表</span><small>支持 XLSX / CSV，可一次选择多个文件</small></label>
+            </div>
             <div class="asset-search"><input id="assetSearch" placeholder="搜索日语源词、正式译法或别名" /></div>
             <div class="asset-list" id="assetList"></div>
             <p class="isolation-note">当前列表只读取日语→简体中文的物理术语表；历史语言资产不会混入匹配或写入流程。</p>
+          </article>
+        </section>
+
+        <section class="view" id="view-memories">
+          <div class="locale-strip" id="memoryLocales" aria-label="记忆库语言"></div>
+          <article class="panel asset-list-panel">
+            <div class="panel-head"><div><span class="card-kicker">PROJECT TM</span><h2>记忆库 TM</h2><p class="panel-caption">主 TM 接收人工确认译文，工作 TM 接收通过 QA 的机器译文，参考 TM 只读参与检索。</p></div><div class="asset-count" id="memoryCount">0 条</div></div>
+            <div class="task-toolbar"><label class="drop-zone compact"><input id="memoryFile" type="file" accept=".xliff,.mqxliff,.xlsx,.csv" hidden /><strong>导入人工 TM</strong><small>支持 XLSX / CSV / XLIFF / MQXLIFF</small></label><button class="button secondary" id="memoryImportButton" type="button" disabled>预检 TM</button></div>
+            <div class="mapping-note" id="memoryImportNote">选择文件后先预检，确认后写入主 TM。</div>
+            <div class="candidate-table-wrap" id="memoryImportPreview" hidden>
+              <table class="candidate-table"><thead><tr><th>写入</th><th>条目 ID</th><th>日语原文</th><th>简体中文译文</th><th>来源</th></tr></thead><tbody id="memoryImportPreviewBody"></tbody></table>
+              <div class="dialog-actions"><button class="button primary" id="memoryImportConfirm" type="button">确认写入主 TM</button></div>
+            </div>
+            <div class="asset-search"><input id="memorySearch" placeholder="搜索日语原文或简体中文译文" /></div>
+            <div class="asset-list" id="memoryList"><div class="empty-list">正在读取记忆库……</div></div>
           </article>
         </section>
 
@@ -241,6 +264,11 @@
           <div class="locale-strip" id="styleLocales" aria-label="风格语言"></div>
           <article class="panel style-guidance-panel">
             <div class="panel-head"><div><span class="card-kicker">STYLE GUIDANCE LIBRARY</span><h2 id="styleGuidanceTitle">简体中文翻译风格指导</h2></div><div class="asset-count" id="styleGuidanceCount">0 条规则</div></div>
+            <div class="library-import-bar style-guide-import-bar">
+              <label class="library-file-button"><input id="styleGuideFile" type="file" accept=".txt,.md,.docx" hidden /><span>选择风格指南</span><small>支持 TXT / Markdown / DOCX</small></label>
+              <button class="button secondary" id="styleGuideImportButton" type="button" disabled>导入为待批准规范</button>
+              <small class="library-import-note" id="styleGuideImportNote">上传后先检查内容，批准并启用后才会用于翻译。</small>
+            </div>
             <div class="style-explainer">
               <div><span>01</span><strong>收集同类双语句段</strong><small>表格导入的完整译例、人工采纳译文和 AIQA 复盘分别记账；短术语不会冒充风格。</small></div>
               <div><span>02</span><strong>按语体 × 领域精炼</strong><small>同一分类累计 8 条日中风格证据后生成草稿。</small></div>
@@ -392,7 +420,6 @@
           <label><span>日语别名</span><input name="aliases" placeholder="用逗号分隔" /></label>
           <label><span>禁用译法</span><input name="forbidden" placeholder="用逗号分隔" /></label>
           <label><span>适用语体</span><select name="contentType"></select></label>
-          <label><span>约束级别</span><select name="enforcement"><option value="required">强制采用</option><option value="preferred">优先参考</option></select></label>
         </div>
         <label><span>备注</span><textarea name="note" placeholder="命名来源、使用边界或地区说明"></textarea></label>
         <div class="dialog-actions"><button class="button ghost" type="button" data-close="assetDialog">取消</button><button class="button primary" type="submit">保存到当前语言库</button></div>
@@ -411,6 +438,24 @@
           <button class="button primary" type="submit">保存设置</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="projectDialog">
+      <form class="dialog-card" id="projectForm">
+        <div class="dialog-head"><div><span class="card-kicker">PROJECT</span><h2>新建项目</h2></div><button class="icon-button" type="button" data-close="projectDialog" aria-label="关闭">×</button></div>
+        <p class="panel-caption">项目资源彼此隔离。创建后可在项目设置中导入术语库、主/工作 TM 和调整 QA 规则。</p>
+        <label><span>项目名称</span><input name="name" required placeholder="例如：Asia 2026 日中本地化" /></label>
+        <label><span>项目说明</span><textarea name="description" placeholder="可选：产品、版本或交付范围"></textarea></label>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="projectDialog">取消</button><button class="button primary" type="submit">创建项目</button></div>
+      </form>
+    </dialog>
+    <dialog id="projectSettingsDialog" class="project-settings" aria-labelledby="projectSettingsTitle"></dialog>
+    <dialog id="assetPreflightDialog">
+      <div class="dialog-card asset-preflight-dialog-card">
+        <div class="dialog-head"><div><span class="card-kicker">ASSET PREFLIGHT</span><h2>确认双语资产去向</h2></div><button class="icon-button" type="button" data-close="assetPreflightDialog" aria-label="关闭">×</button></div>
+        <p class="panel-caption" id="assetPreflightSummary">正在本地识别文件……</p>
+        <div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>文件</th><th>识别类型</th><th>条目数</th><th>导入去向</th><th>风格证据 / 异常</th></tr></thead><tbody id="assetPreflightBody"></tbody></table></div>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="assetPreflightDialog">取消</button><button class="button primary" id="assetPreflightConfirm" type="button">确认并继续</button></div>
+      </div>
     </dialog>
     <dialog id="providerDialog">
       <form class="dialog-card" id="providerForm">

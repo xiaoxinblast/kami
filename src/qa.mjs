@@ -2,8 +2,9 @@ import { textContainsTerm } from "./asset-governance.mjs";
 import { digitSequence, digitsRecoverable, extractProtectedTokens } from "./text.mjs";
 import { checkOrthography } from "./orthography.mjs";
 import { checkRegisterExpectation } from "./register-classifier.mjs";
+import { applyProjectQaPolicy } from "./project-config.mjs";
 
-export function runQa({ source, translation, matches = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null }) {
+export function runQa({ source, translation, matches = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null }) {
   const issues = [];
   for (const token of extractProtectedTokens(source)) {
     if (!String(translation).includes(token)) {
@@ -17,13 +18,11 @@ export function runQa({ source, translation, matches = [], locale = "", titleOve
     const preserveOriginal = match.preserveOriginal ?? Boolean(term.preserveOriginal);
     const expected = String(match.expectedTarget || (preserveOriginal ? (matchPhrase || term.source) : term.target) || "");
     const adopted = Boolean(expected) && textContainsTerm(translation, expected, { caseSensitive });
-    if (mode === "exact" && term.enforcement === "required" && !adopted) {
+    if (mode === "exact" && !match.scopeMismatch && preserveOriginal && !adopted) {
       issues.push({
         severity: "error",
-        type: preserveOriginal ? "preserved_term" : "required_term",
-        message: preserveOriginal
-          ? `必须保留原文形态：${term.source} → ${expected}`
-          : `未使用强制译法：${term.source} → ${expected}${caseSensitive ? "（区分大小写）" : ""}`
+        type: "preserved_term",
+        message: `必须保留原文形态：${term.source} → ${expected}`
       });
     }
     if (mode !== "exact" && !adopted) {
@@ -39,7 +38,8 @@ export function runQa({ source, translation, matches = [], locale = "", titleOve
           : `疑似术语待确认：${matchPhrase || term.source} ≈ ${term.source} → ${expected}`
       });
     }
-    for (const forbidden of term.forbidden ?? []) {
+    // 禁用译法只在正式术语于当前范围内精确命中时执行，近似命中不能触发硬错误。
+    for (const forbidden of mode === "exact" && !match.scopeMismatch ? (term.forbidden ?? []) : []) {
       if (forbidden && textContainsTerm(translation, forbidden, { caseSensitive })) {
         issues.push({ severity: "error", type: "forbidden_term", message: `使用了禁用译法：${forbidden}` });
       }
@@ -63,7 +63,7 @@ export function runQa({ source, translation, matches = [], locale = "", titleOve
   if (source.trim() && !String(translation).trim()) {
     issues.push({ severity: "error", type: "empty", message: "译文为空" });
   }
-  return issues;
+  return applyProjectQaPolicy(issues, projectSettings || undefined);
 }
 
 export function calculateQaScore({ hardIssues = [], aiIssues = [] } = {}) {

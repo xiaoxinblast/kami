@@ -1,4 +1,5 @@
-const COLUMN_ROLES = new Set(["source_text", "context", "constraint", "existing_translation", "ignore"]);
+const COLUMN_ROLES = new Set(["source_text", "context", "constraint", "existing_translation", "entry_id", "ignore"]);
+const ID_HEADERS = ["id", "entry id", "entry_id", "条目id", "条目 ID", "句段id", "segment id", "key", "键"];
 const SOURCE_HEADERS = ["日语", "日语原文", "日文", "日文原文", "日本语", "日本語", "japanese", "ja-jp", "ja_jp", "source", "source text", "原文", "待翻译"];
 const CONTEXT_HEADERS = ["位置", "渠道", "平台", "用途", "投放位置", "发布位置", "场景", "备注", "说明", "类型", "content type"];
 const CONSTRAINT_HEADERS = ["ddl", "截止", "交付", "字数", "字符", "长度", "语种要求", "语言要求", "要求", "限制", "deadline", "limit", "language requirement"];
@@ -96,6 +97,7 @@ export function buildSpreadsheetSnapshot(workbook, cellText) {
 function headerRole(value) {
   if (headerMatches(value, SOURCE_HEADERS)) return "source_text";
   if (headerMatches(value, TRANSLATION_HEADERS)) return "existing_translation";
+  if (headerMatches(value, ID_HEADERS)) return "entry_id";
   if (headerMatches(value, CONSTRAINT_HEADERS)) return "constraint";
   if (headerMatches(value, CONTEXT_HEADERS)) return "context";
   return null;

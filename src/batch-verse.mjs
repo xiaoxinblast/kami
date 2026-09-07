@@ -41,10 +41,10 @@ export function detectBatchVerse(segments = []) {
 }
 
 /** Cap and clean anchor pairs (source → finished translation) from earlier segments. */
-export function normalizeBatchReferences(references = []) {
+export function normalizeBatchReferences(references = [], limit = 5) {
   if (!Array.isArray(references)) return [];
   return references.map((item) => ({
     source: String(item?.source || "").trim(),
     target: String(item?.target || "").trim()
-  })).filter((item) => item.source && item.target).slice(0, 3);
+  })).filter((item) => item.source && item.target).slice(0, Math.max(0, Number(limit) || 5));
 }

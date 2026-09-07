@@ -1,5 +1,6 @@
 import { runQa } from "./qa.mjs";
 import { normalizeSource } from "./text.mjs";
+import { applyProjectQaPolicy } from "./project-config.mjs";
 
 export const AUTO_QA_DIMENSIONS = Object.freeze(["basic", "fidelity", "nuance"]);
 
@@ -300,8 +301,8 @@ function escapeRegExp(value) {
  * 复用硬 QA（受保护内容、强制/禁用术语、空译文）并叠加拼写、品牌名、标点与语气启发式。
  * 返回的每条 issue 都带 dimension: "basic"。
  */
-export function runBasicQa({ source, translation, matches = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null }) {
-  const issues = runQa({ source, translation, matches, locale, titleOverrides, contentType, registerPolicy }).map((issue) => ({
+export function runBasicQa({ source, translation, matches = [], locale = "", titleOverrides = null, contentType = "general", registerPolicy = null, projectSettings = null }) {
+  const issues = runQa({ source, translation, matches, locale, titleOverrides, contentType, registerPolicy, projectSettings }).map((issue) => ({
     ...issue,
     dimension: "basic",
     category: issue.category || "basic"
@@ -395,7 +396,7 @@ export function runBasicQa({ source, translation, matches = [], locale = "", tit
     }
   }
 
-  return issues;
+  return applyProjectQaPolicy(issues, projectSettings || undefined);
 }
 
 /** 单条问题的扣分：error/critical 35，major 12，minor/warning 3；低置信模型问题不计分。 */

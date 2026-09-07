@@ -5,6 +5,7 @@ import { ACTIVE_LOCALES, LOCALES, assertActiveLocale } from "../src/config.mjs";
 import { buildContextPack } from "../src/context-pack.mjs";
 import { refineCorpus } from "../src/corpus.mjs";
 import { matchTerms } from "../src/matcher.mjs";
+import { createDefaultProjectSettings } from "../src/project-config.mjs";
 import { runQa } from "../src/qa.mjs";
 import { detectRhymeLike } from "../src/text.mjs";
 
@@ -22,6 +23,9 @@ const jaAssets = {
     status: "approved"
   }]
 };
+
+const potentialQaSettings = createDefaultProjectSettings();
+potentialQaSettings.qa.rules.term_potential.enabled = true;
 
 const koAssets = {
   locale: "ko-KR",
@@ -97,7 +101,7 @@ test("字符重排产生智能候选，但不会升级为强制术语", () => {
   const pack = buildContextPack({ source: "豪华数字版现已推出", locale: "ja-JP", classification: classifyContent("豪华数字版现已推出", "marketing"), matches, domain: "game" });
   assert.equal(pack.requiredTerms.length, 0);
   assert.equal(pack.preferredTerms[0].target, "デジタルデラックス版");
-  const issues = runQa({ source: "豪华数字版现已推出", translation: "デジタル豪華エディションが登場", matches });
+  const issues = runQa({ source: "豪华数字版现已推出", translation: "デジタル豪華エディションが登場", matches, projectSettings: potentialQaSettings });
   assert.ok(issues.some((issue) => issue.type === "potential_term" && issue.severity === "warning"));
   assert.ok(!issues.some((issue) => issue.type === "required_term"));
 });
@@ -107,7 +111,8 @@ test("Context Pack 强制携带目标 locale 且只注入当前语言译法", ()
   const matches = matchTerms("全新高级通行证现已登场", jaAssets, { contentType: "marketing", domain: "game" });
   const pack = buildContextPack({ source: "全新高级通行证现已登场", locale: "ja-JP", classification, matches, domain: "game" });
   assert.equal(pack.targetLocale, "ja-JP");
-  assert.equal(pack.requiredTerms[0].target, "プレミアムパス");
+  assert.equal(pack.requiredTerms.length, 0);
+  assert.equal(pack.preferredTerms[0].target, "プレミアムパス");
   assert.ok(!JSON.stringify(pack).includes("프리미엄"));
 });
 
@@ -128,7 +133,8 @@ test("批次 Context Pack 同时携带结构化上下文、术语和风格配置
   assert.equal(pack.neighborContext.next, "完成任务可领取奖励。");
   assert.equal(pack.styleProfile.id, "launch-copy");
   assert.equal(pack.styleProfile.instruction, "轻快、有期待感，CTA 克制。");
-  assert.equal(pack.requiredTerms[0].target, "プレミアムパス");
+  assert.equal(pack.requiredTerms.length, 0);
+  assert.equal(pack.preferredTerms[0].target, "プレミアムパス");
 });
 
 test("Context Pack 注入当前范围的翻译技能版本与增量规则", () => {
@@ -169,6 +175,27 @@ test("各语言本地化示范结构完整且源文一致", () => {
   assert.deepEqual(LOCALES["th-TH"].localizationExamples, []);
 });
 
+test("正式术语精确命中仍作为语境参考，不因旧约束字段触发硬替换", () => {
+  const assets = { locale: "ja-JP", terms: [{ ...jaAssets.terms[0], enforcement: "preferred" }] };
+  const matches = matchTerms("全新高级通行证现已登场", assets, { contentType: "marketing", domain: "game" });
+  const pack = buildContextPack({ source: "全新高级通行证现已登场", locale: "ja-JP", classification: classifyContent("全新高级通行证现已登场", "marketing"), matches, domain: "game" });
+  assert.equal(pack.requiredTerms.length, 0);
+  assert.equal(pack.preferredTerms[0].matchMode, "exact");
+  assert.match(pack.preferredTerms[0].note, /当前句义/);
+  const issues = runQa({ source: "全新高级通行证现已登场", translation: "新商品が登場", matches, locale: "ja-JP" });
+  assert.equal(issues.some((issue) => issue.type === "required_term"), false);
+});
+
+test("一词多义时精确字符串命中不会把登记译法写成硬性 QA 错误", () => {
+  const assets = { locale: "zh-CN", terms: [{ id: "release-term", source: "リリース", target: "发布", forbidden: [], domains: ["game"], contentTypes: ["general"], enforcement: "required", status: "approved" }] };
+  const matches = matchTerms("敵をつかんでリリースする", assets, { contentType: "dialogue", domain: "game" });
+  const pack = buildContextPack({ source: "敵をつかんでリリースする", locale: "zh-CN", classification: classifyContent("敵をつかんでリリースする", "dialogue"), matches, domain: "game" });
+  assert.equal(pack.requiredTerms.length, 0);
+  assert.equal(pack.preferredTerms[0].target, "发布");
+  const issues = runQa({ source: "敵をつかんでリリースする", translation: "抓住敌人后将其松开", matches, locale: "zh-CN" });
+  assert.equal(issues.some((issue) => issue.type === "required_term"), false);
+});
+
 test("工作台只公开日语到简体中文语言对", () => {
   assert.deepEqual(ACTIVE_LOCALES, ["zh-CN"]);
   assert.equal(assertActiveLocale("zh-CN"), "zh-CN");
@@ -192,10 +219,10 @@ test("Context Pack 标记韵律结构供提示词与 AIQA 使用", () => {
   assert.equal(plainPack.rhymeLike, false);
 });
 
-test("QA 检出缺失强制术语、数字和禁用译法", () => {
+test("QA 不把普通正式术语作为硬错误，但仍检查数字和禁用译法", () => {
   const matches = matchTerms("高级通行证提升20%攻击力", jaAssets, { contentType: "marketing", domain: "game" });
   const issues = runQa({ source: "高级通行证提升20%攻击力", translation: "高級パスで攻撃力が上昇します。", matches });
-  assert.ok(issues.some((issue) => issue.type === "required_term"));
+  assert.ok(!issues.some((issue) => issue.type === "required_term"));
   assert.ok(issues.some((issue) => issue.type === "forbidden_term"));
   assert.ok(issues.some((issue) => issue.type === "protected_token"));
 });
@@ -204,7 +231,8 @@ test("疑似术语 QA 保留自动裁决所需的源词和正式译法", () => {
   const issues = runQa({
     source: "追加豪华内容",
     translation: "デラックスコンテンツを追加する",
-    matches: [{ mode: "smart", matchPhrase: "豪华内容", term: { source: "数字豪华版", target: "デジタルデラックス版", enforcement: "required", forbidden: [] } }]
+    matches: [{ mode: "smart", matchPhrase: "豪华内容", term: { source: "数字豪华版", target: "デジタルデラックス版", enforcement: "required", forbidden: [] } }],
+    projectSettings: potentialQaSettings
   });
   const issue = issues.find((item) => item.type === "potential_term");
   assert.equal(issue.matchedSource, "豪华内容");

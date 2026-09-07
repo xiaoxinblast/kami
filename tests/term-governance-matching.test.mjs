@@ -1,15 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { matchTerms } from "../src/matcher.mjs";
+import { createDefaultProjectSettings } from "../src/project-config.mjs";
 import { runQa } from "../src/qa.mjs";
 
 const NOW = new Date("2026-09-03T00:00:00.000Z");
+const potentialQaSettings = createDefaultProjectSettings();
+potentialQaSettings.qa.rules.term_potential.enabled = true;
 
 function assets(terms) {
   return { locale: "ja-JP", revision: 1, terms: terms.map((term) => ({ status: "approved", enforcement: "required", ...term })) };
 }
 
-test("过期与未生效的术语不再参与匹配，也就不会再报强制术语错误", () => {
+test("过期与未生效的术语不再参与匹配，当前有效术语只作语境参考", () => {
   const collection = assets([
     { id: "expired", source: "限定商店", target: "限定ショップ", validTo: "2026-08-01T00:00:00.000Z" },
     { id: "future", source: "新春活动", target: "新春イベント", validFrom: "2026-12-01T00:00:00.000Z" },
@@ -18,7 +21,7 @@ test("过期与未生效的术语不再参与匹配，也就不会再报强制�
   const matches = matchTerms("限定商店与新春活动的官方公告", collection, { now: NOW });
   assert.deepEqual(matches.map((item) => item.term.id), ["live"]);
   const issues = runQa({ source: "限定商店与新春活动的官方公告", translation: "内容", matches, locale: "ja-JP" });
-  assert.equal(issues.filter((issue) => issue.type === "required_term").length, 1, "只应为仍然有效的术语报错");
+  assert.equal(issues.filter((issue) => issue.type === "required_term").length, 0);
 });
 
 test("已废弃的术语版本不再生效", () => {
@@ -41,6 +44,20 @@ test("术语的适用平台与地区真的会收窄匹配", () => {
   assert.equal(unspecified.length, 2, "调用方不传投放上下文时保持旧行为，不做收窄");
 });
 
+test("同一源词按术语库优先级取最高库，同优先级保留冲突", () => {
+  const collection = assets([
+    { id: "low", source: "会员", target: "会员", libraryPriority: 20 },
+    { id: "high", source: "会员", target: "会员资格", libraryPriority: 5 }
+  ]);
+  const matches = matchTerms("会员", collection, { now: NOW });
+  assert.deepEqual(matches.map((item) => item.term.id), ["high"]);
+  const conflict = matchTerms("会员", assets([
+    { id: "a", source: "会员", target: "会员 A", libraryPriority: 5 },
+    { id: "b", source: "会员", target: "会员 B", libraryPriority: 5 }
+  ]), { now: NOW });
+  assert.deepEqual(conflict.map((item) => item.term.id).sort(), ["a", "b"]);
+});
+
 test("区分大小写的术语：大小写不一致只提示待确认，不算强制命中", () => {
   const collection = assets([{ id: "ios", source: "iOS", target: "iOS", caseSensitive: true, preserveOriginal: true }]);
   const exact = matchTerms("iOS 版本已上线", collection, { now: NOW });
@@ -52,10 +69,10 @@ test("区分大小写的术语：大小写不一致只提示待确认，不算�
   assert.equal(wrongCase.length, 1);
   assert.equal(wrongCase[0].mode, "fuzzy");
   assert.equal(wrongCase[0].caseMismatch, true);
-  const issues = runQa({ source: "ios 版本已上线", translation: "iOS 版がリリースされました。", matches: wrongCase, locale: "ja-JP" });
+  const issues = runQa({ source: "ios 版本已上线", translation: "iOS 版がリリースされました。", matches: wrongCase, locale: "ja-JP", projectSettings: potentialQaSettings });
   assert.equal(issues.some((issue) => issue.type === "term_case_mismatch"), false, "译文已用正确形态时不再提示");
 
-  const stillWrong = runQa({ source: "ios 版本已上线", translation: "ios 版がリリースされました。", matches: wrongCase, locale: "ja-JP" });
+  const stillWrong = runQa({ source: "ios 版本已上线", translation: "ios 版がリリースされました。", matches: wrongCase, locale: "ja-JP", projectSettings: potentialQaSettings });
   assert.equal(stillWrong.some((issue) => issue.type === "term_case_mismatch"), true);
 });
 

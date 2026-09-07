@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
-import { exportBatchDocument, prepareBatchDocument, segmentLongText } from "../src/batch-document.mjs";
+import { exportBatchDocument, prepareBatchDocument, segmentLongText, splitBatchSubBatches } from "../src/batch-document.mjs";
+import { extractXliffPairs } from "../src/xliff-document.mjs";
 
 test("批次只按完整句子或自然段切分，不使用固定字数", () => {
   const source = "第一句内容很长。第二句继续说明！第三句作为结尾。";
@@ -54,6 +55,22 @@ test("同一自然段可选择逐句或整段翻译", async () => {
   assert.equal(paragraphMode.segments[0].source, source);
 });
 
+test("父任务按条目数和字符数拆成可恢复的子批次", () => {
+  const segments = Array.from({ length: 5 }, (_, index) => ({ id: `s${index + 1}`, source: "日语".repeat(index + 1), locator: { type: "xlsx-cell", sheet: index < 3 ? "A" : "B" } }));
+  const batches = splitBatchSubBatches(segments, { maxEntries: 2, maxChars: 99 });
+  assert.deepEqual(batches.map((batch) => batch.segmentIds), [["s1", "s2"], ["s3"], ["s4", "s5"]]);
+});
+
+test("结构化表格条目不再按句拆分", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("正文");
+  sheet.addRow(["日语原文", "简体中文"]);
+  sheet.addRow(["一つ目。二つ目。", ""]);
+  const prepared = await prepareBatchDocument({ filename: "unit.xlsx", base64: Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64"), segmentationMode: "sentence" });
+  assert.equal(prepared.segmentationMode, "unit");
+  assert.deepEqual(prepared.segments.map((segment) => segment.source), ["一つ目。二つ目。"]);
+});
+
 test("XLIFF 导入仅选择空且未锁定的 trans-unit，并在导出时恢复内联标签", async () => {
   const original = `<?xml version="1.0" encoding="UTF-8"?>
 <xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2"><file original="story"><body>
@@ -98,6 +115,15 @@ test("XLIFF 导入仅选择空且未锁定的 trans-unit，并在导出时恢复
     }),
     /内联标签/
   );
+});
+
+test("XLIFF TM 导入读取已有双语 trans-unit 和条目上下文", () => {
+  const xml = `<?xml version="1.0"?><xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2"><file><body><trans-unit id="a"><source>上</source><target>上译</target></trans-unit><trans-unit id="b"><source>当前</source><target>当前译</target></trans-unit><trans-unit id="c"><source>下</source><target>下译</target></trans-unit></body></file></xliff>`;
+  const pairs = extractXliffPairs(Buffer.from(xml), "pairs.xliff");
+  assert.equal(pairs.length, 3);
+  assert.equal(pairs[1].entryId, "b");
+  assert.equal(pairs[1].previousSource, "上");
+  assert.equal(pairs[1].nextSource, "下");
 });
 
 test("MQXLIFF 导出保留锁定单元和 bpt/ept 标签，并写入 Pretranslated 状态", async () => {
@@ -288,4 +314,14 @@ test("单列 CSV 的日语表头不会被当作待翻译正文", async () => {
   const prepared = await prepareBatchDocument({ filename: "single-column.csv", text: source, segmentationMode: "paragraph" });
   assert.equal(prepared.spreadsheetAnalysis.sheets[0].headerRow, 1);
   assert.deepEqual(prepared.segments.map((segment) => segment.source), ["おかえりなさい！", "イベントが始まりました。"]);
+});
+
+test("表格显式 ID 列作为稳定条目 ID，不能退回 Excel 地址", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("带 ID");
+  sheet.addRow(["条目 ID", "Japanese", "Chinese Simp."]);
+  sheet.addRow(["unit-42", "一つの文。", ""]);
+  const prepared = await prepareBatchDocument({ filename: "ids.xlsx", base64: Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64") });
+  assert.equal(prepared.segments[0].locator.entryId, "unit-42");
+  assert.equal(prepared.segments[0].context.entryId, "unit-42");
 });

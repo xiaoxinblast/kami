@@ -66,7 +66,7 @@ npm start
 然后打开：
 
 - Kami 工作台：`http://127.0.0.1:4173`
-- Directus 资产后台：`http://127.0.0.1:8055/admin/content/terms_zh_cn`
+- Directus 资产后台：`http://127.0.0.1:18055/admin/content/terms_zh_cn`
 
 管理员邮箱和密码保存在本机 `directus/.env`，该文件已加入 `.gitignore`。Kami 服务端使用单独的最小权限 Service Token，不向浏览器暴露管理员令牌。
 

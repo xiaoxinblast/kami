@@ -1,3 +1,7 @@
+import { startWorkbenchSession } from "./session-lifecycle.js";
+
+startWorkbenchSession();
+
 const token = decodeURIComponent(location.pathname.replace(/^\/share\/?/, ""));
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];

@@ -39,8 +39,45 @@ function encodeXml(value) {
 export function segmentLongText(value, segmentationMode = "sentence") {
   const text = String(value || "").trim();
   if (!text) return [];
-  if (segmentationMode === "paragraph") return [text];
+  if (["paragraph", "unit"].includes(segmentationMode)) return [text];
   return [...new Intl.Segmenter("zh", { granularity: "sentence" }).segment(text)].map((item) => item.segment.trim()).filter(Boolean);
+}
+
+function segmentBoundary(segment) {
+  const locator = segment?.locator || {};
+  const context = segment?.context || {};
+  return [locator.type || "", locator.sheet || context.sheet || ""].join("\u0000");
+}
+
+/** Split a parent file task without splitting a structural region first. */
+export function splitBatchSubBatches(segments = [], { maxEntries = 100, maxChars = 8_000 } = {}) {
+  const entryLimit = Math.max(1, Number(maxEntries) || 100);
+  const charLimit = Math.max(1, Number(maxChars) || 8_000);
+  const batches = [];
+  let current = [];
+  let chars = 0;
+  let boundary = "";
+  const flush = () => {
+    if (!current.length) return;
+    batches.push({ index: batches.length + 1, segmentIds: current.map((segment) => segment.id), entries: current.length, characters: chars });
+    current = [];
+    chars = 0;
+    boundary = "";
+  };
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const nextBoundary = segmentBoundary(segment);
+    const length = Array.from(String(segment.source || "")).length;
+    if (current.length && (current.length >= entryLimit || chars + length > charLimit || (boundary && nextBoundary !== boundary && current.length >= entryLimit / 2))) flush();
+    current.push(segment);
+    chars += length;
+    boundary ||= nextBoundary;
+  }
+  flush();
+  return batches;
+}
+
+export function splitTranslationGroups(segments = [], { maxEntries = 10, maxChars = 1_500 } = {}) {
+  return splitBatchSubBatches(segments, { maxEntries, maxChars }).map((batch) => ({ ...batch, ids: batch.segmentIds }));
 }
 
 function createCollector(segmentationMode) {
@@ -131,6 +168,7 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
     worksheet.eachRow((row) => {
       if (sheetAnalysis.headerRow && row.number === sheetAnalysis.headerRow) return;
       const metadata = [];
+      let entryId = "";
       const references = [];
       for (const column of sheetAnalysis.columns) {
         if (column.role === "source_text" || column.role === "ignore") continue;
@@ -138,6 +176,7 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
         if (!value) continue;
         const item = { label: column.label || `${column.letter}列`, value, role: column.role };
         if (column.role === "existing_translation") references.push(item);
+        else if (column.role === "entry_id") entryId = value;
         else metadata.push(item);
       }
       for (const columnNumber of sourceColumns) {
@@ -150,9 +189,10 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
           row: row.number,
           sourceColumn: column?.label || `第 ${columnNumber} 列`,
           metadata,
-          referenceTranslations: references
+          referenceTranslations: references,
+          entryId
         };
-        const locator = { type: `${format}-cell`, sheet: worksheet.name, address: cell.address, row: row.number, column: columnNumber };
+        const locator = { type: `${format}-cell`, sheet: worksheet.name, address: cell.address, row: row.number, column: columnNumber, entryId };
         const segmentIds = collector.add(source, locator, context);
         cells.push({ sheet: worksheet.name, address: cell.address, row: row.number, column: columnNumber, segmentIds });
       }
@@ -196,22 +236,26 @@ export async function prepareBatchDocument(input = {}, options = {}) {
   const filename = String(input.filename || (input.text ? "粘贴长文.txt" : "")).trim();
   const extension = extname(filename).toLowerCase();
   if (!filename || !SUPPORTED_EXTENSIONS.has(extension)) fail("仅支持 .txt、.md、.docx、.xlsx、.csv、.xliff、.mqxliff 文件");
-  const segmentationMode = input.segmentationMode === "paragraph" ? "paragraph" : "sentence";
+  const structured = [".xlsx", ".csv", ".xliff", ".mqxliff"].includes(extension);
+  let segmentationMode = ["paragraph", "unit", "group"].includes(input.segmentationMode) ? input.segmentationMode : "sentence";
+  if (structured && !["unit", "group"].includes(segmentationMode)) segmentationMode = "unit";
+  const collectorMode = structured ? "unit" : segmentationMode;
   let prepared;
   if (extension === ".txt" || extension === ".md") {
     const text = input.text !== undefined ? String(input.text) : decodeBase64(input.base64).toString("utf8");
-    prepared = preparePlainText(text, filename, segmentationMode);
-  } else if (extension === ".docx") prepared = await prepareDocx(decodeBase64(input.base64), segmentationMode);
+    prepared = preparePlainText(text, filename, collectorMode);
+  } else if (extension === ".docx") prepared = await prepareDocx(decodeBase64(input.base64), collectorMode);
   else if (extension === ".csv") {
     const buffer = input.text !== undefined ? Buffer.from(String(input.text), "utf8") : decodeBase64(input.base64);
-    prepared = await prepareCsv(buffer, segmentationMode, options.analyzeSpreadsheet);
+    prepared = await prepareCsv(buffer, collectorMode, options.analyzeSpreadsheet);
   } else if (extension === ".xliff" || extension === ".mqxliff") prepared = prepareXliffDocument(decodeBase64(input.base64), filename);
-  else prepared = await prepareXlsx(decodeBase64(input.base64), segmentationMode, options.analyzeSpreadsheet);
+  else prepared = await prepareXlsx(decodeBase64(input.base64), collectorMode, options.analyzeSpreadsheet);
   if (!prepared.segments.length) fail("没有找到可翻译的日语内容");
   return {
     filename,
     segmentationMode,
     ...prepared,
+    subBatches: splitBatchSubBatches(prepared.segments, options.batch || {}),
     statistics: {
       segments: prepared.segments.length,
       characters: prepared.segments.reduce((sum, segment) => sum + Array.from(segment.source).length, 0)

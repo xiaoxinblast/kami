@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 
-const baseUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+const baseUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
 const token = process.env.DIRECTUS_ADMIN_TOKEN || process.env.DIRECTUS_TOKEN;
 
 if (!token) throw new Error("DIRECTUS_ADMIN_TOKEN or DIRECTUS_TOKEN is required");
@@ -143,6 +143,8 @@ function termFields() {
     editableDateField("valid_from", "生效时间", 18),
     editableDateField("valid_to", "失效时间", 19),
     jsonField("projects", "适用项目", { sort: 20 }),
+    textField("project_id", "所属项目 ID", { width: "half", sort: 20 }),
+    textField("library_id", "所属术语库 ID", { width: "half", sort: 21 }),
     jsonField("channels", "适用渠道", { sort: 21 }),
     jsonField("platforms", "适用平台", { sort: 22 }),
     jsonField("regions", "适用地区", { sort: 23 }),
@@ -167,6 +169,9 @@ function memoryFields() {
     textField("provenance", "来源", { width: "half", sort: 10 }),
     textField("source_file", "来源文件", { width: "half", sort: 11 }),
     textField("batch_id", "批次 ID", { width: "half", sort: 12 }),
+    textField("entry_id", "来源条目 ID", { width: "half", sort: 12 }),
+    textField("previous_source", "上一条原文", { multiline: true, sort: 13 }),
+    textField("next_source", "下一条原文", { multiline: true, sort: 14 }),
     { field: "source_row", type: "integer", meta: { interface: "input", width: "half", sort: 13, translations: label("来源行号") }, schema: { is_nullable: true } },
     jsonField("embedding", "语义向量", { note: "embedding 模型生成的归一化向量，用于语义相似度检索。", sort: 14 }),
     selectField("asset_tier", "资产层级", [["候选", "candidate"], ["工作中", "working"], ["正式", "formal"]], { nullable: true, sort: 15 }),
@@ -176,6 +181,8 @@ function memoryFields() {
     editableDateField("valid_from", "生效时间", 19),
     editableDateField("valid_to", "失效时间", 20),
     textField("project", "项目", { width: "half", sort: 21 }),
+    textField("project_id", "所属项目 ID", { width: "half", sort: 21 }),
+    textField("library_id", "所属 TM ID", { width: "half", sort: 22 }),
     textField("campaign", "活动", { width: "half", sort: 22 }),
     textField("platform", "平台", { width: "half", sort: 23 }),
     textField("region", "地区", { width: "half", sort: 24 }),
@@ -186,7 +193,47 @@ function memoryFields() {
   ];
 }
 
+function projectFields() {
+  return [
+    uuidField(),
+    textField("name", "项目名称", { required: true, sort: 2 }),
+    textField("description", "项目说明", { multiline: true, sort: 3 }),
+    selectField("status", "项目状态", [["启用", "active"], ["归档", "archived"]], { defaultValue: "active", sort: 4 }),
+    jsonField("settings", "项目设置", { sort: 5 }),
+    dateField("date_created", "创建时间", "date-created", 6),
+    dateField("date_updated", "更新时间", "date-updated", 7)
+  ];
+}
+
+function resourceLibraryFields() {
+  return [
+    uuidField(),
+    textField("project_id", "项目 ID", { required: true, sort: 2 }),
+    textField("name", "资源库名称", { required: true, sort: 3 }),
+    selectField("kind", "资源类型", [["术语库", "term_base"], ["翻译记忆", "translation_memory"]], { defaultValue: "term_base", sort: 4 }),
+    selectField("role", "TM 角色", [["主 TM", "master"], ["工作 TM", "working"], ["参考 TM", "reference"]], { defaultValue: "reference", sort: 5 }),
+    booleanField("enabled", "参与检索", { defaultValue: true, sort: 6 }),
+    { field: "priority", type: "integer", meta: { interface: "input", width: "half", sort: 7, translations: label("优先级") }, schema: { is_nullable: false, default_value: 100 } },
+    textField("description", "说明", { multiline: true, sort: 8 }),
+    { field: "entry_count", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 9, translations: label("条目数") }, schema: { is_nullable: false, default_value: 0 } },
+    dateField("date_created", "创建时间", "date-created", 10),
+    dateField("date_updated", "更新时间", "date-updated", 11)
+  ];
+}
+
 const definitions = [
+  {
+    collection: "localization_projects",
+    meta: { icon: "folder_special", note: "Kami 项目及项目级术语、TM、QA 设置。", display_template: "{{name}}", group: "localization_assets", sort: 0, accountability: "all", translations: label("Kami 项目") },
+    schema: {},
+    fields: projectFields()
+  },
+  {
+    collection: "project_resource_libraries",
+    meta: { icon: "library_books", note: "项目内术语库与主/工作/参考 TM 资源。", display_template: "{{name}} · {{role}}", group: "localization_assets", sort: 0, accountability: "all", translations: label("项目资源库") },
+    schema: {},
+    fields: resourceLibraryFields()
+  },
   ...Object.values(localeCollections).map(({ key, label: collectionLabel, icon }, index) => ({
     collection: key,
     meta: {
@@ -245,6 +292,7 @@ const definitions = [
     fields: [
       uuidField(),
       textField("filename", "文件名", { required: true, sort: 2 }),
+      textField("project_id", "项目 ID", { width: "half", sort: 2 }),
       textField("file_type", "文件类型", { width: "half", sort: 3 }),
       textField("source_language", "源语言", { width: "half", sort: 4 }),
       textField("requested_locale", "指定目标语言", { width: "half", sort: 5 }),
@@ -318,6 +366,7 @@ const definitions = [
     fields: [
       uuidField(),
       textField("filename", "文件名", { required: true, sort: 2 }),
+      textField("project_id", "项目 ID", { width: "half", sort: 2 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 3 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 4 }),
       jsonField("content_tags", "细分类标签", { note: "本风格规范覆盖的场景标签。", sort: 5 }),
@@ -415,6 +464,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 1 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 2 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 3 }),
       jsonField("content_tags", "细分类标签", { note: "该证据的场景标签。", sort: 4 }),
@@ -965,6 +1015,8 @@ async function ensureServiceAccount() {
   });
 
   const permissionPlan = [
+    ...["create", "read", "update"].map((action) => ["localization_projects", action]),
+    ...["create", "read", "update"].map((action) => ["project_resource_libraries", action]),
     ...Object.values(localeCollections).flatMap(({ key }) => ["create", "read", "update", "delete"].map((action) => [key, action])),
     ...Object.values(memoryCollections).flatMap(({ key }) => ["create", "read", "update"].map((action) => [key, action])),
     ...["create", "read"].map((action) => ["corpus_documents", action]),

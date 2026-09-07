@@ -130,6 +130,9 @@ function packPrompt(contextPack) {
   const batchReferenceHint = contextPack.batchReferences?.length
     ? `本批已定稿译文（必须保持句式与风格完全一致，可参考其用词与语气）：${JSON.stringify(contextPack.batchReferences)}\n`
     : "";
+  const batchGroupHint = contextPack.batchGroupEntries?.length
+    ? `当前文件条目联译组（仅用于理解同组上下文；输出仍然只能是当前原文对应的译文）：${JSON.stringify(contextPack.batchGroupEntries)}\n`
+    : "";
   const localeExamples = LOCALES[contextPack.targetLocale]?.localizationExamples || [];
   const exampleHint = localeExamples.length
     ? `本地化示范（左：原文 → 直译，右：合格的地道译法。请达到右侧的水平）：\n${localeExamples.map((item) => `· ${item.source} → ${item.literal} ✗ / ${item.idiomatic} ✓（${item.note}）`).join("\n")}\n`
@@ -148,6 +151,7 @@ function packPrompt(contextPack) {
     `历史 AIQA 反例与修订：${JSON.stringify(contextPack.qaGuidance || [])}\n` +
     batchVerseHint +
     batchReferenceHint +
+    batchGroupHint +
     exampleHint +
     `目标语言要求：${contextPack.localeInstruction}\n` +
     (contextPack.punctuation ? `标点约定：${contextPack.punctuation}
@@ -156,6 +160,7 @@ function packPrompt(contextPack) {
     `文档上下文（仅用于理解，不得翻译进结果）：\n${formatNeighborContext(contextPack.neighborContext)}\n\n` +
     `强制术语：${JSON.stringify(contextPack.requiredTerms, null, 2)}\n` +
     `参考术语：${JSON.stringify(contextPack.preferredTerms, null, 2)}\n` +
+    `术语判断：参考术语中的 exact 只表示原文字符串精确命中，不表示当前词义必然相同；必须结合完整句义、上下文和内容类型判断是否采用登记译法，禁止仅凭字面命中强制替换。\n` +
     `必须原样保留（URL、占位符、标签、带单位的数值）：${JSON.stringify(contextPack.protectedTokens)}
 ` +
     `结构化事实锚点（translation 范围必须在译文中保持等价；task 范围只作为交付约束，不得翻译进正文）：${JSON.stringify(contextPack.factSchema || { facts: [], limits: [] })}
@@ -332,7 +337,6 @@ export async function reviewTermCandidatesWithModel(locale, candidates) {
     target: candidate.target,
     contentTypeHint: candidate.contentType || "general",
     domainHint: candidate.domain || "general",
-    enforcementHint: candidate.enforcement || "preferred",
     ruleScore: candidate.score,
     ruleReasons: candidate.reasons
   }));
@@ -343,9 +347,9 @@ export async function reviewTermCandidatesWithModel(locale, candidates) {
 
 rowKind 只能为 term 或 memory。sheetMode=dialogue 时整行必须保持 memory；不得因为译文长短将同一句日语改成 term。term 是独立词条中的专名、系统名、功能名、道具名、角色名、地点名、技能名；memory 是语义对齐的台词、句子、UI 文本或完整文案。memory 的 contentType 必须从 ${Object.keys(CONTENT_TYPES).join(", ")} 中选择；term 的主分类继承所在行或来源文件的用途，不得把 general 当作跨分类通配。domain 只能为 game、marketing、community、general。
 
-对 keep=true 且 rowKind=memory 的完整句段，同时检查句内术语，放入 nestedTerms，不得用 nestedTerms 替换父 memory。nestedTerms.category 只能是 proper_name、character_name、place_name、item_name、skill_name、system_name、organization_name、species_name、currency_name、lore_concept、fixed_ui_label。必须是专名、官方命名或能稳定复用的固定标签；严禁抽取代词、动词/形容词短语、普通搭配、礼貌套话、一次性修辞和整分句。nestedTerms.source 必须逐字存在于 source，target 必须逐字存在于 target；不得补译、改写或猜测目标词。专名和官方命名 enforcement=required，其他固定标签 preferred。
+对 keep=true 且 rowKind=memory 的完整句段，同时检查句内术语，放入 nestedTerms，不得用 nestedTerms 替换父 memory。nestedTerms.category 只能是 proper_name、character_name、place_name、item_name、skill_name、system_name、organization_name、species_name、currency_name、lore_concept、fixed_ui_label。必须是专名、官方命名或能稳定复用的固定标签；严禁抽取代词、动词/形容词短语、普通搭配、礼貌套话、一次性修辞和整分句。nestedTerms.source 必须逐字存在于 source，target 必须逐字存在于 target；不得补译、改写或猜测目标词。句内提取项统一作为参考候选，不判断强制级别。
 
-排除数字、网址、DDL、字符限制、位置说明、语种要求、错列、元数据和明显误译。不要改写父 source 或 target。输出严格 JSON：{"decisions":[{"index":0,"keep":true,"confidence":0.95,"rowKind":"memory","contentType":"dialogue","domain":"game","enforcement":"preferred","reason":"完整对白且语义对齐","nestedTerms":[{"source":"プレミアムパス","target":"高级通行证","category":"fixed_ui_label","enforcement":"required","confidence":0.98,"reason":"固定 UI 名称"}]}]}`
+排除数字、网址、DDL、字符限制、位置说明、语种要求、错列、元数据和明显误译。不要改写父 source 或 target。输出严格 JSON：{"decisions":[{"index":0,"keep":true,"confidence":0.95,"rowKind":"memory","contentType":"dialogue","domain":"game","reason":"完整对白且语义对齐","nestedTerms":[{"source":"プレミアムパス","target":"高级通行证","category":"fixed_ui_label","confidence":0.98,"reason":"固定 UI 名称"}]}]}`
     },
     { role: "user", content: JSON.stringify(compactCandidates) }
   ], runtimeConfig, {
@@ -608,7 +612,7 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
   const messages = [
     {
       role: "system",
-      content: `你是独立于翻译器的亚洲语言本地化 QA 审校员。按照 MQM 思路逐项检查六个一级维度：Accuracy、Fluency、Terminology、Style、Locale、Platform。category 必须以小写一级维度开头，可细分为 accuracy_omission、accuracy_addition、accuracy_mistranslation、fluency_grammar、fluency_naturalness、terminology_required、terminology_forbidden、style_register、style_brand、locale_convention、platform_constraint、platform_placeholder。contextPack.styleProfile.reviewRubric 是评审标准，不是生成提示。approvedReferences 是人工批准的译例，只有同语种、同语体且语义相关时才引用，且仍不能盲从。machineDrafts 是本系统自己此前产出的机器译文，只能用于发现同一文档内自相矛盾，绝不能当作正确与否的依据，也不得以"与 machineDrafts 不一致"为由报告问题。不要直接给总分，只报告可定位的问题。严重度只能是 critical、major、minor。message、suggestion 和其他解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 必须逐字保留原文或译文中的证据片段。特别注意：只有语义确实丢失或凭空添加事实才算漏译/增译；调整语序、换用同义地道表达、重写修辞都不是问题。发现译文逐字直译、翻译腔、不像目标语言原生文案时，记 major（category 用 fluency_naturalness）。原文含押韵、对仗、重复或口号结构时，译文必须用目标语言自然重现节奏与韵律；机械逐字重复、把闲散语气译成命令口吻、韵律完全丢失都应记 major。若输入里的 contextPack 携带 batchVerse 或 batchReferences（同批排比韵文），必须检查当前译文与本批已定稿译文的句式、节奏与用词风格是否一致，明显不一致记 major。没有问题返回空数组。输出严格 JSON：{"issues":[{"severity":"major","category":"accuracy_omission","sourceSpan":"原文片段","targetSpan":"译文片段","message":"简体中文问题原因","suggestion":"简体中文可执行修订意见","evidenceMemoryId":"可选ID","confidence":0.9}]}`
+      content: `你是独立于翻译器的亚洲语言本地化 QA 审校员。按照 MQM 思路逐项检查六个一级维度：Accuracy、Fluency、Terminology、Style、Locale、Platform。category 必须以小写一级维度开头，可细分为 accuracy_omission、accuracy_addition、accuracy_mistranslation、fluency_grammar、fluency_naturalness、terminology_required、terminology_forbidden、style_register、style_brand、locale_convention、platform_constraint、platform_placeholder。contextPack.styleProfile.reviewRubric 是评审标准，不是生成提示。contextPack.preferredTerms 中 matchMode 为 exact 只代表字面精确命中；你必须根据原文句义和上下文判断该条正式术语在此处是否适用，不能仅因译文未采用登记译法就报错。approvedReferences 是人工批准的译例，只有同语种、同语体且语义相关时才引用，且仍不能盲从。machineDrafts 是本系统自己此前产出的机器译文，只能用于发现同一文档内自相矛盾，绝不能当作正确与否的依据，也不得以"与 machineDrafts 不一致"为由报告问题。不要直接给总分，只报告可定位的问题。严重度只能是 critical、major、minor。message、suggestion 和其他解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 必须逐字保留原文或译文中的证据片段。特别注意：只有语义确实丢失或凭空添加事实才算漏译/增译；调整语序、换用同义地道表达、重写修辞都不是问题。发现译文逐字直译、翻译腔、不像目标语言原生文案时，记 major（category 用 fluency_naturalness）。原文含押韵、对仗、重复或口号结构时，译文必须用目标语言自然重现节奏与韵律；机械逐字重复、把闲散语气译成命令口吻、韵律完全丢失都应记 major。若输入里的 contextPack 携带 batchVerse 或 batchReferences（同批排比韵文），必须检查当前译文与本批已定稿译文的句式、节奏与用词风格是否一致，明显不一致记 major。没有问题返回空数组。输出严格 JSON：{"issues":[{"severity":"major","category":"accuracy_omission","sourceSpan":"原文片段","targetSpan":"译文片段","message":"简体中文问题原因","suggestion":"简体中文可执行修订意见","evidenceMemoryId":"可选ID","confidence":0.9}]}`
     },
     { role: "user", content: JSON.stringify({ contextPack, translation, approvedReferences: references.slice(0, 5), machineDrafts: machineDrafts.slice(0, 3), qaCases: qaCases.slice(0, 3) }) }
   ];

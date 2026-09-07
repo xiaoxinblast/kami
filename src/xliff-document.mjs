@@ -393,7 +393,11 @@ export function prepareXliffDocument(buffer, filename) {
       index: segments.length + 1,
       source: unit.sourceText,
       locator: { type: "xliff-unit", unitIndex: unit.index, unitId: unit.id },
-      context: { note: [unit.context, unit.note].filter(Boolean).join(" | ") },
+      context: {
+        note: [unit.context, unit.note].filter(Boolean).join(" | "),
+        previous: parsed.units[unit.index - 2]?.sourceText || "",
+        next: parsed.units[unit.index]?.sourceText || ""
+      },
       selected: true
     });
   }
@@ -402,6 +406,23 @@ export function prepareXliffDocument(buffer, filename) {
     segments,
     structure: { xliff: { skippedLocked, skippedExisting } }
   };
+}
+
+/** Read existing bilingual XLIFF/MQXLIFF pairs for manual TM import. */
+export function extractXliffPairs(buffer, filename) {
+  const extension = String(filename || "").toLowerCase().endsWith(".mqxliff") ? "mqxliff" : "xliff";
+  const parsed = parseXliffXml(decodeXmlBuffer(buffer), extension);
+  return parsed.units
+    .filter((unit) => unit.sourceText.trim() && unit.targetText.trim())
+    .map((unit) => ({
+      entryId: unit.id,
+      source: unit.sourceText,
+      target: unit.targetText,
+      previousSource: parsed.units[unit.index - 2]?.sourceText || "",
+      nextSource: parsed.units[unit.index]?.sourceText || "",
+      context: [unit.context, unit.note].filter(Boolean).join(" | "),
+      locked: unit.locked
+    }));
 }
 
 export function exportXliffDocument({ filename, base64, segments = [] } = {}) {

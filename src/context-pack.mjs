@@ -26,9 +26,11 @@ function normalizeNeighborContext(neighborContext) {
   };
 }
 
-export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], factSchema = null, titleOverrides = null }) {
-  const required = matches.filter((item) => item.mode === "exact" && item.term.enforcement === "required" && !item.scopeMismatch);
-  const preferred = matches.filter((item) => item.mode !== "exact" || item.term.enforcement !== "required" || item.scopeMismatch);
+export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], batchGroupEntries = [], factSchema = null, titleOverrides = null }) {
+  // 字符串精确命中只能证明字面相同，不能证明当前句子使用的是术语义。
+  // 仅“保留原文”属于可确定执行的硬约束；普通正式术语交给翻译器结合上下文判断。
+  const required = matches.filter((item) => item.mode === "exact" && !item.scopeMismatch && (item.preserveOriginal ?? item.term?.preserveOriginal));
+  const preferred = matches.filter((item) => !required.includes(item));
   const defaultRegister = CONTENT_TYPES[classification.contentType].register;
   return {
     sourceLanguage: "Japanese",
@@ -43,12 +45,21 @@ export function buildContextPack({ source, locale, classification, matches, doma
       source: item.source,
       target: item.target,
       similarity: Number(item.similarity) || 0,
+      matchEvidence: item.matchEvidence || (item.catMatchRate ? `CAT ${item.catMatchRate}%` : "语义/模糊匹配"),
+      catMatchRate: item.catMatchRate || null,
+      catMatchKind: item.catMatchKind || "",
       qualityStatus: item.qualityStatus || "",
+      libraryName: item.libraryName || "",
+      libraryRole: item.libraryRole || "",
+      libraryPriority: Number.isFinite(Number(item.libraryPriority)) ? Number(item.libraryPriority) : null,
+      entryId: item.entryId || "",
       contentType: item.contentType || "general",
       contentTags: Array.isArray(item.contentTags) ? item.contentTags.slice(0, 8) : [],
       provenance: item.provenance || "",
       sourceFile: item.sourceFile || "",
-      sourceRow: item.sourceRow || null
+      sourceRow: item.sourceRow || null,
+      previousSource: item.previousSource || "",
+      nextSource: item.nextSource || ""
     })) : [],
     userProfile: userProfile ? {
       id: String(userProfile.id || ""),
@@ -69,7 +80,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
       reviewRubric: styleProfile?.reviewRubric || {
         accuracy: "不得漏译、增译、误译或改变事实与承诺强度",
         fluency: "目标语言应自然、通顺且没有翻译腔",
-        terminology: "正式术语、禁用译法与保留原文规则必须执行",
+        terminology: "正式术语须结合当前句义判断；禁用译法与保留原文规则必须执行",
         style: "遵守当前语体、品牌语气和正反例",
         locale: "符合目标地区书写、日期、标点及文化习惯",
         platform: "平台名、字符限制、占位符和渠道规则必须正确"
@@ -90,16 +101,21 @@ export function buildContextPack({ source, locale, classification, matches, doma
     } : null,
     localeInstruction: LOCALES[locale].defaultInstruction,
     punctuation: punctuationGuidance(locale, titleOverrides),
-    requiredTerms: required.map(({ term }) => ({ source: term.source, target: term.target, forbidden: term.forbidden, note: term.note })),
+    requiredTerms: required.map(({ term, expectedTarget, libraryName, libraryPriority }) => ({ source: term.source, target: expectedTarget || term.source, preserveOriginal: true, note: term.note, libraryName: libraryName || term.libraryName || "", libraryPriority: libraryPriority ?? term.libraryPriority ?? null })),
     preferredTerms: preferred.map(({ term, mode, matchPhrase, score, scopeMismatch }) => ({
       source: term.source,
       matchedSource: matchPhrase,
       target: term.target,
       matchMode: mode,
       confidence: Number(score.toFixed(2)),
+      libraryName: term.libraryName || "",
+      libraryPriority: Number.isFinite(Number(term.libraryPriority)) ? Number(term.libraryPriority) : null,
+      forbidden: term.forbidden || [],
       note: scopeMismatch
         ? `该术语不属于当前主分类，仅作跨场景参考，不得强制采用。${term.note || ""}`
-        : (mode === "exact" ? term.note : `疑似术语，仅供参考，不得未经判断强制替换。${term.note || ""}`)
+        : (mode === "exact"
+          ? `原文精确命中，但仍须结合当前句义判断是否采用登记译法，不得仅凭字符串强制替换。${term.note || ""}`
+          : `疑似术语，仅供参考，不得未经判断强制替换。${term.note || ""}`)
     })),
     protectedTokens: extractProtectedTokens(source),
     factSchema: factSchema ? {
@@ -111,6 +127,9 @@ export function buildContextPack({ source, locale, classification, matches, doma
     rhymeLike: detectRhymeLike(source),
     batchVerse: batchVerse?.active ? { active: true, shape: String(batchVerse.shape || ""), matchingCount: Math.max(0, Number(batchVerse.matchingCount) || 0) } : null,
     batchReferences: normalizeBatchReferences(batchReferences),
+    batchGroupEntries: Array.isArray(batchGroupEntries) ? batchGroupEntries.slice(0, 50).map((item) => ({
+      id: String(item?.id || ""), source: String(item?.source || ""), context: item?.context || null
+    })).filter((item) => item.id && item.source) : [],
     qaGuidance: Array.isArray(qaGuidance) ? qaGuidance.slice(0, 3).map((item) => ({
       id: item.id,
       source: item.source,

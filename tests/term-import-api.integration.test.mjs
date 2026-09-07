@@ -5,7 +5,7 @@ import ExcelJS from "exceljs";
 
 const enabled = process.env.KAMI_API_E2E === "1" && process.env.KAMI_STORE === "directus";
 const appUrl = "http://127.0.0.1:4173";
-const directusUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+const directusUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
 
 async function request(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });

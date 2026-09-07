@@ -134,5 +134,18 @@ export function matchTerms(text, assets, {
       term
     });
   }
-  return matches.sort((a, b) => b.score - a.score).slice(0, limit);
+  // 同一源词的冲突译法按库优先级收窄：数字越小优先级越高；同优先级不擅自替用户选译法，全部保留给 AI/QA 显示冲突。
+  const winners = new Map();
+  for (const match of matches) {
+    const key = normalizeSource(match.matchPhrase || match.term.source);
+    const priority = Number.isFinite(Number(match.term.libraryPriority)) ? Number(match.term.libraryPriority) : 100;
+    const current = winners.get(key);
+    if (!current || priority < current.priority) winners.set(key, { priority, matches: [match] });
+    else if (priority === current.priority) current.matches.push(match);
+  }
+  return [...winners.values()].flatMap((item) => item.matches).sort((a, b) => {
+    const aPriority = Number.isFinite(Number(a.term.libraryPriority)) ? Number(a.term.libraryPriority) : 100;
+    const bPriority = Number.isFinite(Number(b.term.libraryPriority)) ? Number(b.term.libraryPriority) : 100;
+    return aPriority - bPriority || b.score - a.score;
+  }).slice(0, limit);
 }

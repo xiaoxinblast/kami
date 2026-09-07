@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { fetchWithTimeout } from "./provider.mjs";
+import { sanitizeProjectSettings } from "./project-config.mjs";
 
 export const LOCALE_COLLECTIONS = Object.freeze({
   "zh-CN": "terms_zh_cn",
@@ -20,6 +21,9 @@ export const MEMORY_COLLECTIONS = Object.freeze({
   "fr-FR": "translation_memory_fr_fr",
   "th-TH": "translation_memory_th_th"
 });
+
+export const PROJECT_COLLECTION = "localization_projects";
+export const RESOURCE_LIBRARY_COLLECTION = "project_resource_libraries";
 
 // Directus is configured for 128 MB on localhost. There is no arbitrary item
 // count limit; the 64 MB fallback only protects a single HTTP request if the
@@ -53,7 +57,7 @@ export function chunkDirectusRecords(records, {
 }
 
 function config() {
-  const baseUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+  const baseUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
   const token = process.env.DIRECTUS_TOKEN;
   if (!token) throw new Error("KAMI_STORE=directus requires DIRECTUS_TOKEN");
   return { baseUrl, token };
@@ -146,7 +150,7 @@ function toTerm(item) {
     domains: arrayValue(item.domains),
     contentTypes: arrayValue(item.content_types),
     contentTags: arrayValue(item.content_tags),
-    enforcement: item.enforcement || "required",
+    enforcement: item.enforcement || "preferred",
     note: item.note || "",
     status: item.status || "observed",
     provenance: item.provenance || "directus",
@@ -162,6 +166,8 @@ function toTerm(item) {
     channels: arrayValue(item.channels),
     platforms: arrayValue(item.platforms),
     regions: arrayValue(item.regions),
+    projectId: item.project_id || "",
+    libraryId: item.library_id || "",
     supersededBy: item.superseded_by || "",
     createdAt: item.date_created,
     updatedAt: item.date_updated
@@ -178,7 +184,7 @@ function toDirectusTerm(input) {
     domains: [...new Set((input.domains || ["general"]).filter(Boolean))],
     content_types: [...new Set((input.contentTypes || ["general"]).filter(Boolean))],
     content_tags: [...new Set((input.contentTags || []).filter(Boolean))],
-    enforcement: input.enforcement || "required",
+    enforcement: input.enforcement || "preferred",
     note: String(input.note || "").trim(),
     status: input.status || "approved",
     provenance: input.provenance || "kami-workbench",
@@ -194,6 +200,8 @@ function toDirectusTerm(input) {
     channels: input.channels || [],
     platforms: input.platforms || [],
     regions: input.regions || [],
+    project_id: input.projectId || "",
+    library_id: input.libraryId || "",
     superseded_by: input.supersededBy || ""
   };
 }
@@ -217,6 +225,8 @@ export async function initializeDirectusStore() {
   const health = await fetch(`${config().baseUrl}/server/ping`, { signal: AbortSignal.timeout(5_000) });
   if (!health.ok) throw new Error(`Directus health check failed (${health.status})`);
   await Promise.all([
+    PROJECT_COLLECTION,
+    RESOURCE_LIBRARY_COLLECTION,
     ...ACTIVE_LOCALES.map((locale) => LOCALE_COLLECTIONS[locale]),
     ...ACTIVE_LOCALES.map((locale) => MEMORY_COLLECTIONS[locale]),
     "style_learning_runs",
@@ -226,10 +236,11 @@ export async function initializeDirectusStore() {
   ].map((collection) => request(`/items/${collection}?limit=1&fields=id`)));
 }
 
-export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, exactContentType = false } = {}) {
+export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, exactContentType = false, projectId = "" } = {}) {
   const collection = memoryCollectionFor(locale);
   const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(1000, limit));
-  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_updated,-date_created", fields: "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,campaign,platform,region,audience,superseded_by,date_created,date_updated" });
+  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_updated,-date_created", fields: "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,entry_id,previous_source,next_source,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,project_id,library_id,campaign,platform,region,audience,superseded_by,date_created,date_updated" });
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   const items = await request(`/items/${collection}?${params}`);
   return items.filter((item) =>
     (!contentType || (exactContentType ? item.content_type === contentType : contentType === "general" || item.content_type === contentType || item.content_type === "general"))
@@ -238,6 +249,9 @@ export async function getDirectusMemories(locale, { contentType = "general", dom
     id: item.id,
     source: item.source,
     target: item.target,
+    entryId: item.entry_id || "",
+    previousSource: item.previous_source || "",
+    nextSource: item.next_source || "",
     domain: item.domain || "general",
     contentType: item.content_type || "general",
     contentTags: arrayValue(item.content_tags),
@@ -253,6 +267,8 @@ export async function getDirectusMemories(locale, { contentType = "general", dom
     validFrom: item.valid_from || null,
     validTo: item.valid_to || null,
     project: item.project || "",
+    projectId: item.project_id || item.project || "",
+    libraryId: item.library_id || "",
     campaign: item.campaign || "",
     platform: item.platform || "",
     region: item.region || "",
@@ -276,10 +292,15 @@ export async function saveDirectusMemory(locale, input) {
   const params = new URLSearchParams({ limit: "1", fields: "id,quality_status,qa_score" });
   params.set("filter[source][_eq]", source);
   params.set("filter[target][_eq]", target);
+  if (input.projectId) params.set("filter[project_id][_eq]", String(input.projectId));
+  if (input.libraryId) params.set("filter[library_id][_eq]", String(input.libraryId));
   const existing = await request(`/items/${collection}?${params}`);
   const body = {
     source,
     target,
+    entry_id: String(input.entryId || ""),
+    previous_source: String(input.previousSource || ""),
+    next_source: String(input.nextSource || ""),
     domain: input.domain || "general",
     content_type: input.contentType || "general",
     content_tags: input.contentTags || [],
@@ -298,6 +319,8 @@ export async function saveDirectusMemory(locale, input) {
     valid_from: input.validFrom || null,
     valid_to: input.validTo || null,
     project: input.project || "",
+    project_id: input.projectId || "",
+    library_id: input.libraryId || "",
     campaign: input.campaign || "",
     platform: input.platform || "",
     region: input.region || "",
@@ -343,6 +366,7 @@ export async function getDirectusStyleProfile(locale, contentType, domain = "gen
 export async function saveDirectusStyleEvidence(input) {
   const embedding = input.embedding ?? await embedSource(input.source);
   const saved = await request("/items/style_evidence", { method: "POST", body: {
+    project_id: input.projectId || "",
     target_locale: assertLocale(input.locale),
     content_type: input.contentType || "general",
     content_tags: input.contentTags || [],
@@ -364,8 +388,9 @@ export async function saveDirectusStyleEvidence(input) {
 
 export async function getDirectusStyleEvidence(locale, options = {}) {
   assertLocale(locale);
-  const params = new URLSearchParams({ limit: String(Math.min(1000, options.limit || 1000)), sort: "-date_created", fields: "id,target_locale,content_type,content_tags,domain,source,target,machine_translation,polarity,note,source_file,source_row,batch_id,status,provenance,embedding,date_created" });
+  const params = new URLSearchParams({ limit: String(Math.min(1000, options.limit || 1000)), sort: "-date_created", fields: "id,project_id,target_locale,content_type,content_tags,domain,source,target,machine_translation,polarity,note,source_file,source_row,batch_id,status,provenance,embedding,date_created" });
   params.set("filter[target_locale][_eq]", locale);
+  if (options.projectId) params.set("filter[project_id][_eq]", String(options.projectId));
   if (options.contentType) params.set("filter[content_type][_eq]", options.contentType);
   if (options.exactScope && options.domain) params.set("filter[domain][_eq]", options.domain);
   if (options.batchId) params.set("filter[batch_id][_eq]", options.batchId);
@@ -375,7 +400,7 @@ export async function getDirectusStyleEvidence(locale, options = {}) {
       ? (!options.contentType || item.content_type === options.contentType) && (!options.domain || item.domain === options.domain)
       : (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general"))
     .map((item) => ({
-      id: item.id, locale: item.target_locale, contentType: item.content_type || "general", contentTags: arrayValue(item.content_tags), domain: item.domain || "general",
+      id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type || "general", contentTags: arrayValue(item.content_tags), domain: item.domain || "general",
       source: item.source, target: item.target, sourceFile: item.source_file || "", sourceRow: Number(item.source_row) || null,
       machineTranslation: item.machine_translation || "",
       polarity: item.polarity === "negative" ? "negative" : "positive",
@@ -582,10 +607,12 @@ export async function getDirectusQaCases(locale, { contentType = "general", doma
   }));
 }
 
-export async function getDirectusAssets(locale) {
+export async function getDirectusAssets(locale, { projectId = "" } = {}) {
   const collection = collectionFor(locale);
-  const fields = "id,source,aliases,target,forbidden,domains,content_types,content_tags,enforcement,note,status,provenance,asset_tier,case_sensitive,preserve_original,version,version_group_id,lifecycle_status,valid_from,valid_to,projects,channels,platforms,regions,superseded_by,date_created,date_updated";
-  const items = await request(`/items/${collection}?limit=-1&sort=-date_updated&fields=${fields}`);
+  const fields = "id,source,aliases,target,forbidden,domains,content_types,content_tags,enforcement,note,status,provenance,asset_tier,case_sensitive,preserve_original,version,version_group_id,lifecycle_status,valid_from,valid_to,projects,project_id,library_id,channels,platforms,regions,superseded_by,date_created,date_updated";
+  const params = new URLSearchParams({ limit: "-1", sort: "-date_updated", fields });
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  const items = await request(`/items/${collection}?${params}`);
   const latest = items.map((item) => item.date_updated || item.date_created).filter(Boolean).sort().at(-1);
   return {
     locale,
@@ -655,6 +682,7 @@ export async function saveDirectusImportPreview(input) {
       filename: input.filename,
       file_type: input.fileType,
       source_language: "zh-CN",
+      project_id: input.projectId || "",
       requested_locale: input.requestedLocale,
       row_count: input.statistics?.rowsScanned || 0,
       candidate_count: input.candidates.length,
@@ -729,7 +757,7 @@ export async function saveDirectusImportPreview(input) {
 export async function getDirectusImportPreview(batchId) {
   let batch;
   try {
-    batch = await request(`/items/term_import_batches/${encodeURIComponent(String(batchId))}?fields=id,filename,file_type,requested_locale,row_count,candidate_count,status,ai_used,summary,date_created`);
+    batch = await request(`/items/term_import_batches/${encodeURIComponent(String(batchId))}?fields=id,filename,file_type,project_id,requested_locale,row_count,candidate_count,status,ai_used,summary,date_created`);
   } catch (error) {
     if (isMissingItem(error)) return null;
     throw error;
@@ -787,6 +815,7 @@ export async function getDirectusImportPreview(batchId) {
     filename: batch.filename || "术语导入表格",
     fileType: batch.file_type || "xlsx",
     requestedLocale: batch.requested_locale || "",
+    projectId: batch.project_id || "",
     fileMode,
     sheets: Array.isArray(sheets) ? sheets : [],
     statistics: { ...statistics, rowsScanned: Number(statistics.rowsScanned) || Number(batch.row_count) || 0 },
@@ -851,10 +880,11 @@ export async function rebuildDirectusEmbeddings(locale, { forceLocal = false } =
   return stats;
 }
 
-export async function demoteDirectusMemories(locale, source, exceptId) {
+export async function demoteDirectusMemories(locale, source, exceptId, { projectId = "" } = {}) {
   const collection = memoryCollectionFor(locale);
   const params = new URLSearchParams({ limit: "-1", fields: "id,quality_status" });
   params.set("filter[source][_eq]", source);
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   const items = await request(`/items/${collection}?${params}`);
   const updates = items
     .filter((item) => item.id !== exceptId && item.quality_status !== "rejected")
@@ -887,6 +917,7 @@ export async function saveDirectusBatchRun(input) {
   const metrics = batchMetrics(input.segments || []);
   const body = {
     filename: String(input.filename || ""),
+    project_id: input.projectId || "",
     target_locale: assertLocale(input.locale),
     content_type: String(input.contentType || "general"),
     domain: String(input.domain || "general"),
@@ -910,10 +941,11 @@ export async function saveDirectusBatchRun(input) {
 
 export async function getDirectusBatchRun(batchId) {
   try {
-    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,target_locale,content_type,domain,format,segmentation_mode,structure,segments,date_updated`);
+    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,structure,segments,date_updated`);
     return {
       batchId: item.id,
       filename: item.filename || "",
+      projectId: item.project_id || "",
       locale: item.target_locale || "",
       contentType: item.content_type || "general",
       domain: item.domain || "general",
@@ -937,7 +969,7 @@ function summarizeBatchRun(item) {
   const qaPending = item.qa_pending == null ? fallbackMetrics?.qaPending || 0 : Number(item.qa_pending);
   const status = item.task_status || fallbackMetrics?.status || "in_progress";
   return {
-    batchId: item.id, filename: item.filename || "未命名任务", locale: item.target_locale || "",
+    batchId: item.id, filename: item.filename || "未命名任务", projectId: item.project_id || "", locale: item.target_locale || "",
     contentType: item.content_type || "general", domain: item.domain || "general", format: item.format || "",
     segmentationMode: item.segmentation_mode || "sentence", status,
     totalSegments, completedSegments, failedSegments, qaPending,
@@ -945,9 +977,10 @@ function summarizeBatchRun(item) {
   };
 }
 
-export async function listDirectusBatchRuns({ locale = "", status = "", search = "", limit = 200 } = {}) {
-  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,target_locale,content_type,domain,format,segmentation_mode,task_status,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
+export async function listDirectusBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,task_status,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[filename][_icontains]", String(search).slice(0, 120));
   const items = await request(`/items/batch_runs?${params}`);
   for (const item of items.filter((entry) => entry.total_segments == null)) {
@@ -2093,4 +2126,108 @@ export function getDirectusMetadata() {
     adminUrl: `${baseUrl}/admin/content/terms_zh_cn`,
     collections: Object.fromEntries(ACTIVE_LOCALES.map((locale) => [locale, LOCALE_COLLECTIONS[locale]]))
   };
+}
+
+function mapProject(item = {}) {
+  return {
+    id: String(item.id || ""),
+    name: String(item.name || ""),
+    description: String(item.description || ""),
+    status: String(item.status || "active"),
+    settings: sanitizeProjectSettings(item.settings || {}),
+    createdAt: item.date_created || null,
+    updatedAt: item.date_updated || null
+  };
+}
+
+function mapResourceLibrary(item = {}) {
+  return {
+    id: String(item.id || ""),
+    projectId: String(item.project_id || ""),
+    name: String(item.name || ""),
+    kind: String(item.kind || "term_base"),
+    role: String(item.role || "reference"),
+    enabled: item.enabled !== false,
+    priority: Number(item.priority) || 100,
+    description: String(item.description || ""),
+    entryCount: Number(item.entry_count) || 0,
+    createdAt: item.date_created || null,
+    updatedAt: item.date_updated || null
+  };
+}
+
+export async function getDirectusProjects({ status = "active", limit = 100 } = {}) {
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 100))), sort: "-date_updated,-date_created", fields: "id,name,description,status,settings,date_created,date_updated" });
+  if (status) params.set("filter[status][_eq]", status);
+  return (await request(`/items/${PROJECT_COLLECTION}?${params}`)).map(mapProject);
+}
+
+export async function getDirectusProject(id) {
+  try {
+    return mapProject(await request(`/items/${PROJECT_COLLECTION}/${encodeURIComponent(String(id))}?fields=*`));
+  } catch (error) {
+    if (isMissingItem(error)) return null;
+    throw error;
+  }
+}
+
+export async function saveDirectusProject(input = {}) {
+  const name = String(input.name || "").trim();
+  if (!name) throw new Error("项目名称不能为空");
+  const body = {
+    name,
+    description: String(input.description || "").trim(),
+    status: String(input.status || "active"),
+    settings: sanitizeProjectSettings(input.settings || {})
+  };
+  const saved = input.id
+    ? await request(`/items/${PROJECT_COLLECTION}/${encodeURIComponent(String(input.id))}`, { method: "PATCH", body })
+    : await request(`/items/${PROJECT_COLLECTION}`, { method: "POST", body: { id: randomUUID(), ...body } });
+  return mapProject(saved);
+}
+
+export async function getDirectusResourceLibraries(projectId, { kind = "", limit = 500 } = {}) {
+  const params = new URLSearchParams({ limit: String(Math.min(1000, Math.max(1, Number(limit) || 500))), sort: "priority,date_created", fields: "id,project_id,name,kind,role,enabled,priority,description,entry_count,date_created,date_updated" });
+  params.set("filter[project_id][_eq]", String(projectId));
+  if (kind) params.set("filter[kind][_eq]", String(kind));
+  return (await request(`/items/${RESOURCE_LIBRARY_COLLECTION}?${params}`)).map(mapResourceLibrary);
+}
+
+export async function saveDirectusResourceLibrary(input = {}) {
+  const projectId = String(input.projectId || "").trim();
+  const name = String(input.name || "").trim();
+  if (!projectId || !name) throw new Error("资源库必须绑定项目并填写名称");
+  const kind = ["term_base", "translation_memory"].includes(input.kind) ? input.kind : "term_base";
+  const role = kind === "translation_memory" && ["master", "working", "reference"].includes(input.role) ? input.role : kind === "translation_memory" ? "reference" : "reference";
+  if (kind === "translation_memory" && input.enabled !== false && ["master", "working"].includes(role)) {
+    const existingLibraries = await getDirectusResourceLibraries(projectId, { kind: "translation_memory", limit: 500 });
+    const duplicate = existingLibraries.find((library) => library.id !== String(input.id || "") && library.enabled !== false && library.role === role);
+    if (duplicate) throw new Error(role === "master" ? "一个项目只能启用一个主 TM" : "一个项目只能启用一个工作 TM");
+  }
+  const body = {
+    project_id: projectId,
+    name,
+    kind,
+    role,
+    enabled: input.enabled !== false,
+    priority: Math.max(1, Math.min(9999, Number(input.priority) || 100)),
+    description: String(input.description || "").trim(),
+    entry_count: Math.max(0, Number(input.entryCount) || 0)
+  };
+  const saved = input.id
+    ? await request(`/items/${RESOURCE_LIBRARY_COLLECTION}/${encodeURIComponent(String(input.id))}`, { method: "PATCH", body })
+    : await request(`/items/${RESOURCE_LIBRARY_COLLECTION}`, { method: "POST", body: { id: randomUUID(), ...body } });
+  return mapResourceLibrary(saved);
+}
+
+export async function deleteDirectusResourceLibrary(projectId, libraryId) {
+  const normalizedProjectId = String(projectId || "").trim();
+  const normalizedLibraryId = String(libraryId || "").trim();
+  if (!normalizedProjectId || !normalizedLibraryId) return false;
+  const libraries = await getDirectusResourceLibraries(normalizedProjectId, { limit: 500 });
+  const target = libraries.find((library) => library.id === normalizedLibraryId);
+  if (!target) return false;
+  if (target.role === "master" || target.role === "working") throw new Error("主 TM 和工作 TM 不能删除，请先停用或改为参考 TM");
+  await request(`/items/${RESOURCE_LIBRARY_COLLECTION}/${encodeURIComponent(normalizedLibraryId)}`, { method: "DELETE" });
+  return true;
 }

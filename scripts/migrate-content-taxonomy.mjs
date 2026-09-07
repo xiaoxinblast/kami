@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { inferContentTags } from "../src/classifier.mjs";
 import { aggregateScope, classifyExistingAsset, inferStyleScopeFromText, inferTermScopes } from "../src/content-taxonomy-migration.mjs";
 
-const baseUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:8055").replace(/\/$/, "");
+const baseUrl = String(process.env.DIRECTUS_URL || "http://127.0.0.1:18055").replace(/\/$/, "");
 const token = process.env.DIRECTUS_ADMIN_TOKEN || process.env.DIRECTUS_TOKEN;
 const apply = process.argv.includes("--apply");
 if (!token) throw new Error("DIRECTUS_ADMIN_TOKEN or DIRECTUS_TOKEN is required");
