@@ -178,6 +178,58 @@ collections:
           translation: 语料与规则
       unarchive_value: null
       versioning: false
+  - collection: localization_projects
+    meta:
+      accountability: all
+      archive_app_filter: true
+      archive_field: null
+      archive_value: null
+      collapse: open
+      collection: localization_projects
+      color: null
+      display_template: '{{name}}'
+      group: localization_assets
+      hidden: false
+      icon: folder_special
+      item_duplication_fields: null
+      note: Kami 项目及项目级术语、TM、QA 设置。
+      preview_url: null
+      singleton: false
+      sort: 0
+      sort_field: null
+      translations:
+        - language: zh-CN
+          translation: Kami 项目
+      unarchive_value: null
+      versioning: false
+    schema:
+      name: localization_projects
+  - collection: project_resource_libraries
+    meta:
+      accountability: all
+      archive_app_filter: true
+      archive_field: null
+      archive_value: null
+      collapse: open
+      collection: project_resource_libraries
+      color: null
+      display_template: '{{name}} · {{role}}'
+      group: localization_assets
+      hidden: false
+      icon: library_books
+      item_duplication_fields: null
+      note: 项目内术语库与主/工作/参考 TM 资源。
+      preview_url: null
+      singleton: false
+      sort: 0
+      sort_field: null
+      translations:
+        - language: zh-CN
+          translation: 项目资源库
+      unarchive_value: null
+      versioning: false
+    schema:
+      name: project_resource_libraries
   - collection: qa_cases
     meta:
       accountability: all
@@ -933,6 +985,8 @@ fields:
         choices:
           - text: 术语导入
             value: term_import
+          - text: 批次翻译
+            value: batch_translation
           - text: Embedding 重建
             value: embedding_rebuild
           - text: 批次导出
@@ -946,6 +1000,8 @@ fields:
         choices:
           - text: 术语导入
             value: term_import
+          - text: 批次翻译
+            value: batch_translation
           - text: Embedding 重建
             value: embedding_rebuild
           - text: 批次导出
@@ -1029,16 +1085,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -1046,16 +1094,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -1312,6 +1352,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: background_tasks
+    field: project_id
+    type: string
+    meta:
+      collection: background_tasks
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: background_tasks
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: batch_runs
     field: id
     type: uuid
@@ -1404,16 +1486,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -1421,16 +1495,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -1823,8 +1889,12 @@ fields:
       display: labels
       display_options:
         choices:
+          - text: 待启动
+            value: ready
           - text: 进行中
             value: in_progress
+          - text: 已暂停
+            value: paused
           - text: QA 待处理
             value: review
           - text: 存在失败
@@ -1838,8 +1908,12 @@ fields:
       note: null
       options:
         choices:
+          - text: 待启动
+            value: ready
           - text: 进行中
             value: in_progress
+          - text: 已暂停
+            value: paused
           - text: QA 待处理
             value: review
           - text: 存在失败
@@ -1861,7 +1935,7 @@ fields:
       name: task_status
       table: batch_runs
       data_type: character varying
-      default_value: in_progress
+      default_value: ready
       max_length: 255
       numeric_precision: null
       numeric_scale: null
@@ -2120,6 +2194,202 @@ fields:
       numeric_precision: null
       numeric_scale: null
       is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: batch_runs
+    field: project_id
+    type: string
+    meta:
+      collection: batch_runs
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: batch_runs
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: batch_runs
+    field: sub_batches
+    type: json
+    meta:
+      collection: batch_runs
+      conditions: null
+      display: null
+      display_options: null
+      field: sub_batches
+      group: null
+      hidden: false
+      interface: tags
+      note: 按项目条目数和字符数限制生成的真实执行检查点。
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 10
+      special:
+        - cast-json
+      translations:
+        - language: zh-CN
+          translation: 服务端子批次
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: sub_batches
+      table: batch_runs
+      data_type: json
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: batch_runs
+    field: runner_options
+    type: json
+    meta:
+      collection: batch_runs
+      conditions: null
+      display: null
+      display_options: null
+      field: runner_options
+      group: null
+      hidden: false
+      interface: tags
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 11
+      special:
+        - cast-json
+      translations:
+        - language: zh-CN
+          translation: 后台执行选项
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: runner_options
+      table: batch_runs
+      data_type: json
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: batch_runs
+    field: run_state
+    type: string
+    meta:
+      collection: batch_runs
+      conditions: null
+      display: labels
+      display_options:
+        choices:
+          - text: 待启动
+            value: ready
+          - text: 排队
+            value: queued
+          - text: 运行中
+            value: running
+          - text: 已暂停
+            value: paused
+          - text: 已完成
+            value: completed
+          - text: 需要处理
+            value: needs_attention
+      field: run_state
+      group: null
+      hidden: false
+      interface: select-dropdown
+      note: null
+      options:
+        choices:
+          - text: 待启动
+            value: ready
+          - text: 排队
+            value: queued
+          - text: 运行中
+            value: running
+          - text: 已暂停
+            value: paused
+          - text: 已完成
+            value: completed
+          - text: 需要处理
+            value: needs_attention
+      readonly: false
+      required: false
+      searchable: true
+      sort: 12
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 后台运行状态
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: run_state
+      table: batch_runs
+      data_type: character varying
+      default_value: ready
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
       is_unique: false
       is_indexed: false
       is_primary_key: false
@@ -2508,6 +2778,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: corpus_documents
+    field: project_id
+    type: string
+    meta:
+      collection: corpus_documents
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: corpus_documents
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: learning_trajectories
     field: id
     type: uuid
@@ -2558,16 +2870,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -2575,16 +2879,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -3580,6 +3876,799 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: localization_projects
+    field: id
+    type: uuid
+    meta:
+      collection: localization_projects
+      conditions: null
+      display: null
+      display_options: null
+      field: id
+      group: null
+      hidden: true
+      interface: input
+      note: null
+      options: null
+      readonly: true
+      required: false
+      searchable: true
+      sort: 1
+      special:
+        - uuid
+      translations: null
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: id
+      table: localization_projects
+      data_type: uuid
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: true
+      is_indexed: false
+      is_primary_key: true
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: localization_projects
+    field: name
+    type: string
+    meta:
+      collection: localization_projects
+      conditions: null
+      display: null
+      display_options: null
+      field: name
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: true
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 项目名称
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: name
+      table: localization_projects
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: localization_projects
+    field: description
+    type: text
+    meta:
+      collection: localization_projects
+      conditions: null
+      display: null
+      display_options: null
+      field: description
+      group: null
+      hidden: false
+      interface: input-multiline
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 3
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 项目说明
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: description
+      table: localization_projects
+      data_type: text
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: localization_projects
+    field: status
+    type: string
+    meta:
+      collection: localization_projects
+      conditions: null
+      display: labels
+      display_options:
+        choices:
+          - text: 启用
+            value: active
+          - text: 归档
+            value: archived
+      field: status
+      group: null
+      hidden: false
+      interface: select-dropdown
+      note: null
+      options:
+        choices:
+          - text: 启用
+            value: active
+          - text: 归档
+            value: archived
+      readonly: false
+      required: false
+      searchable: true
+      sort: 4
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 项目状态
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: status
+      table: localization_projects
+      data_type: character varying
+      default_value: active
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: localization_projects
+    field: settings
+    type: json
+    meta:
+      collection: localization_projects
+      conditions: null
+      display: null
+      display_options: null
+      field: settings
+      group: null
+      hidden: false
+      interface: tags
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 5
+      special:
+        - cast-json
+      translations:
+        - language: zh-CN
+          translation: 项目设置
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: settings
+      table: localization_projects
+      data_type: json
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: localization_projects
+    field: date_created
+    type: timestamp
+    meta:
+      collection: localization_projects
+      conditions: null
+      display: null
+      display_options: null
+      field: date_created
+      group: null
+      hidden: false
+      interface: datetime
+      note: null
+      options: null
+      readonly: true
+      required: false
+      searchable: true
+      sort: 6
+      special:
+        - date-created
+      translations:
+        - language: zh-CN
+          translation: 创建时间
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: date_created
+      table: localization_projects
+      data_type: timestamp with time zone
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: localization_projects
+    field: date_updated
+    type: timestamp
+    meta:
+      collection: localization_projects
+      conditions: null
+      display: null
+      display_options: null
+      field: date_updated
+      group: null
+      hidden: false
+      interface: datetime
+      note: null
+      options: null
+      readonly: true
+      required: false
+      searchable: true
+      sort: 7
+      special:
+        - date-updated
+      translations:
+        - language: zh-CN
+          translation: 更新时间
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: date_updated
+      table: localization_projects
+      data_type: timestamp with time zone
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: id
+    type: uuid
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: id
+      group: null
+      hidden: true
+      interface: input
+      note: null
+      options: null
+      readonly: true
+      required: false
+      searchable: true
+      sort: 1
+      special:
+        - uuid
+      translations: null
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: id
+      table: project_resource_libraries
+      data_type: uuid
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: true
+      is_indexed: false
+      is_primary_key: true
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: project_id
+    type: string
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: true
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 项目 ID
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: project_id
+      table: project_resource_libraries
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: name
+    type: string
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: name
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: true
+      searchable: true
+      sort: 3
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 资源库名称
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: name
+      table: project_resource_libraries
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: kind
+    type: string
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: labels
+      display_options:
+        choices:
+          - text: 术语库
+            value: term_base
+          - text: 翻译记忆
+            value: translation_memory
+      field: kind
+      group: null
+      hidden: false
+      interface: select-dropdown
+      note: null
+      options:
+        choices:
+          - text: 术语库
+            value: term_base
+          - text: 翻译记忆
+            value: translation_memory
+      readonly: false
+      required: false
+      searchable: true
+      sort: 4
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 资源类型
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: kind
+      table: project_resource_libraries
+      data_type: character varying
+      default_value: term_base
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: role
+    type: string
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: labels
+      display_options:
+        choices:
+          - text: 主 TM
+            value: master
+          - text: 工作 TM
+            value: working
+          - text: 参考 TM
+            value: reference
+      field: role
+      group: null
+      hidden: false
+      interface: select-dropdown
+      note: null
+      options:
+        choices:
+          - text: 主 TM
+            value: master
+          - text: 工作 TM
+            value: working
+          - text: 参考 TM
+            value: reference
+      readonly: false
+      required: false
+      searchable: true
+      sort: 5
+      special: null
+      translations:
+        - language: zh-CN
+          translation: TM 角色
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: role
+      table: project_resource_libraries
+      data_type: character varying
+      default_value: reference
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: enabled
+    type: boolean
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: enabled
+      group: null
+      hidden: false
+      interface: boolean
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 6
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 参与检索
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: enabled
+      table: project_resource_libraries
+      data_type: boolean
+      default_value: true
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: priority
+    type: integer
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: priority
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 7
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 优先级
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: priority
+      table: project_resource_libraries
+      data_type: integer
+      default_value: 100
+      max_length: null
+      numeric_precision: 32
+      numeric_scale: 0
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: description
+    type: text
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: description
+      group: null
+      hidden: false
+      interface: input-multiline
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 8
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 说明
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: description
+      table: project_resource_libraries
+      data_type: text
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: entry_count
+    type: integer
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: entry_count
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: true
+      required: false
+      searchable: true
+      sort: 9
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 条目数
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: entry_count
+      table: project_resource_libraries
+      data_type: integer
+      default_value: 0
+      max_length: null
+      numeric_precision: 32
+      numeric_scale: 0
+      is_nullable: false
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: date_created
+    type: timestamp
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: date_created
+      group: null
+      hidden: false
+      interface: datetime
+      note: null
+      options: null
+      readonly: true
+      required: false
+      searchable: true
+      sort: 10
+      special:
+        - date-created
+      translations:
+        - language: zh-CN
+          translation: 创建时间
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: date_created
+      table: project_resource_libraries
+      data_type: timestamp with time zone
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: project_resource_libraries
+    field: date_updated
+    type: timestamp
+    meta:
+      collection: project_resource_libraries
+      conditions: null
+      display: null
+      display_options: null
+      field: date_updated
+      group: null
+      hidden: false
+      interface: datetime
+      note: null
+      options: null
+      readonly: true
+      required: false
+      searchable: true
+      sort: 11
+      special:
+        - date-updated
+      translations:
+        - language: zh-CN
+          translation: 更新时间
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: date_updated
+      table: project_resource_libraries
+      data_type: timestamp with time zone
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: qa_cases
     field: id
     type: uuid
@@ -3630,16 +4719,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -3647,16 +4728,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -4660,6 +5733,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: qa_cases
+    field: project_id
+    type: string
+    meta:
+      collection: qa_cases
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: qa_cases
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: qa_runs
     field: id
     type: uuid
@@ -4710,16 +5825,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -4727,16 +5834,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -5556,6 +6655,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: qa_runs
+    field: project_id
+    type: string
+    meta:
+      collection: qa_runs
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: qa_runs
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: qa_tasks
     field: id
     type: uuid
@@ -5648,16 +6789,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -5665,16 +6798,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -6354,6 +7479,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: qa_tasks
+    field: project_id
+    type: string
+    meta:
+      collection: qa_tasks
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: qa_tasks
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: quality_assets
     field: id
     type: uuid
@@ -6460,16 +7627,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -6477,16 +7636,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -7451,16 +8602,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -7468,16 +8611,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -8557,16 +9692,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -8574,16 +9701,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -9109,6 +10228,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: shares
+    field: project_id
+    type: string
+    meta:
+      collection: shares
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: shares
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: skill_evaluations
     field: id
     type: uuid
@@ -9159,16 +10320,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -9176,16 +10329,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -9934,16 +11079,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -9951,16 +11088,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -10704,6 +11833,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: style_evidence
+    field: project_id
+    type: string
+    meta:
+      collection: style_evidence
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 1
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: style_evidence
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: style_learning_runs
     field: id
     type: uuid
@@ -10838,16 +12009,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -10855,16 +12018,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -11527,6 +12682,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: style_learning_runs
+    field: project_id
+    type: string
+    meta:
+      collection: style_learning_runs
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: style_learning_runs
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: style_profiles
     field: id
     type: uuid
@@ -11619,16 +12816,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -11636,16 +12825,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -12467,6 +13648,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: style_profiles
+    field: project_id
+    type: string
+    meta:
+      collection: style_profiles
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: style_profiles
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: term_candidates
     field: id
     type: uuid
@@ -12601,16 +13824,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -12618,16 +13833,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -12643,7 +13850,7 @@ fields:
       name: target_locale
       table: term_candidates
       data_type: character varying
-      default_value: ja-JP
+      default_value: zh-CN
       max_length: 255
       numeric_precision: null
       numeric_scale: null
@@ -13972,6 +15179,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: term_candidates
+    field: project_id
+    type: string
+    meta:
+      collection: term_candidates
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: term_candidates
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: term_import_batches
     field: id
     type: uuid
@@ -14449,6 +15698,48 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: term_import_batches
+    field: project_id
+    type: string
+    meta:
+      collection: term_import_batches
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: term_import_batches
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: terms_fr_fr
     field: id
     type: uuid
@@ -20458,6 +21749,90 @@ fields:
       data_type: timestamp with time zone
       default_value: null
       max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: terms_zh_cn
+    field: project_id
+    type: string
+    meta:
+      collection: terms_zh_cn
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 20
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: terms_zh_cn
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: terms_zh_cn
+    field: library_id
+    type: string
+    meta:
+      collection: terms_zh_cn
+      conditions: null
+      display: null
+      display_options: null
+      field: library_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 21
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属术语库 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: library_id
+      table: terms_zh_cn
+      data_type: character varying
+      default_value: null
+      max_length: 255
       numeric_precision: null
       numeric_scale: null
       is_nullable: true
@@ -21723,16 +23098,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -21740,16 +23107,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -29230,6 +30589,216 @@ fields:
       has_auto_increment: false
       foreign_key_table: null
       foreign_key_column: null
+  - collection: translation_memory_zh_cn
+    field: entry_id
+    type: string
+    meta:
+      collection: translation_memory_zh_cn
+      conditions: null
+      display: null
+      display_options: null
+      field: entry_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 12
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 来源条目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: entry_id
+      table: translation_memory_zh_cn
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: translation_memory_zh_cn
+    field: previous_source
+    type: text
+    meta:
+      collection: translation_memory_zh_cn
+      conditions: null
+      display: null
+      display_options: null
+      field: previous_source
+      group: null
+      hidden: false
+      interface: input-multiline
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 13
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 上一条原文
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: previous_source
+      table: translation_memory_zh_cn
+      data_type: text
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: translation_memory_zh_cn
+    field: next_source
+    type: text
+    meta:
+      collection: translation_memory_zh_cn
+      conditions: null
+      display: null
+      display_options: null
+      field: next_source
+      group: null
+      hidden: false
+      interface: input-multiline
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 14
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 下一条原文
+      validation: null
+      validation_message: null
+      width: full
+    schema:
+      name: next_source
+      table: translation_memory_zh_cn
+      data_type: text
+      default_value: null
+      max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: translation_memory_zh_cn
+    field: project_id
+    type: string
+    meta:
+      collection: translation_memory_zh_cn
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 21
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: translation_memory_zh_cn
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: translation_memory_zh_cn
+    field: library_id
+    type: string
+    meta:
+      collection: translation_memory_zh_cn
+      conditions: null
+      display: null
+      display_options: null
+      field: library_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 22
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属 TM ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: library_id
+      table: translation_memory_zh_cn
+      data_type: character varying
+      default_value: null
+      max_length: 255
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
   - collection: translation_memory_zh_hant_tw
     field: id
     type: uuid
@@ -30605,16 +32174,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -30622,16 +32183,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -31540,48 +33093,6 @@ fields:
       foreign_key_table: null
       foreign_key_column: null
   - collection: user_profiles
-    field: project_id
-    type: string
-    meta:
-      collection: user_profiles
-      conditions: null
-      display: null
-      display_options: null
-      field: project_id
-      group: null
-      hidden: false
-      interface: input
-      note: null
-      options: null
-      readonly: false
-      required: false
-      searchable: true
-      sort: 2
-      special: null
-      translations:
-        - language: zh-CN
-          translation: 所属项目 ID
-      validation: null
-      validation_message: null
-      width: half
-    schema:
-      name: project_id
-      table: user_profiles
-      data_type: character varying
-      default_value: null
-      max_length: 255
-      numeric_precision: null
-      numeric_scale: null
-      is_nullable: true
-      is_unique: false
-      is_indexed: false
-      is_primary_key: false
-      is_generated: false
-      generation_expression: null
-      has_auto_increment: false
-      foreign_key_table: null
-      foreign_key_column: null
-  - collection: user_profiles
     field: name
     type: string
     meta:
@@ -31632,16 +33143,8 @@ fields:
       display: labels
       display_options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       field: target_locale
       group: null
       hidden: false
@@ -31649,16 +33152,8 @@ fields:
       note: null
       options:
         choices:
-          - text: ja-JP
-            value: ja-JP
-          - text: ko-KR
-            value: ko-KR
-          - text: zh-Hant-TW
-            value: zh-Hant-TW
-          - text: fr-FR
-            value: fr-FR
-          - text: th-TH
-            value: th-TH
+          - text: zh-CN
+            value: zh-CN
       readonly: false
       required: false
       searchable: true
@@ -31986,6 +33481,48 @@ fields:
       data_type: timestamp with time zone
       default_value: null
       max_length: null
+      numeric_precision: null
+      numeric_scale: null
+      is_nullable: true
+      is_unique: false
+      is_indexed: false
+      is_primary_key: false
+      is_generated: false
+      generation_expression: null
+      has_auto_increment: false
+      foreign_key_table: null
+      foreign_key_column: null
+  - collection: user_profiles
+    field: project_id
+    type: string
+    meta:
+      collection: user_profiles
+      conditions: null
+      display: null
+      display_options: null
+      field: project_id
+      group: null
+      hidden: false
+      interface: input
+      note: null
+      options: null
+      readonly: false
+      required: false
+      searchable: true
+      sort: 2
+      special: null
+      translations:
+        - language: zh-CN
+          translation: 所属项目 ID
+      validation: null
+      validation_message: null
+      width: half
+    schema:
+      name: project_id
+      table: user_profiles
+      data_type: character varying
+      default_value: null
+      max_length: 255
       numeric_precision: null
       numeric_scale: null
       is_nullable: true

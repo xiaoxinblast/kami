@@ -47,6 +47,7 @@ import { buildTrainingExport, datasetToJsonl } from "./src/training-export.mjs";
 import { advanceTrainingRun, buildTrainingManifest, canTransition, createTrainingRun, freezeTrainingDataset } from "./src/training-pipeline.mjs";
 import { WorkbenchSessionMonitor, shutdownDockerDesktop } from "./src/workbench-lifecycle.mjs";
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
+import { runServerBatch } from "./src/batch-runner.mjs";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public", import.meta.url));
 const PROJECT_ROOT = fileURLToPath(new URL("./", import.meta.url));
@@ -63,6 +64,7 @@ const WORKBENCH_IDLE_SHUTDOWN_MS = 15_000;
 const WORKBENCH_SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
 let workbenchSessionMonitor = null;
 let workbenchShutdownStarted = false;
+const batchWorkers = new Map();
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -139,9 +141,10 @@ function finalizeShareWithoutGloss(share) {
 }
 
 /** 创建后台任务记录（术语导入 / Embedding 重建 / 批次导出）。 */
-async function createBackgroundTask({ type, title, locale = "", progress = {} }) {
+async function createBackgroundTask({ type, title, locale = "", projectId = "", progress = {} }) {
   return saveBackgroundTask({
     type,
+    projectId,
     title: String(title || "后台任务").slice(0, 160),
     locale,
     status: "in_progress",
@@ -658,14 +661,14 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   const status = passed ? "passed" : "review";
   const provider = getProviderConfig();
   await saveQaRun({
-    locale, contentType, domain, source: contextPack.source, initialTranslation, finalTranslation: translation,
+    projectId, locale, contentType, domain, source: contextPack.source, initialTranslation, finalTranslation: translation,
     score, status, iterations, issues, references: [...references, ...qaCases.map((item) => ({ ...item, kind: "qa_case" }))], styleProfileId: contextPack.styleProfile?.id,
     model: provider.model, batchId, fallbackReason, termDecisions, humanDecisions
   });
   const translationChanged = translation !== initialTranslation;
   if (used && (translationChanged || !passed)) {
     await saveQaCase({
-      locale, contentType, domain, source: contextPack.source, rejectedTranslation: initialTranslation,
+      projectId, project: projectId, locale, contentType, domain, source: contextPack.source, rejectedTranslation: initialTranslation,
       correctedTranslation: translation, issues, scoreBefore: initialScore, scoreAfter: score,
       status: passed ? "machine_verified" : "review"
     });
@@ -1067,6 +1070,7 @@ async function commitTermImport(body, onProgress = null) {
         locale,
         contentType,
         domain,
+        projectId,
         evidence: currentEvidence
       });
       if (learning) batchLearning.push(learning);
@@ -1075,7 +1079,7 @@ async function commitTermImport(body, onProgress = null) {
     }
     try {
       const { distilled, ...pending } = await distillStyleProfileIfReady({
-        locale,
+        locale, projectId,
         contentType,
         domain,
         sourceBatchId: body.batchId,
@@ -1089,7 +1093,7 @@ async function commitTermImport(body, onProgress = null) {
       if (distilled) {
         styleProfiles.push(distilled);
         // 规则集刚变过，这时候才值得扫冲突；人工采纳本身不改规则，扫了是白烧模型调用。
-        triggerConflictScan({ locale, contentType, domain, project: body.project || "default" });
+        triggerConflictScan({ locale, contentType, domain, project: projectId });
         if (learning?.id) {
           const promoted = await saveStyleLearningRun({ ...learning, id: learning.id, status: "promoted", promotedProfileId: distilled.id });
           const index = batchLearning.findIndex((item) => item.id === learning.id);
@@ -1117,6 +1121,77 @@ async function commitTermImport(body, onProgress = null) {
   };
   await completeImport(body.batchId, decisions, summary);
   return { batchId: body.batchId, imported, skipped, batchLearning, styleProfiles, styleFallbacks, trajectoryLinks, trajectoryMatch: { ambiguous: trajectoryMatch.ambiguous, unmatched: trajectoryMatch.unmatched, alreadyAccepted: trajectoryMatch.alreadyAccepted }, trajectoryLinkFailures, summary };
+}
+
+async function translateBatchSegment(body) {
+  const response = await fetch(`http://127.0.0.1:${PORT}/api/translate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `翻译请求失败（${response.status}）`);
+  return payload;
+}
+
+function startBatchWorker(batchId, backgroundTaskId = "") {
+  const existing = batchWorkers.get(batchId);
+  if (existing) return existing;
+  const controller = { pauseRequested: false, promise: null, backgroundTaskId };
+  const sessionId = `batch:${batchId}`;
+  const heartbeat = setInterval(() => workbenchSessionMonitor?.touch(sessionId), 5_000);
+  heartbeat.unref?.();
+  workbenchSessionMonitor?.touch(sessionId);
+  controller.promise = runServerBatch(batchId, {
+    loadRun: getBatchRun,
+    saveRun: async (run) => {
+      await saveBatchRun(run);
+      if (backgroundTaskId) {
+        const selected = (run.segments || []).filter((segment) => segment.selected !== false);
+        const completed = selected.filter((segment) => segment.status === "done").length;
+        const failed = selected.filter((segment) => segment.status === "error").length;
+        await updateBackgroundTaskProgress(backgroundTaskId, {
+          status: run.runState === "completed" ? "completed" : run.runState === "needs_attention" ? "failed" : "in_progress",
+          progress: {
+            phase: run.runState || "running",
+            message: run.runState === "paused" ? "批次已暂停" : `正在翻译：${completed} / ${selected.length}`,
+            percent: selected.length ? Math.round((completed / selected.length) * 100) : 0,
+            completed,
+            total: selected.length,
+            failed
+          }
+        });
+      }
+    },
+    loadProject: getProject,
+    classifyDocument: async (text) => (await classify({ text, hint: "auto", useModel: true })).contentType,
+    translateSegment: translateBatchSegment,
+    shouldPause: () => controller.pauseRequested,
+    touch: () => workbenchSessionMonitor?.touch(sessionId),
+    review: async (run) => runEvolutionReview({
+      locale: run.locale,
+      contentType: run.contentType,
+      domain: run.domain,
+      batchId: run.batchId,
+      projectId: run.projectId,
+      threshold: getSettings().learning.styleDistillThreshold,
+      growthWindow: getSettings().learning.styleDistillGrowthWindow,
+      positiveLimit: getSettings().learning.distillPositiveSamples,
+      negativeLimit: getSettings().learning.distillNegativeSamples,
+      staleRounds: getSettings().learning.ruleStaleRounds
+    })
+  }).catch(async (error) => {
+    const run = await getBatchRun(batchId).catch(() => null);
+    if (run) await saveBatchRun({ ...run, runState: "needs_attention" }).catch(() => {});
+    if (backgroundTaskId) await updateBackgroundTaskProgress(backgroundTaskId, { status: "failed", progress: { phase: "failed", message: error.message, percent: 100 } }).catch(() => {});
+    console.error(`后台批次 ${batchId} 失败`, error);
+  }).finally(() => {
+    clearInterval(heartbeat);
+    workbenchSessionMonitor?.close(sessionId);
+    batchWorkers.delete(batchId);
+  });
+  batchWorkers.set(batchId, controller);
+  return controller;
 }
 
 async function apiHandler(req, res, url) {
@@ -1237,7 +1312,7 @@ async function apiHandler(req, res, url) {
     });
     const ruleId = String(body.ruleId || "").trim();
     if (!ruleId) return json(res, 400, { error: "缺少要退休的规则 id" });
-    const profile = await getStyleProfile(scope.locale, scope.contentType, scope.domain);
+    const profile = await getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
     if (!profile?.id) return json(res, 404, { error: "该作用域没有生效中的风格规范" });
     const rules = retireRule(profile.rules, ruleId, { reason: String(body.reason || "").slice(0, 300) });
     if (!rules) return json(res, 409, { error: "该规则不存在或已经退休" });
@@ -1403,6 +1478,7 @@ async function apiHandler(req, res, url) {
     const task = await createBackgroundTask({
       type: "term_import",
       title: String(body.filename || "术语导入表格").slice(0, 120),
+      projectId: String(body.projectId || ""),
       locale: requestedLocale === "auto" ? "" : requestedLocale
     });
     let progressWrites = Promise.resolve();
@@ -1482,6 +1558,7 @@ async function apiHandler(req, res, url) {
     const task = await createBackgroundTask({
       type: "embedding_rebuild",
       title: `Embedding 重建 · ${locale || "全部语言"}`,
+      projectId: String(body.projectId || ""),
       locale: locale || ""
     });
     (async () => {
@@ -1634,8 +1711,8 @@ async function apiHandler(req, res, url) {
     const [profiles, evidence, qaRuns, learningRuns] = await Promise.all([
       listStyleProfiles(locale, status, { projectId }),
       getStyleEvidence(locale, { projectId, limit: 1_000 }),
-      getQaRuns(locale, { limit: 500 }),
-      getStyleLearningRuns(locale, { limit: 30 })
+      getQaRuns(locale, { projectId, limit: 500 }),
+      getStyleLearningRuns(locale, { projectId, limit: 30 })
     ]);
     const pools = new Map();
     const ensurePool = (contentType, domain) => {
@@ -1688,7 +1765,7 @@ async function apiHandler(req, res, url) {
       domain: draft.domain || "general",
       project: body.project || "default"
     });
-    const activeProfile = await getStyleProfile(scope.locale, scope.contentType, scope.domain);
+    const activeProfile = await getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
     const state = validateStylePromotionState({ draft, activeProfile });
     if (!state.valid) {
       const error = new Error(state.reasons.join("；"));
@@ -1701,7 +1778,7 @@ async function apiHandler(req, res, url) {
     // 草稿是从这些原文蒸馏出来的，留出集必须把它们排除，否则评测的是背诵而不是泛化。
     const evidenceIds = new Set((draft.evidenceIds || []).map(String));
     const distilledFromSources = evidenceIds.size
-      ? (await getStyleEvidence(scope.locale, { contentType: scope.contentType, domain: scope.domain, exactScope: true, limit: 1_000 }))
+      ? (await getStyleEvidence(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, exactScope: true, limit: 1_000 }))
         .filter((item) => evidenceIds.has(String(item.id))).map((item) => item.source)
       : [];
     const holdout = selectStyleHoldout(await listLearningTrajectories({ ...scope, limit: 500 }), { scope, distilledFromSources });
@@ -1726,7 +1803,7 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req).catch(() => ({}));
     const located = await findStyleProfile(id);
     const requestedProjectId = String(body.projectId || "").trim();
-    if (located?.kind === "user_profile" && String(located.projectId || "") !== requestedProjectId) {
+    if (located && String(located.projectId || "") !== requestedProjectId) {
       const error = new Error("未找到当前项目的风格指南");
       error.statusCode = 404;
       throw error;
@@ -1755,7 +1832,7 @@ async function apiHandler(req, res, url) {
     const id = decodeURIComponent(url.pathname.slice("/api/style-profiles/".length, -"/reject".length));
     const body = await readJsonBody(req).catch(() => ({}));
     const located = await findStyleProfile(id);
-    if (located?.kind === "user_profile" && String(located.projectId || "") !== String(body.projectId || "")) {
+    if (located && String(located.projectId || "") !== String(body.projectId || "")) {
       const error = new Error("未找到当前项目的风格指南");
       error.statusCode = 404;
       throw error;
@@ -1770,7 +1847,8 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/qa-cases/pending") {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
-    return json(res, 200, await listPendingQaCases(locale));
+    const projectId = String(url.searchParams.get("projectId") || "");
+    return json(res, 200, await listPendingQaCases(locale, { projectId }));
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/qa-cases/") && url.pathname.endsWith("/approve")) {
     const id = decodeURIComponent(url.pathname.slice("/api/qa-cases/".length, -"/approve".length));
@@ -2146,7 +2224,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 400;
       throw error;
     }
-    const qaCases = await getQaCases(scope.locale, { contentType: scope.contentType, domain: scope.domain, limit: -1 });
+    const qaCases = await getQaCases(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, limit: -1 });
     const qaCase = qaCases.find((item) => String(item.id) === qaCaseId);
     if (!qaCase) {
       const error = new Error("未找到该 QA 案例，或它尚未经过人工批准");
@@ -2239,6 +2317,7 @@ async function apiHandler(req, res, url) {
     const task = await createBackgroundTask({
       type: "quality-gate",
       title: `质量门禁 · ${scope.locale} · ${skill.name || skill.id}`,
+      projectId: scope.project,
       locale: scope.locale,
       progress: { total, message: `准备执行 ${total} 个固定样本` }
     });
@@ -2300,7 +2379,7 @@ async function apiHandler(req, res, url) {
     const format = String(body.format || "json");
     const [trajectories, qaCases, assets] = await Promise.all([
       listLearningTrajectories({ ...scope, limit: 1000 }),
-      getQaCases(scope.locale, { contentType: scope.contentType, domain: scope.domain, limit: -1 }),
+      getQaCases(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, limit: -1 }),
       loadGateAssets(scope)
     ]);
     const bundle = buildTrainingExport({
@@ -2341,7 +2420,7 @@ async function apiHandler(req, res, url) {
     // 冻结数据集：先按当前作用域重新导出一次，把内容指纹钉死，训练用的就是这一份。
     const [trajectories, qaCases, assets] = await Promise.all([
       listLearningTrajectories({ ...scope, limit: 1000 }),
-      getQaCases(scope.locale, { contentType: scope.contentType, domain: scope.domain, limit: -1 }),
+      getQaCases(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, limit: -1 }),
       loadGateAssets(scope)
     ]);
     const bundle = buildTrainingExport({
@@ -2442,13 +2521,43 @@ async function apiHandler(req, res, url) {
     const project = body.projectId ? await getProject(String(body.projectId)) : null;
     if (body.projectId && !project) return json(res, 404, { error: "项目不存在" });
     const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet, batch: project?.settings?.batch || {} });
-    const { batchId } = await saveBatchRun({ ...prepared, projectId: body.projectId || "", locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments });
+    const { batchId } = await saveBatchRun({ ...prepared, projectId: body.projectId || "", locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments, subBatches: prepared.subBatches, runState: "ready" });
     return json(res, 200, { ...prepared, batchId });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
     const body = await readJsonBody(req);
     const saved = await saveBatchRun({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") });
     return json(res, 200, saved);
+  }
+  if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/(?:start|resume)$/u.test(url.pathname)) {
+    const parts = url.pathname.split("/");
+    const batchId = decodeURIComponent(parts[4]);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const run = await getBatchRun(batchId);
+    if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    if (batchWorkers.has(batchId)) return json(res, 200, { batchId, runState: "running", alreadyRunning: true });
+    const segments = run.segments.map((segment) => segment.status === "error" || segment.status === "running" ? { ...segment, status: "pending", error: "" } : segment);
+    await saveBatchRun({ ...run, segments, runnerOptions: { route: body.route || run.runnerOptions?.route || "auto", reflect: body.reflect !== false }, runState: "queued" });
+    const task = await createBackgroundTask({
+      type: "batch_translation",
+      title: `批次翻译 · ${run.filename}`,
+      locale: run.locale,
+      projectId: run.projectId,
+      progress: { phase: "queued", message: "已进入服务端批次队列", percent: 0, completed: 0, total: run.segments.filter((segment) => segment.selected !== false).length },
+      payload: { batchId }
+    });
+    startBatchWorker(batchId, task.id);
+    return json(res, 202, { batchId, runState: "queued", backgroundTaskId: task.id });
+  }
+  if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/pause$/u.test(url.pathname)) {
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const run = await getBatchRun(batchId);
+    if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    const worker = batchWorkers.get(batchId);
+    if (worker) worker.pauseRequested = true;
+    await saveBatchRun({ ...run, runState: "paused" });
+    return json(res, 200, { batchId, runState: "paused", waitingForCurrentSegment: Boolean(worker) });
   }
   if (req.method === "GET" && url.pathname === "/api/tasks") {
     const type = url.searchParams.get("type") || "";
@@ -2459,8 +2568,8 @@ async function apiHandler(req, res, url) {
     const search = url.searchParams.get("search") || "";
     const limit = Number(url.searchParams.get("limit")) || 200;
     const batches = type === "autoqa" || type === "share" || type === "background" ? [] : await listBatchRuns({ locale, projectId, status, search, limit });
-    const qaTasks = type === "batch" || type === "share" || type === "background" ? [] : await listQaTasks({ locale, status, search, limit });
-    const shares = type === "batch" || type === "autoqa" || type === "background" ? [] : (await listShares({})).map((share) => ({
+    const qaTasks = type === "batch" || type === "share" || type === "background" ? [] : await listQaTasks({ locale, projectId, status, search, limit });
+    const shares = type === "batch" || type === "autoqa" || type === "background" ? [] : (await listShares({ projectId })).map((share) => ({
       id: share.token,
       type: "share",
       title: share.filename,
@@ -2477,7 +2586,7 @@ async function apiHandler(req, res, url) {
       createdAt: share.createdAt,
       updatedAt: share.updatedAt
     })).filter((item) => item.locale === locale && (!status || item.status === status) && (!search || item.title.toLowerCase().includes(String(search).toLowerCase())));
-    const backgroundTasks = type === "batch" || type === "autoqa" || type === "share" ? [] : (await listBackgroundTasks({ search, limit })).map((task) => ({
+    const backgroundTasks = type === "batch" || type === "autoqa" || type === "share" ? [] : (await listBackgroundTasks({ projectId, search, limit })).map((task) => ({
       id: task.id,
       type: "background",
       taskType: task.type,
@@ -2503,14 +2612,16 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/export")) {
     const batchId = decodeURIComponent(url.pathname.slice("/api/tasks/".length, -"/export".length));
+    const body = await readJsonBody(req).catch(() => ({}));
     const run = await getBatchRun(batchId);
-    if (!run) {
+    const projectId = String(body.projectId || "");
+    if (!run || (run.projectId && run.projectId !== projectId)) {
       const error = new Error("未找到该翻译任务");
       error.statusCode = 404;
       throw error;
     }
     assertActiveLocale(run.locale);
-    const task = await createBackgroundTask({ type: "batch_export", title: `导出 · ${run.filename}`, locale: run.locale });
+    const task = await createBackgroundTask({ type: "batch_export", title: `导出 · ${run.filename}`, locale: run.locale, projectId: run.projectId || "" });
     (async () => {
       try {
         await updateBackgroundTaskProgress(task.id, { progress: { phase: "exporting", message: "正在合并导出文件", percent: 40, completed: 0, total: 1 } });
@@ -2575,10 +2686,12 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    const projectId = String(url.searchParams.get("projectId") || "");
+    if (projectId && run.projectId !== projectId) return json(res, 404, { error: "未找到当前项目的批次任务" });
     assertActiveLocale(run.locale);
     const [assets, qaRuns] = await Promise.all([
       getProjectAssets(run.locale, run.projectId).then((result) => result.assets),
-      getQaRuns(run.locale, { contentType: run.contentType, domain: run.domain, batchId: run.batchId, limit: 500 })
+      getQaRuns(run.locale, { projectId: run.projectId, contentType: run.contentType, domain: run.domain, batchId: run.batchId, limit: 500 })
     ]);
     const latestRunBySource = new Map();
     for (const qaRun of qaRuns) if (!latestRunBySource.has(qaRun.source)) latestRunBySource.set(qaRun.source, qaRun);
@@ -2680,7 +2793,7 @@ async function apiHandler(req, res, url) {
 
     const contentType = body.contentType || "general";
     const domain = concreteDomain(body.domain, { text: source, contentType });
-    const project = body.project || "default";
+    const project = String(body.projectId || body.project || "default");
     const batchId = body.batchId || "manual-review";
     let linkedTrajectory = null;
     if (body.trajectoryId) {
@@ -2692,9 +2805,9 @@ async function apiHandler(req, res, url) {
     const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
     const matches = matchTerms(source, assets, { contentType, domain, ...deliveryContext(body, source) });
     const classification = await classify({ text: source, hint: contentType, useModel: false });
-    const styleProfile = await getStyleProfile(locale, contentType, domain);
+    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId: project });
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project }));
-    const qaGuidance = rankQaCases(source, await getQaCases(locale, { contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(source) });
+    const qaGuidance = rankQaCases(source, await getQaCases(locale, { projectId: project, contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(source) });
     const contextPack = buildContextPack({
       titleOverrides: getSettings().orthography.titleBrackets, source, locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance });
     const priorDecisions = Array.isArray(body.humanDecisions) ? body.humanDecisions.slice(0, 30) : [];
@@ -2757,7 +2870,7 @@ async function apiHandler(req, res, url) {
     const references = Array.isArray(body.references) ? body.references.slice(0, 12) : [];
     const termDecisions = Array.isArray(body.termDecisions) ? body.termDecisions.slice(0, 20) : [];
     await saveQaRun({
-      locale, contentType, domain, source, initialTranslation: translation, finalTranslation: translation,
+      projectId: project, locale, contentType, domain, source, initialTranslation: translation, finalTranslation: translation,
       score, status, iterations: Number(body.iterations) || 0, issues: remainingIssues, references,
       styleProfileId: contextPack.styleProfile?.id || "", model: provider.model, batchId,
       fallbackReason: "", termDecisions, humanDecisions
@@ -2799,9 +2912,10 @@ async function apiHandler(req, res, url) {
     const matches = matchTerms(body.source || "", assets, { contentType, domain, ...deliveryContext(body, body.source || "") });
     if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings }) });
     const classification = await classify({ text: body.source || "", hint: contentType, useModel: false });
-    const styleProfile = await getStyleProfile(locale, contentType, domain);
-    const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project: body.project || "default" }));
-    const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(body.source || "") });
+    const projectId = String(body.projectId || body.project || "default");
+    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId });
+    const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project: projectId }));
+    const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { projectId, contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(body.source || "") });
     const contextPack = buildContextPack({
       titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance });
     const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", projectSettings, projectId: body.projectId || "" });
@@ -2842,14 +2956,15 @@ async function apiHandler(req, res, url) {
     const domain = domainResolution.domain;
     // 术语匹配放在识别之后，用真正生效的语体与领域加权，而不是界面提交的原始值。
     const matches = matchTerms(cleanSource, assets, { contentType: scopeContentType, domain, ...deliveryContext(body, cleanSource) });
-    const styleProfile = await getStyleProfile(locale, scopeContentType, domain);
+    const projectId = String(body.projectId || "");
+    const styleProfile = await getStyleProfile(locale, scopeContentType, domain, { projectId });
     const queryEmbedding = await embedSource(cleanSource);
-    const narrowedMemories = narrowByDomain(await getMemories(locale, { contentType: scopeContentType, domain: "general", limit: -1, exactContentType: true }), domain);
-    const narrowedQaCases = narrowByDomain(await getQaCases(locale, { contentType: scopeContentType, domain: "general", limit: -1 }), domain);
+    const narrowedMemories = narrowByDomain(await getMemories(locale, { projectId, contentType: scopeContentType, domain: "general", limit: -1, exactContentType: true }), domain);
+    const narrowedQaCases = narrowByDomain(await getQaCases(locale, { projectId, contentType: scopeContentType, domain: "general", limit: -1 }), domain);
     domainResolution.relaxedRetrieval = narrowedMemories.relaxed || narrowedQaCases.relaxed;
-    const references = rankTranslationMemories(cleanSource, narrowedMemories.items, { limit: 5, queryEmbedding, contentTags: classification.contentTags || [], locale, contentType: scopeContentType, domain, campaign: String(body.campaign || ""), ...deliveryContext(body, cleanSource) });
+    const references = rankTranslationMemories(cleanSource, narrowedMemories.items, { limit: 5, queryEmbedding, contentTags: classification.contentTags || [], locale, contentType: scopeContentType, domain, projectId, campaign: String(body.campaign || ""), ...deliveryContext(body, cleanSource) });
     const qaCases = rankQaCases(cleanSource, narrowedQaCases.items, { limit: 3, queryEmbedding });
-    const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { contentType: scopeContentType, domain, limit: 12 })).slice(0, 6);
+    const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { projectId, contentType: scopeContentType, domain, limit: 12 })).slice(0, 6);
     // 只有人工批准的译例能充当"标准"；机器译文另开一档，仅供一致性参考。
     const { approved: approvedReferences, machineDrafts } = splitReferenceAuthority(references);
     const sourceSegments = splitQaSegments(cleanSource);
@@ -2981,6 +3096,7 @@ async function apiHandler(req, res, url) {
       fallbackReason
     };
     const task = await saveQaTask({
+      projectId,
       locale,
       contentType: scopeContentType,
       domain,
@@ -3047,6 +3163,7 @@ async function apiHandler(req, res, url) {
     };
     const needsGloss = shareNeedsGloss(task.locale);
     const share = await saveShare({
+      projectId: task.projectId || "",
       qaTaskId: id,
       filename: `Auto QA · ${task.title || "未命名质检"}`,
       locale: task.locale,
@@ -3138,7 +3255,7 @@ async function apiHandler(req, res, url) {
     }));
     const needsGloss = shareNeedsGloss(run.locale);
     const share = await saveShare({
-      batchId, filename: run.filename, locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general",
+      projectId: run.projectId || "", batchId, filename: run.filename, locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general",
       segments, status: needsGloss ? "generating" : "ready", glossedSegments: 0, totalSegments: segments.length
     });
     if (needsGloss) startShareGlossGeneration(share.token);
@@ -3268,7 +3385,7 @@ async function apiHandler(req, res, url) {
     return json(res, 200, { ok: true, message: "已提交，感谢反馈！" });
   }
   if (req.method === "GET" && url.pathname === "/api/feedback/pending") {
-    const shares = await listShares({});
+    const shares = await listShares({ projectId: url.searchParams.get("projectId") || "" });
     const pending = [];
     for (const share of shares) {
       if (!ACTIVE_LOCALES.includes(share.locale)) continue;
@@ -3282,7 +3399,7 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/feedback") {
     const status = url.searchParams.get("status") || "";
-    const shares = await listShares({});
+    const shares = await listShares({ projectId: url.searchParams.get("projectId") || "" });
     const entries = [];
     for (const share of shares) {
       if (!ACTIVE_LOCALES.includes(share.locale)) continue;
@@ -3297,7 +3414,7 @@ async function apiHandler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/shares") {
     const batchId = url.searchParams.get("batchId") || "";
     const qaTaskId = url.searchParams.get("qaTaskId") || "";
-    const shares = (await listShares({ batchId, qaTaskId })).filter((share) => ACTIVE_LOCALES.includes(share.locale));
+    const shares = (await listShares({ projectId: url.searchParams.get("projectId") || "", batchId, qaTaskId })).filter((share) => ACTIVE_LOCALES.includes(share.locale));
     return json(res, 200, shares.map((share) => ({
       token: share.token,
       batchId: share.batchId,
@@ -3344,12 +3461,12 @@ async function apiHandler(req, res, url) {
     }
     if (action === "adopt") {
       const segment = (share.segments || []).find((item) => item.index === feedback.segmentIndex);
-      await saveStyleEvidence(buildAdoptedStyleEvidence({ share, feedback, segment }));
+      await saveStyleEvidence({ ...buildAdoptedStyleEvidence({ share, feedback, segment }), projectId: share.projectId || "" });
       try {
         // distillStyleProfileIfReady 内部已经落盘草稿；saveStyleProfile 不是 upsert，
         // 再存一次会生成第二个内容相同、版本号 +1 的草稿。
         const { distilled } = await distillStyleProfileIfReady({
-          locale: share.locale,
+          locale: share.locale, projectId: share.projectId || "",
           contentType: share.contentType,
           domain: share.domain,
           sourceBatchId: share.batchId,
@@ -3359,7 +3476,7 @@ async function apiHandler(req, res, url) {
           negativeLimit: getSettings().learning.distillNegativeSamples,
           staleRounds: getSettings().learning.ruleStaleRounds
         });
-        if (distilled) triggerConflictScan({ locale: share.locale, contentType: share.contentType, domain: share.domain, project: "default" });
+        if (distilled) triggerConflictScan({ locale: share.locale, contentType: share.contentType, domain: share.domain, project: share.projectId || "default" });
       } catch {
         // 未达阈值或蒸馏失败不阻断采纳
       }
@@ -3428,8 +3545,8 @@ async function apiHandler(req, res, url) {
     });
     const queryEmbedding = await embedSource(body.source);
     const [storedStyleProfile, localeQaCases, localeMemories, userProfile, projectLibraries] = await Promise.all([
-      getStyleProfile(locale, classification.contentType, domain),
-      getQaCases(locale, { contentType: classification.contentType, domain: "general", limit: -1 }),
+      getStyleProfile(locale, classification.contentType, domain, { projectId }),
+      getQaCases(locale, { projectId, contentType: classification.contentType, domain: "general", limit: -1 }),
       getMemories(locale, { contentType: classification.contentType, domain: "general", limit: -1, exactContentType: true, projectId }),
       getUserProfile(locale, { projectId }),
       projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
@@ -3723,6 +3840,7 @@ if (process.env.KAMI_STORE !== "directus") {
 
 try {
   await initializeStore();
+  await recoverInterruptedBatchWorkers();
 } catch (error) {
   console.error(`[Kami] 启动失败\n${error.message}`);
   process.exit(1);
@@ -3768,7 +3886,7 @@ await evaluationJobs.initialize();
 
 /** 同一作用域的风格规范列表（含草稿与停用版本），供风格评测解析变体。 */
 async function styleProfilesInScope(scope) {
-  const { styleProfiles } = await listStyleProfiles(scope.locale, null, { contentType: scope.contentType, domain: scope.domain });
+  const { styleProfiles } = await listStyleProfiles(scope.locale, null, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain });
   return styleProfiles;
 }
 
@@ -3778,7 +3896,7 @@ async function resolveStyleVariant(id, scope) {
   if (String(id) !== NO_STYLE_PROFILE_ID && !profile) return null;
   const [skill, activeProfile] = await Promise.all([
     ensureChampionTranslationSkill(scope),
-    getStyleProfile(scope.locale, scope.contentType, scope.domain)
+    getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project })
   ]);
   // AIQA 始终看当前生效版本，否则草稿会用自己的标准给自己打分。
   return styleVariant({ id, scope, skill, profile, qaProfile: activeProfile });
@@ -3795,7 +3913,7 @@ const styleEvaluationJobs = createEvaluationJobRunner({
   deps: {
     getSkill: resolveStyleVariant,
     getCurrentChampion: async (scope) => {
-      const active = await getStyleProfile(scope.locale, scope.contentType, scope.domain);
+      const active = await getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
       return resolveStyleVariant(active?.id || NO_STYLE_PROFILE_ID, scope);
     },
     validatePromotionState: ({ candidate, currentChampion }) => validateStylePromotionState({
@@ -3861,7 +3979,7 @@ const conflictScanner = createConflictScanner({
   deps: {
     loadScopeRules: async (scope) => {
       const [styleProfile, translationSkill, userProfile] = await Promise.all([
-        getStyleProfile(scope.locale, scope.contentType, scope.domain),
+        getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project }),
         ensureChampionTranslationSkill(scope),
         getUserProfile(scope.locale, { projectId: scope.project })
       ]);
@@ -3906,12 +4024,14 @@ function rescheduleConflictScan() {
   if (!minutes) return;
   conflictScanTimer = setInterval(async () => {
     try {
-      for (const locale of ACTIVE_LOCALES) {
-        const { styleProfiles } = await listStyleProfiles(locale, "active");
-        for (const profile of styleProfiles) {
-          await conflictScanner.scan(learningScope({
-            locale, contentType: profile.contentType, domain: profile.domain || "general", project: "default"
-          }));
+      for (const project of await getProjects()) {
+        for (const locale of ACTIVE_LOCALES) {
+          const { styleProfiles } = await listStyleProfiles(locale, "active", { projectId: project.id });
+          for (const profile of styleProfiles) {
+            await conflictScanner.scan(learningScope({
+              locale, contentType: profile.contentType, domain: profile.domain || "general", project: project.id
+            }));
+          }
         }
       }
     } catch (error) {
@@ -3971,6 +4091,25 @@ function closeServerForAutomaticShutdown() {
     });
     server.closeAllConnections?.();
   });
+}
+
+async function recoverInterruptedBatchWorkers() {
+  for (const project of await getProjects()) {
+    const runs = await listBatchRuns({ projectId: project.id, limit: 500 });
+    for (const summary of runs) {
+      if (!["queued", "running"].includes(summary.runState)) continue;
+      const run = await getBatchRun(summary.batchId);
+      if (!run) continue;
+      await saveBatchRun({
+        ...run,
+        runState: "paused",
+        segments: run.segments.map((segment) => segment.status === "running"
+          ? { ...segment, status: "pending", error: "服务重启后等待继续" }
+          : segment)
+      });
+      console.log(`[Kami] 已暂停服务重启前未完成的批次：${run.filename}`);
+    }
+  }
 }
 
 async function shutdownManagedWorkbench() {

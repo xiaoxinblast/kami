@@ -52,7 +52,7 @@ test("风格评测里翻译用草稿、AIQA 用当前生效版本，评判标准
 });
 
 test("对照组用当前生效风格翻译时，两侧尺子一致", async () => {
-  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain);
+  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
   const sample = await benchmarkStyleVariant(
     styleVariant({ id: active.id, scope, skill, profile: active, qaProfile: active }),
     trajectory
@@ -63,14 +63,14 @@ test("对照组用当前生效风格翻译时，两侧尺子一致", async () =>
 
 test("不传风格覆盖时沿用作用域当前生效版本，技能评测行为不受影响", async () => {
   const { benchmarkTranslationSkill } = await import("../src/skill-benchmark.mjs");
-  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain);
+  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
   const sample = await benchmarkTranslationSkill(skill, trajectory);
   assert.equal(sample.styleProfileId, active.id);
   assert.equal(sample.qaStyleProfileId, active.id, "未指定裁判风格时两者相同，走原来的单 contextPack 路径");
 });
 
 test("空风格覆盖表示语体默认，可作为「尚无风格规范」的基线对照", async () => {
-  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain);
+  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
   const sample = await benchmarkStyleVariant(
     styleVariant({ id: "content-type-default", scope, skill, profile: null, qaProfile: active }),
     trajectory
@@ -80,7 +80,7 @@ test("空风格覆盖表示语体默认，可作为「尚无风格规范」的�
 });
 
 test("评测样本带上留出终稿的编辑距离，作为风格唯一中立收益信号", async () => {
-  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain);
+  const active = await store.getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
   const sample = await benchmarkStyleVariant(
     styleVariant({ id: active.id, scope, skill, profile: active, qaProfile: active }),
     trajectory

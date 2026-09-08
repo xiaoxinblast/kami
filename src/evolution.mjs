@@ -59,7 +59,7 @@ function fallbackBatchLearning(examples, contentType) {
   };
 }
 
-export async function distillBatchStyleLearning({ batchId, filename, locale, contentType, domain, evidence = [] }) {
+export async function distillBatchStyleLearning({ batchId, filename, locale, contentType, domain, projectId = "", evidence = [] }) {
   const examples = batchExamples(evidence);
   if (!examples.length) return null;
   let learning;
@@ -71,6 +71,7 @@ export async function distillBatchStyleLearning({ batchId, filename, locale, con
     learning = fallbackBatchLearning(examples, contentType);
   }
   return saveStyleLearningRun({
+    projectId,
     batchId,
     filename,
     locale,
@@ -90,13 +91,13 @@ export async function distillBatchStyleLearning({ batchId, filename, locale, con
 }
 
 export async function distillStyleProfileIfReady({
-  locale, contentType, domain, sourceBatchId = "", learningRunId = "",
+  locale, contentType, domain, projectId = "", sourceBatchId = "", learningRunId = "",
   threshold = DISTILL_THRESHOLD, growthWindow = DISTILL_GROWTH_WINDOW,
   positiveLimit = 50, negativeLimit = 15, staleRounds = DEFAULT_STALE_ROUNDS
 }) {
   const [evidence, existingProfiles] = await Promise.all([
-    getStyleEvidence(locale, { contentType, domain, exactScope: true, limit: 1_000 }),
-    listStyleProfiles(locale, null, { contentType, domain })
+    getStyleEvidence(locale, { projectId, contentType, domain, exactScope: true, limit: 1_000 }),
+    listStyleProfiles(locale, null, { projectId, contentType, domain })
   ]);
   const decision = evaluateStyleDistillDecision({
     evidenceCount: evidence.length,
@@ -105,7 +106,7 @@ export async function distillStyleProfileIfReady({
     growthWindow
   });
   if (!decision.distill) return { distilled: null, ...decision };
-  const previousProfile = await getStyleProfile(locale, contentType, domain);
+  const previousProfile = await getStyleProfile(locale, contentType, domain, { projectId });
   const { examples, counterExamples } = sampleEvidence(evidence, { positiveLimit, negativeLimit });
   // 规则跨轮累积：模型看到已有规则并只提出增量操作，没提到的规则不会被删掉。
   const existingRules = Array.isArray(previousProfile?.rules) ? previousProfile.rules : [];
@@ -120,7 +121,7 @@ export async function distillStyleProfileIfReady({
     staleRounds
   });
   const profile = await saveStyleProfile({
-    locale, contentType, domain,
+    locale, contentType, domain, projectId,
     contentTags: evidenceTags(evidence),
     name: distilled.name,
     instruction: renderInstruction(applied.rules, previousProfile?.instruction),
@@ -164,8 +165,8 @@ export async function runEvolutionReview({
 }) {
   const [evidence, qaRunsRaw, previousProfile] = await Promise.all([
     getStyleEvidence(locale, { projectId, contentType, domain, exactScope: true, limit: 1_000 }),
-    getQaRuns(locale, { contentType, domain, limit: 60 }),
-    getStyleProfile(locale, contentType, domain)
+    getQaRuns(locale, { projectId, contentType, domain, limit: 60 }),
+    getStyleProfile(locale, contentType, domain, { projectId })
   ]);
   const qaRuns = dedupeQaRuns(qaRunsRaw);
   const result = {
@@ -187,7 +188,7 @@ export async function runEvolutionReview({
   // 等于把刚攒起来的规则一次性抹平。
   try {
     const { distilled, ...pending } = await distillStyleProfileIfReady({
-      locale, contentType, domain, threshold, growthWindow, positiveLimit, negativeLimit, staleRounds
+      locale, contentType, domain, projectId, threshold, growthWindow, positiveLimit, negativeLimit, staleRounds
     });
     if (distilled) result.distilled = distilled;
     else result.distillPending = pending;

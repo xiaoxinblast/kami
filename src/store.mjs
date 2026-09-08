@@ -264,7 +264,8 @@ async function saveJsonMemory(locale, input) {
   const source = String(input.source || "").trim();
   const target = String(input.target || "").trim();
   const embedding = input.embedding ?? await embedSource(source);
-  const existing = items.find((item) => item.source === source && item.target === target);
+  const projectId = String(input.projectId || "").trim();
+  const existing = items.find((item) => item.source === source && item.target === target && String(item.projectId || "").trim() === projectId);
   const item = { id: existing?.id || randomUUID(), ...existing, ...input, locale, source, target, ...(embedding ? { embedding } : {}), updatedAt: new Date().toISOString(), createdAt: existing?.createdAt || new Date().toISOString() };
   if (existing) items[items.indexOf(existing)] = item;
   else items.unshift(item);
@@ -272,9 +273,9 @@ async function saveJsonMemory(locale, input) {
   return item;
 }
 
-async function getJsonStyleProfile(locale, contentType, domain = "general") {
+async function getJsonStyleProfile(locale, contentType, domain = "general", { projectId = "" } = {}) {
   const profiles = await readJson(join(ROOT, "styles", `${assertLocale(locale)}.json`), []);
-  const candidates = profiles.filter((item) => item.status === "active" && item.contentType === contentType).sort((a, b) => b.version - a.version);
+  const candidates = profiles.filter((item) => item.status === "active" && item.contentType === contentType && String(item.projectId || "") === String(projectId || "")).sort((a, b) => b.version - a.version);
   return candidates.find((item) => item.domain === domain) || candidates.find((item) => item.domain === "general") || candidates[0] || null;
 }
 
@@ -298,6 +299,7 @@ async function getJsonQaRuns(locale, options = {}) {
     .filter((item) => item.locale === assertLocale(locale)
       && (!options.contentType || options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")
       && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
+      && (!options.projectId || item.projectId === options.projectId)
       && (!options.batchId || item.batchId === options.batchId))
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, options.limit || 100);
@@ -312,7 +314,7 @@ async function getJsonUserProfile(locale, { projectId = "" } = {}) {
 async function saveJsonUserProfile(input) {
   const path = join(ROOT, "styles", "profiles.json");
   const profiles = await readJson(path, []);
-  const projectId = String(input.projectId || "");
+  const projectId = String(input.projectId || input.project || "");
   const previous = profiles.filter((item) => item.locale === input.locale && String(item.projectId || "") === projectId).sort((a, b) => b.version - a.version)[0];
   if (previous && input.status !== "draft") previous.status = "inactive";
   const profile = { id: randomUUID(), ...input, projectId, version: (previous?.version || 0) + 1, status: input.status || "active", updatedAt: new Date().toISOString() };
@@ -344,9 +346,10 @@ async function saveJsonStyleEvidence(input) {
 async function saveJsonStyleProfile(input) {
   const path = join(ROOT, "styles", `${assertLocale(input.locale)}.json`);
   const profiles = await readJson(path, []);
-  const previous = profiles.filter((item) => item.contentType === input.contentType && item.domain === input.domain).sort((a, b) => b.version - a.version)[0];
+  const projectId = String(input.projectId || input.project || "");
+  const previous = profiles.filter((item) => item.contentType === input.contentType && item.domain === input.domain && String(item.projectId || "") === projectId).sort((a, b) => b.version - a.version)[0];
   if (previous && input.status !== "draft") previous.status = "inactive";
-  const profile = { id: randomUUID(), ...input, source: "style-library", version: (previous?.version || 0) + 1, parentId: previous?.id || null, status: input.status || "active", updatedAt: new Date().toISOString() };
+  const profile = { id: randomUUID(), ...input, projectId, source: "style-library", version: (previous?.version || 0) + 1, parentId: previous?.id || null, status: input.status || "active", updatedAt: new Date().toISOString() };
   profiles.unshift(profile);
   await writeJsonAtomic(path, profiles);
   return profile;
@@ -359,6 +362,7 @@ async function saveJsonStyleLearningRun(input) {
   const run = {
     id: existing?.id || randomUUID(),
     ...existing,
+    projectId: String(input.projectId ?? input.project ?? existing?.projectId ?? ""),
     batchId: String(input.batchId || existing?.batchId || ""),
     filename: String(input.filename || existing?.filename || ""),
     locale: assertLocale(input.locale || existing?.locale),
@@ -386,6 +390,7 @@ async function getJsonStyleLearningRuns(locale, options = {}) {
   return items
     .filter((item) => item.locale === assertLocale(locale)
       && (!options.batchId || item.batchId === options.batchId)
+      && (!options.projectId || item.projectId === options.projectId)
       && (!options.status || item.status === options.status))
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, Math.min(500, Math.max(1, Number(options.limit) || 100)));
@@ -410,9 +415,9 @@ async function listJsonStyleProfiles(locale, status, scope = null) {
   const styleProfiles = await readJson(join(ROOT, "styles", `${locale}.json`), []);
   const userProfiles = await readJson(join(ROOT, "styles", "profiles.json"), []);
   const pick = (items) => items.filter((item) => !status || item.status === status).sort((a, b) => b.version - a.version);
-  const inScope = (items) => scope?.contentType
-    ? items.filter((item) => item.contentType === scope.contentType && (item.domain || "general") === (scope.domain || "general"))
-    : items;
+  const inScope = (items) => items.filter((item) => (!scope?.contentType || item.contentType === scope.contentType)
+    && (!scope?.domain || (item.domain || "general") === (scope.domain || "general"))
+    && (!scope?.projectId || String(item.projectId || "") === String(scope.projectId)));
   return {
     styleProfiles: pick(inScope(styleProfiles)),
     userProfiles: pick(userProfiles.filter((item) => item.locale === locale && (!scope?.projectId || String(item.projectId || "") === String(scope.projectId))))
@@ -433,7 +438,7 @@ async function activateJsonStyleProfile(id) {
   }
   for (const item of located.profiles) {
     if (item.id === id) item.status = "active";
-    else if (item.status === "active" && item.contentType === located.target.contentType && item.domain === located.target.domain) item.status = "inactive";
+    else if (item.status === "active" && item.contentType === located.target.contentType && item.domain === located.target.domain && String(item.projectId || "") === String(located.target.projectId || "")) item.status = "inactive";
   }
   located.target.status = "active";
   await writeJsonAtomic(located.path, located.profiles);
@@ -477,7 +482,7 @@ async function appendJsonQa(kind, input) {
 
 async function getJsonQaCases(locale, options = {}) {
   const items = await readJson(join(ROOT, "qa", "cases.json"), []);
-  return items.filter((item) => item.locale === assertLocale(locale) && item.status === "human_approved" && (!options.contentType || item.contentType === options.contentType) && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general"));
+  return items.filter((item) => item.locale === assertLocale(locale) && item.status === "human_approved" && (!options.projectId || item.projectId === options.projectId) && (!options.contentType || item.contentType === options.contentType) && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general"));
 }
 
 async function getJsonAssets(locale, options = {}) {
@@ -537,8 +542,9 @@ async function saveJsonCorpus(input) {
   const id = input.id || randomUUID();
   const document = {
     id,
+    projectId: String(input.projectId || ""),
     name: String(input.name || "未命名语料").trim(),
-    sourceLanguage: "zh-CN",
+    sourceLanguage: "ja-JP",
     domain: input.domain || "general",
     contentType: input.contentType || "general",
     text: String(input.text || ""),
@@ -573,9 +579,9 @@ async function approveJsonQaCase(id) {
   return true;
 }
 
-async function listJsonPendingQaCases(locale) {
+async function listJsonPendingQaCases(locale, { projectId = "" } = {}) {
   const items = await readJson(join(ROOT, "qa", "cases.json"), []);
-  return items.filter((item) => item.locale === assertLocale(locale) && item.status === "review").slice(0, 20);
+  return items.filter((item) => item.locale === assertLocale(locale) && (!projectId || item.projectId === projectId) && item.status === "review").slice(0, 20);
 }
 
 async function disposeJsonQaCase(id) {
@@ -614,6 +620,9 @@ async function saveJsonBatchRun(input) {
     format: String(input.format || ""),
     segmentationMode: String(input.segmentationMode || "sentence"),
     structure: input.structure ?? null,
+    subBatches: input.subBatches ?? existing?.subBatches ?? [],
+    runnerOptions: input.runnerOptions ?? existing?.runnerOptions ?? {},
+    runState: String(input.runState || existing?.runState || "ready"),
     segments: (input.segments || []).slice(0, 2_000),
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -634,7 +643,8 @@ async function listJsonBatchRuns({ locale = "", status = "", search = "", projec
     const completedSegments = selected.filter((segment) => segment.status === "done" && segment.translation).length;
     const failedSegments = selected.filter((segment) => segment.status === "error").length;
     const qaPending = selected.filter((segment) => Boolean(segment.result?.aiQa?.fallbackReason) || (Number.isFinite(segment.result?.qaScore) && segment.result.qaScore < 90) || (segment.result?.issues || []).length > 0).length;
-    return { batchId: run.batchId, filename: run.filename || "未命名任务", locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general", format: run.format || "", segmentationMode: run.segmentationMode || "sentence", status: failedSegments ? "needs_attention" : completedSegments < selected.length ? "in_progress" : qaPending ? "review" : "completed", totalSegments: selected.length, completedSegments, failedSegments, qaPending, createdAt: run.createdAt || run.updatedAt, updatedAt: run.updatedAt };
+    const status = run.runState === "ready" ? "ready" : run.runState === "paused" ? "paused" : failedSegments ? "needs_attention" : completedSegments < selected.length ? "in_progress" : qaPending ? "review" : "completed";
+    return { batchId: run.batchId, projectId: run.projectId || "", filename: run.filename || "未命名任务", locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general", format: run.format || "", segmentationMode: run.segmentationMode || "sentence", status, runState: run.runState || "ready", totalSegments: selected.length, completedSegments, failedSegments, qaPending, createdAt: run.createdAt || run.updatedAt, updatedAt: run.updatedAt };
   }).filter((item) => (!locale || item.locale === locale) && (!projectId || item.projectId === projectId) && (!status || item.status === status) && (!search || item.filename.toLowerCase().includes(String(search).toLowerCase()))).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
 }
 
@@ -644,6 +654,7 @@ async function saveJsonQaTask(input) {
   const now = new Date().toISOString();
   const item = {
     id,
+    projectId: String(input.projectId || existing?.projectId || ""),
     title: String(input.title || String(input.sourceText || "").slice(0, 40) || "未命名质检"),
     locale: assertLocale(input.locale),
     contentType: String(input.contentType || "general"),
@@ -668,12 +679,13 @@ async function getJsonQaTask(id) {
   return readJson(join(ROOT, "qa-tasks", `${String(id)}.json`), null);
 }
 
-async function listJsonQaTasks({ locale = "", status = "", search = "", limit = 200 } = {}) {
+async function listJsonQaTasks({ locale = "", projectId = "", status = "", search = "", limit = 200 } = {}) {
   let files = [];
   try { files = await readdir(join(ROOT, "qa-tasks")); } catch (error) { if (error.code !== "ENOENT") throw error; }
   const tasks = (await Promise.all(files.filter((file) => file.endsWith(".json")).map((file) => readJson(join(ROOT, "qa-tasks", file), null)))).filter(Boolean);
   return tasks.map((task) => ({
     id: task.id,
+    projectId: task.projectId || "",
     type: "autoqa",
     title: task.title || "未命名质检",
     locale: task.locale,
@@ -687,7 +699,7 @@ async function listJsonQaTasks({ locale = "", status = "", search = "", limit = 
     qaPending: task.summary ? Object.values(task.summary).reduce((sum, item) => sum + (Number(item?.total) || 0), 0) : 0,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt
-  })).filter((item) => (!locale || item.locale === locale) && (!status || item.status === status) && (!search || item.title.toLowerCase().includes(String(search).toLowerCase()))).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
+  })).filter((item) => (!locale || item.locale === locale) && (!projectId || item.projectId === projectId) && (!status || item.status === status) && (!search || item.title.toLowerCase().includes(String(search).toLowerCase()))).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
 }
 
 async function deleteJsonQaTask(id) {
@@ -705,6 +717,7 @@ async function saveJsonShare(input) {
   const now = new Date().toISOString();
   const item = {
     token,
+    projectId: String(input.projectId || existing?.projectId || ""),
     batchId: String(input.batchId || ""),
     qaTaskId: String(input.qaTaskId || ""),
     filename: String(input.filename || "未命名分享"),
@@ -728,11 +741,11 @@ async function getJsonShare(token) {
   return readJson(join(ROOT, "shares", `${String(token)}.json`), null);
 }
 
-async function listJsonShares({ batchId = "", qaTaskId = "", limit = 100 } = {}) {
+async function listJsonShares({ projectId = "", batchId = "", qaTaskId = "", limit = 100 } = {}) {
   let files = [];
   try { files = await readdir(join(ROOT, "shares")); } catch (error) { if (error.code !== "ENOENT") throw error; }
   const shares = (await Promise.all(files.filter((file) => file.endsWith(".json")).map((file) => readJson(join(ROOT, "shares", file), null)))).filter(Boolean);
-  return shares.filter((share) => (!batchId || share.batchId === batchId) && (!qaTaskId || share.qaTaskId === qaTaskId)).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
+  return shares.filter((share) => (!projectId || share.projectId === projectId) && (!batchId || share.batchId === batchId) && (!qaTaskId || share.qaTaskId === qaTaskId)).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
 }
 
 async function updateJsonShare(token, updater) {
@@ -759,6 +772,7 @@ async function saveJsonBackgroundTask(input) {
   const now = new Date().toISOString();
   const item = {
     id,
+    projectId: String(input.projectId || existing?.projectId || ""),
     type: String(input.type || "term_import"),
     title: String(input.title || "后台任务"),
     locale: input.locale || "",
@@ -776,12 +790,12 @@ async function getJsonBackgroundTask(id) {
   return readJson(join(ROOT, "background-tasks", `${String(id)}.json`), null);
 }
 
-async function listJsonBackgroundTasks({ locale = "", status = "", search = "", limit = 200 } = {}) {
+async function listJsonBackgroundTasks({ locale = "", projectId = "", status = "", search = "", limit = 200 } = {}) {
   let files = [];
   try { files = await readdir(join(ROOT, "background-tasks")); } catch (error) { if (error.code !== "ENOENT") throw error; }
   const tasks = (await Promise.all(files.filter((file) => file.endsWith(".json")).map((file) => readJson(join(ROOT, "background-tasks", file), null)))).filter(Boolean);
   return tasks
-    .filter((task) => (!locale || task.locale === locale) && (!status || task.status === status) && (!search || task.title.toLowerCase().includes(String(search).toLowerCase())))
+    .filter((task) => (!locale || task.locale === locale) && (!projectId || task.projectId === projectId) && (!status || task.status === status) && (!search || task.title.toLowerCase().includes(String(search).toLowerCase())))
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
     .slice(0, limit);
 }
@@ -1422,8 +1436,8 @@ export async function saveMemory(locale, input) {
   return usesDirectus() ? saveDirectusMemory(locale, input) : saveJsonMemory(locale, input);
 }
 
-export async function getStyleProfile(locale, contentType, domain) {
-  return usesDirectus() ? getDirectusStyleProfile(locale, contentType, domain) : getJsonStyleProfile(locale, contentType, domain);
+export async function getStyleProfile(locale, contentType, domain, options = {}) {
+  return usesDirectus() ? getDirectusStyleProfile(locale, contentType, domain, options) : getJsonStyleProfile(locale, contentType, domain, options);
 }
 
 export async function getStyleEvidence(locale, options) {
@@ -1555,8 +1569,8 @@ export async function listStyleProfiles(locale, status, scope = null) {
   return usesDirectus() ? listDirectusStyleProfiles(locale, status, scope) : listJsonStyleProfiles(locale, status, scope);
 }
 
-export async function listPendingQaCases(locale) {
-  return usesDirectus() ? listDirectusPendingQaCases(locale) : listJsonPendingQaCases(locale);
+export async function listPendingQaCases(locale, options = {}) {
+  return usesDirectus() ? listDirectusPendingQaCases(locale, options) : listJsonPendingQaCases(locale, options);
 }
 
 export async function disposeQaCase(id) {

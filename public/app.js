@@ -1087,8 +1087,8 @@ async function setBatchFile(file) {
   await prepareBatch();
 }
 
-function resetBatch() {
-  if (state.batchRunning) state.batchPaused = true;
+async function resetBatch() {
+  if (state.batchRunning) await pauseBatch();
   state.batchFile = null;
   state.batchBase64 = "";
   state.batchPreview = null;
@@ -1411,7 +1411,75 @@ function structuredContextGroups(segments) {
   return byId;
 }
 
+function mergeServerBatchRun(run) {
+  if (!state.batchPreview || state.batchPreview.batchId !== run.batchId) return;
+  const current = new Map(state.batchPreview.segments.map((segment) => [segment.id, segment]));
+  state.batchPreview.subBatches = run.subBatches || [];
+  state.batchPreview.runState = run.runState || "ready";
+  state.batchPreview.segments = (run.segments || []).map((segment, index) => ({
+    ...(current.get(segment.id) || {}),
+    ...segment,
+    index: index + 1
+  }));
+  state.batchClassification = { contentType: run.contentType || "general", source: "server-runner" };
+  renderBatchSegments();
+  refreshActions();
+}
+
+async function pollServerBatch(batchId) {
+  while (state.batchRunning && state.batchPreview?.batchId === batchId) {
+    const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}?projectId=${encodeURIComponent(state.activeProjectId)}`);
+    mergeServerBatchRun(run);
+    if (["completed", "needs_attention", "paused"].includes(run.runState)) {
+      state.batchRunning = false;
+      state.batchPaused = false;
+      refreshActions();
+      renderBatchSegments();
+      if (run.runState === "completed") toast("后台批次翻译完成，可以导出原格式文件");
+      else if (run.runState === "paused") toast("后台批次已暂停，进度已保存");
+      else toast("后台批次存在失败，可点击继续 / 重试");
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+  }
+}
+
+async function pauseBatch() {
+  if (!state.batchPreview?.batchId || state.batchPaused) return;
+  state.batchPaused = true;
+  refreshActions();
+  await api(`/api/batch/run/${encodeURIComponent(state.batchPreview.batchId)}/pause`, {
+    method: "POST",
+    body: JSON.stringify(projectPayload())
+  });
+}
+
 async function runBatch() {
+  if (!state.batchPreview?.batchId || state.batchRunning) return;
+  const hasPending = state.batchPreview.segments.some((segment) => segment.selected && segment.status !== "done");
+  if (!hasPending) return toast("没有待翻译的分段");
+  state.batchRunning = true;
+  state.batchPaused = false;
+  refreshActions();
+  renderBatchSegments();
+  try {
+    await saveBatchProgress();
+    await api(`/api/batch/run/${encodeURIComponent(state.batchPreview.batchId)}/start`, {
+      method: "POST",
+      body: JSON.stringify({ ...projectPayload(), route: $("#translationRoute").value, reflect: $("#reflect").checked })
+    });
+    toast("批次已交给服务端后台执行，关闭页面也会继续");
+    await pollServerBatch(state.batchPreview.batchId);
+  } catch (error) {
+    state.batchRunning = false;
+    state.batchPaused = false;
+    refreshActions();
+    renderBatchSegments();
+    toast(`后台批次启动失败：${error.message}`);
+  }
+}
+
+async function runBatchInBrowserLegacy() {
   if (!state.batchPreview || state.batchRunning) return;
   const segments = state.batchPreview.segments;
   const queue = segments.filter((segment) => segment.selected && segment.status !== "done");
@@ -1544,7 +1612,7 @@ function downloadBase64File(payload) {
 }
 
 function taskStatusLabel(status) {
-  return { in_progress: "进行中", review: "QA 待处理", needs_attention: "存在失败", completed: "已完成" }[status] || "待处理";
+  return { ready: "待启动", in_progress: "进行中", paused: "已暂停", review: "QA 待处理", needs_attention: "存在失败", completed: "已完成" }[status] || "待处理";
 }
 
 function formatTaskTime(value) {
@@ -1598,13 +1666,13 @@ function renderTasks() {
   }));
 }
 
-const BACKGROUND_TASK_LABELS = { term_import: "术语导入", embedding_rebuild: "Embedding 重建", batch_export: "批次导出" };
+const BACKGROUND_TASK_LABELS = { term_import: "术语导入", batch_translation: "后台批次翻译", embedding_rebuild: "Embedding 重建", batch_export: "批次导出" };
 
 function renderBackgroundTaskRow(task) {
   const locale = state.bootstrap.locales[task.locale];
   const progress = task.progress || {};
   const percent = Number.isFinite(Number(progress.percent)) ? Math.max(0, Math.min(100, Number(progress.percent))) : (task.status === "completed" ? 100 : 0);
-  const statusLabel = task.status === "in_progress" ? "进行中" : task.status === "review" ? "等待审核" : task.status === "needs_attention" ? "失败" : "已完成";
+  const statusLabel = task.status === "in_progress" ? "进行中" : task.status === "review" ? "等待审核" : ["needs_attention", "failed"].includes(task.status) ? "失败" : "已完成";
   const statusClass = task.status === "in_progress" || task.status === "review" ? "warning" : task.status === "needs_attention" ? "error" : "success";
   const message = progress.message || "";
   const download = task.taskType === "batch_export" && task.status === "completed" && task.payload?.downloadUrl;
@@ -1803,6 +1871,7 @@ async function openShareFeedbackDialog(scope = {}) {
   $("#shareFeedbackList").innerHTML = '<div class="empty-list">正在读取反馈……</div>';
   try {
     const query = new URLSearchParams();
+    if (state.activeProjectId) query.set("projectId", state.activeProjectId);
     if (scope.batchId) query.set("batchId", scope.batchId);
     if (scope.qaTaskId) query.set("qaTaskId", scope.qaTaskId);
     const shares = await api(`/api/shares?${query}`);
@@ -1847,7 +1916,7 @@ async function resolveShareFeedback(token, feedbackId, action, button) {
 
 async function loadPendingFeedback({ silent = false } = {}) {
   try {
-    const pending = await api("/api/feedback/pending");
+    const pending = await api(`/api/feedback/pending?projectId=${encodeURIComponent(state.activeProjectId)}`);
     state.feedbackPending = Array.isArray(pending) ? pending : [];
     const count = state.feedbackPending.length;
     for (const badge of [$("#feedbackBellBadge"), $("#feedbackNavBadge")]) {
@@ -1876,7 +1945,7 @@ function startFeedbackPolling() {
 
 async function loadFeedbackPage() {
   try {
-    state.feedbackAll = await api("/api/feedback");
+    state.feedbackAll = await api(`/api/feedback?projectId=${encodeURIComponent(state.activeProjectId)}`);
     renderFeedbackPage();
   } catch (error) {
     $("#feedbackPageList").innerHTML = `<div class="qa-item error">读取失败：${escapeHtml(error.message)}</div>`;
@@ -1930,7 +1999,7 @@ async function exportTaskExcel(batchId, button) {
   button.disabled = true;
   button.textContent = "提交中…";
   try {
-    const payload = await api(`/api/tasks/${encodeURIComponent(batchId)}/export`, { method: "POST" });
+    const payload = await api(`/api/tasks/${encodeURIComponent(batchId)}/export`, { method: "POST", body: JSON.stringify(projectPayload()) });
     toast(payload.message || "导出已进入任务中心后台处理");
     setTimeout(() => loadTasks().catch(() => {}), 600);
   } catch (error) { toast(error.message); }
@@ -1945,7 +2014,7 @@ function applyStoredBatchRun(run) {
   state.batchFile = null;
   state.batchPreview = {
     batchId: run.batchId, filename: run.filename, format: run.format,
-    segmentationMode: run.segmentationMode, structure: run.structure,
+    segmentationMode: run.segmentationMode, structure: run.structure, subBatches: run.subBatches || [], runState: run.runState || "ready",
     segments: run.segments.map((segment, index) => ({
       id: segment.id, index: index + 1, source: segment.source, translation: segment.translation || "",
       status: segment.status || "pending", selected: segment.selected !== false, accepted: Boolean(segment.accepted),
@@ -1972,9 +2041,14 @@ function applyStoredBatchRun(run) {
 
 async function openTask(batchId) {
   try {
-    const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}`);
+    const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}?projectId=${encodeURIComponent(state.activeProjectId)}`);
     applyStoredBatchRun(run);
     toast(`已打开任务：${run.filename}`);
+    if (["queued", "running"].includes(run.runState)) {
+      state.batchRunning = true;
+      refreshActions();
+      pollServerBatch(run.batchId).catch((error) => toast(error.message));
+    }
   } catch (error) { toast(error.message); }
 }
 
@@ -2136,7 +2210,7 @@ async function restoreBatchProgress() {
   const batchId = localStorage.getItem("kami-batch-id");
   if (!batchId) return;
   try {
-    const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}`);
+    const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}?projectId=${encodeURIComponent(state.activeProjectId)}`);
     if (!run?.segments?.length) return;
     state.batchPreview = {
       batchId: run.batchId,
@@ -2178,6 +2252,10 @@ async function restoreBatchProgress() {
     }
     renderBatchSegments();
     refreshActions();
+    if (["queued", "running"].includes(run.runState)) {
+      state.batchRunning = true;
+      pollServerBatch(run.batchId).catch((error) => toast(error.message));
+    }
     toast("已恢复上次未完成的批次进度");
   } catch {
     localStorage.removeItem("kami-batch-id");
@@ -2198,7 +2276,7 @@ async function loadStyleProfiles(locale) {
     const [drafts, active, pending] = await Promise.all([
       api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&status=draft&projectId=${encodeURIComponent(state.activeProjectId)}`),
       api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&status=active&projectId=${encodeURIComponent(state.activeProjectId)}`),
-      api(`/api/qa-cases/pending?locale=${encodeURIComponent(locale)}`)
+      api(`/api/qa-cases/pending?locale=${encodeURIComponent(locale)}&projectId=${encodeURIComponent(state.activeProjectId)}`)
     ]);
     renderStyleProfiles(drafts, active, pending);
   } catch (error) {
@@ -2379,7 +2457,7 @@ function splitStyleRules(instruction) {
 async function loadStyleGuidance(locale = state.styleLocale) {
   const [profiles, pending] = await Promise.all([
     api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&projectId=${encodeURIComponent(state.activeProjectId)}`),
-    api(`/api/qa-cases/pending?locale=${encodeURIComponent(locale)}`)
+    api(`/api/qa-cases/pending?locale=${encodeURIComponent(locale)}&projectId=${encodeURIComponent(state.activeProjectId)}`)
   ]);
   state.styleData = { profiles, pending };
   renderStyleGuidance();
@@ -3688,7 +3766,7 @@ async function loadLearning(locale = state.learningLocale) {
 }
 
 function learningActionBody() {
-  return { locale: state.learningLocale, contentType: $("#learningContentType").value, domain: $("#learningDomain").value, project: "default" };
+  return { locale: state.learningLocale, contentType: $("#learningContentType").value, domain: $("#learningDomain").value, project: state.activeProjectId || "default" };
 }
 
 async function runLearningAction(skillId, action, button) {
@@ -3861,9 +3939,7 @@ function bindEvents() {
   $("#primaryAction").addEventListener("click", () => {
     if (state.view === "workbench" && state.translationMode === "single") translate();
     else if (state.view === "workbench" && state.batchRunning) {
-      state.batchPaused = true;
-      refreshActions();
-      renderBatchSegments();
+      pauseBatch().catch((error) => toast(error.message));
     }
     else if (state.view === "workbench") state.batchPreview ? runBatch() : prepareBatch();
     else if (state.view === "import") state.assetPreflight ? $("#assetPreflightDialog").showModal() : state.importPreview && !state.importCompleted ? commitImport() : state.importFiles.length ? setImportFiles(state.importFiles) : cleanTable();
@@ -3877,7 +3953,9 @@ function bindEvents() {
   });
   $("#secondaryAction").addEventListener("click", () => {
     if (state.view === "autoqa") return clearAutoQa();
-    return state.view === "workbench" ? (state.translationMode === "batch" ? resetBatch() : clearTranslation()) : resetImport();
+    if (state.view === "workbench" && state.translationMode === "batch") resetBatch().catch((error) => toast(error.message));
+    else if (state.view === "workbench") clearTranslation();
+    else resetImport();
   });
   $("#tertiaryAction").addEventListener("click", async () => {
     if (state.view === "workbench" && state.translationMode === "batch") return exportBatch();

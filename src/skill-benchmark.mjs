@@ -47,10 +47,10 @@ function snapshotProvider(config = {}) {
 export async function createBenchmarkSnapshot(scope, trajectories = [], { promptVersion = "" } = {}) {
   const normalizedScope = benchmarkScope(scope);
   const [assets, styleProfile, qaCases, memories, userProfile] = await Promise.all([
-    getAssets(normalizedScope.locale),
-    getStyleProfile(normalizedScope.locale, normalizedScope.contentType, normalizedScope.domain),
-    getQaCases(normalizedScope.locale, { contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1 }),
-    getMemories(normalizedScope.locale, { contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1, exactContentType: true }),
+    getAssets(normalizedScope.locale, { projectId: normalizedScope.project }),
+    getStyleProfile(normalizedScope.locale, normalizedScope.contentType, normalizedScope.domain, { projectId: normalizedScope.project }),
+    getQaCases(normalizedScope.locale, { projectId: normalizedScope.project, contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1 }),
+    getMemories(normalizedScope.locale, { projectId: normalizedScope.project, contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1, exactContentType: true }),
     getUserProfile(normalizedScope.locale, { projectId: normalizedScope.project })
   ]);
   const queryEmbeddings = {};
@@ -107,15 +107,15 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
   // 评测固定使用本地启发式分类并把语体钉死在技能作用域，避免额外模型调用与分类漂移。
   const classification = classifyContent(source, scope.contentType);
   classification.contentType = scope.contentType;
-  const assets = snapshot?.assets || await getAssets(scope.locale);
+  const assets = snapshot?.assets || await getAssets(scope.locale, { projectId: scope.project });
   const matches = matchTerms(source, assets, { contentType: scope.contentType, domain: scope.domain });
   const queryEmbedding = snapshot?.queryEmbeddings?.[String(trajectory.id || "")] ?? await embedSource(source);
   const [styleProfile, qaCases, memories, userProfile] = snapshot
     ? [snapshot.styleProfile, snapshot.qaCases || [], snapshot.memories || [], snapshot.userProfile]
     : await Promise.all([
-      getStyleProfile(scope.locale, scope.contentType, scope.domain),
-      getQaCases(scope.locale, { contentType: scope.contentType, domain: scope.domain, limit: -1 }),
-      getMemories(scope.locale, { contentType: scope.contentType, domain: scope.domain, limit: -1, exactContentType: true }),
+      getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project }),
+      getQaCases(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, limit: -1 }),
+      getMemories(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, limit: -1, exactContentType: true }),
       getUserProfile(scope.locale, { projectId: scope.project })
     ]);
   // Clean-room isolation: never feed this holdout case its own final translation

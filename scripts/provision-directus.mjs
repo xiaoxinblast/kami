@@ -117,6 +117,10 @@ function uniqueInternalField(field, sort) {
   };
 }
 
+function sameValue(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
 const statusValues = [["草稿", "draft"], ["待审核", "pending"], ["已批准", "approved"], ["已废弃", "deprecated"], ["已归档", "archived"]];
 const contentTypeValues = [["诗词 / 韵文", "verse"], ["故事 / 叙事", "narrative"], ["图鉴 / 设定集", "codex"], ["剧情对白", "dialogue"], ["UI / 系统提示", "ui"], ["教程 / 操作指引", "tutorial"], ["活动规则", "rules"], ["游戏内道具名", "item_name"], ["游戏内道具描述", "item_description"], ["商店 / 商品说明", "store"], ["正式公告", "announcement"], ["宣发文案", "marketing"], ["社媒短文案", "social"], ["待分类文本", "general"]];
 
@@ -267,6 +271,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("name", "语料名称", { required: true, sort: 2 }),
       textField("source_language", "源语言", { required: true, width: "half", sort: 3 }),
       textField("domain", "业务领域", { width: "half", sort: 4 }),
@@ -318,6 +323,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("source", "候选日语词", { required: true, multiline: true, sort: 2 }),
       textField("target", "候选译法", { multiline: true, width: "half", sort: 3 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { defaultValue: "zh-CN", sort: 4 }),
@@ -375,7 +381,10 @@ const definitions = [
       textField("segmentation_mode", "分段模式", { width: "half", sort: 7 }),
       jsonField("structure", "文档结构", { sort: 8 }),
       jsonField("segments", "分段与译文", { sort: 9 }),
-      selectField("task_status", "任务状态", [["进行中", "in_progress"], ["QA 待处理", "review"], ["存在失败", "needs_attention"], ["已完成", "completed"]], { defaultValue: "in_progress", sort: 10 }),
+      jsonField("sub_batches", "服务端子批次", { note: "按项目条目数和字符数限制生成的真实执行检查点。", sort: 10 }),
+      jsonField("runner_options", "后台执行选项", { sort: 11 }),
+      selectField("run_state", "后台运行状态", [["待启动", "ready"], ["排队", "queued"], ["运行中", "running"], ["已暂停", "paused"], ["已完成", "completed"], ["需要处理", "needs_attention"]], { defaultValue: "ready", sort: 12 }),
+      selectField("task_status", "任务状态", [["待启动", "ready"], ["进行中", "in_progress"], ["已暂停", "paused"], ["QA 待处理", "review"], ["存在失败", "needs_attention"], ["已完成", "completed"]], { defaultValue: "ready", sort: 13 }),
       { field: "total_segments", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 11, translations: label("总分段数") }, schema: { is_nullable: true } },
       { field: "completed_segments", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 12, translations: label("已完成分段") }, schema: { is_nullable: true } },
       { field: "failed_segments", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 13, translations: label("失败分段") }, schema: { is_nullable: true } },
@@ -424,6 +433,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("name", "配置名称", { required: true, sort: 2 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 3 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 4 }),
@@ -498,6 +508,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("batch_id", "来源导入批次 ID", { required: true, width: "half", sort: 2 }),
       textField("filename", "来源文件", { width: "half", sort: 3 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 4 }),
@@ -732,6 +743,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 2 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 3 }),
       textField("domain", "业务领域", { width: "half", sort: 4 }),
@@ -758,6 +770,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 2 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 3 }),
       textField("domain", "业务领域", { width: "half", sort: 4 }),
@@ -788,6 +801,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("title", "任务标题", { required: true, sort: 2 }),
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 3 }),
       selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 4 }),
@@ -812,6 +826,7 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("token", "分享令牌", { required: true, width: "half", sort: 2 }),
       textField("batch_id", "来源批次 ID", { width: "half", sort: 3 }),
       textField("qa_task_id", "来源质检任务 ID", { width: "half", sort: 4 }),
@@ -835,7 +850,8 @@ const definitions = [
     schema: {},
     fields: [
       uuidField(),
-      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
+      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["批次翻译", "batch_translation"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
       textField("title", "任务标题", { required: true, sort: 3 }),
       // 不归属单一翻译任务的后台操作没有目标语言，必须允许为空。
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { width: "half", sort: 4, nullable: true }),
@@ -900,14 +916,36 @@ async function ensureCollection(definition) {
       await api(`/fields/${definition.collection}/${field.field}`, { method: "PATCH", body: field });
       console.log(`migrated ${definition.collection}.${field.field} from ${current.type} to ${field.type}`);
     }
-    // 已有字段原本只建不改，声明改成可空也不会落到库上——background_tasks.target_locale
-    // 就是这样长期停留在 NOT NULL，让没有单一语言的术语导入必然 400。
-    // 放宽约束对已有数据永远安全，所以自动收敛；收紧可能让历史行违规，只告警不执行。
-    else if (field.schema?.is_nullable === true && current.schema?.is_nullable === false) {
-      await api(`/fields/${definition.collection}/${field.field}`, { method: "PATCH", body: { schema: { ...field.schema, is_nullable: true } } });
-      console.log(`relaxed ${definition.collection}.${field.field} to nullable`);
-    } else if (field.schema?.is_nullable === false && current.schema?.is_nullable === true) {
-      console.warn(`skip ${definition.collection}.${field.field}: 声明为非空但库中可空，收紧约束需人工确认历史数据`);
+    else {
+      const schemaPatch = {};
+      const metaPatch = {};
+      // 已有字段原本只建不改，声明改成可空也不会落到库上——background_tasks.target_locale
+      // 就是这样长期停留在 NOT NULL，让没有单一语言的术语导入必然 400。
+      // 放宽约束对已有数据永远安全，所以自动收敛；收紧可能让历史行违规，只告警不执行。
+      if (field.schema?.is_nullable === true && current.schema?.is_nullable === false) {
+        schemaPatch.is_nullable = true;
+        console.log(`relaxed ${definition.collection}.${field.field} to nullable`);
+      } else if (field.schema?.is_nullable === false && current.schema?.is_nullable === true) {
+        console.warn(`skip ${definition.collection}.${field.field}: 声明为非空但库中可空，收紧约束需人工确认历史数据`);
+      }
+      // 下拉选项和默认值是接口元数据，不会因为字段已存在而自动更新。后台任务的
+      // task_type/task_status 需要补上批次翻译与运行状态，否则界面仍停留在旧选项。
+      if (field.meta?.options && !sameValue(current.meta?.options, field.meta.options)) {
+        metaPatch.options = field.meta.options;
+      }
+      if (field.meta?.display_options && !sameValue(current.meta?.display_options, field.meta.display_options)) {
+        metaPatch.display_options = field.meta.display_options;
+      }
+      if (Object.hasOwn(field.schema || {}, "default_value") && !sameValue(current.schema?.default_value, field.schema.default_value)) {
+        schemaPatch.default_value = field.schema.default_value;
+      }
+      const patch = {};
+      if (Object.keys(metaPatch).length) patch.meta = metaPatch;
+      if (Object.keys(schemaPatch).length) patch.schema = schemaPatch;
+      if (Object.keys(patch).length) {
+        await api(`/fields/${definition.collection}/${field.field}`, { method: "PATCH", body: patch });
+        console.log(`updated ${definition.collection}.${field.field} metadata`);
+      }
     }
   }
   console.log(`checked ${definition.collection}`);

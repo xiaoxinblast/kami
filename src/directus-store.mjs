@@ -293,6 +293,7 @@ export async function saveDirectusMemory(locale, input) {
   params.set("filter[source][_eq]", source);
   params.set("filter[target][_eq]", target);
   if (input.projectId) params.set("filter[project_id][_eq]", String(input.projectId));
+  else params.set("filter[project_id][_empty]", "true");
   if (input.libraryId) params.set("filter[library_id][_eq]", String(input.libraryId));
   const existing = await request(`/items/${collection}?${params}`);
   const body = {
@@ -334,17 +335,20 @@ export async function saveDirectusMemory(locale, input) {
   return { id: saved.id, locale, source: saved.source, target: saved.target, qualityStatus: saved.quality_status, qaScore: Number(saved.qa_score) || 0 };
 }
 
-export async function getDirectusStyleProfile(locale, contentType, domain = "general") {
+export async function getDirectusStyleProfile(locale, contentType, domain = "general", { projectId = "" } = {}) {
   assertLocale(locale);
-  const params = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,name,target_locale,content_type,content_tags,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,evidence_ids,generated_by,source_batch_id,learning_run_id,status,date_updated" });
+  const params = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,project_id,name,target_locale,content_type,content_tags,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,evidence_ids,generated_by,source_batch_id,learning_run_id,status,date_updated" });
   params.set("filter[target_locale][_eq]", locale);
   params.set("filter[content_type][_eq]", contentType || "general");
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  else params.set("filter[project_id][_empty]", "true");
   params.set("filter[status][_eq]", "active");
   const items = await request(`/items/style_profiles?${params}`);
   const profile = items.find((item) => item.domain === domain) || items.find((item) => item.domain === "general") || items[0];
   if (!profile) return null;
   return {
     id: profile.id,
+    projectId: profile.project_id || "",
     name: profile.name,
     source: "style-library",
     locale: profile.target_locale,
@@ -413,15 +417,16 @@ export async function getDirectusStyleEvidence(locale, options = {}) {
 
 export async function getDirectusQaRuns(locale, options = {}) {
   assertLocale(locale);
-  const params = new URLSearchParams({ limit: String(Math.min(500, options.limit || 100)), sort: "-date_created", fields: "id,target_locale,content_type,domain,source,initial_translation,final_translation,score,status,iterations,issues,term_decisions,human_decisions,references,style_profile_id,model,fallback_reason,batch_id,date_created" });
+  const params = new URLSearchParams({ limit: String(Math.min(500, options.limit || 100)), sort: "-date_created", fields: "id,project_id,target_locale,content_type,domain,source,initial_translation,final_translation,score,status,iterations,issues,term_decisions,human_decisions,references,style_profile_id,model,fallback_reason,batch_id,date_created" });
   params.set("filter[target_locale][_eq]", locale);
   if (options.contentType) params.set("filter[content_type][_eq]", options.contentType);
+  if (options.projectId) params.set("filter[project_id][_eq]", String(options.projectId));
   if (options.batchId) params.set("filter[batch_id][_eq]", options.batchId);
   const items = await request(`/items/qa_runs?${params}`);
   return items
     .filter((item) => !options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
     .map((item) => ({
-      id: item.id, locale: item.target_locale, contentType: item.content_type || "general", domain: item.domain || "general",
+      id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type || "general", domain: item.domain || "general",
       source: item.source, initialTranslation: item.initial_translation, finalTranslation: item.final_translation,
       score: item.score == null ? null : Number(item.score), status: item.status || "review", iterations: Number(item.iterations) || 0,
       issues: arrayValue(item.issues), termDecisions: arrayValue(item.term_decisions), humanDecisions: arrayValue(item.human_decisions), references: arrayValue(item.references), styleProfileId: item.style_profile_id || "",
@@ -448,7 +453,7 @@ export async function getDirectusUserProfile(locale, { projectId = "" } = {}) {
 
 export async function saveDirectusUserProfile(input) {
   const locale = assertLocale(input.locale);
-  const projectId = String(input.projectId || "");
+  const projectId = String(input.projectId || input.project || "");
   const params = new URLSearchParams({ limit: "1", sort: "-version,-date_updated", fields: "id,version,status" });
   params.set("filter[target_locale][_eq]", locale);
   if (projectId) params.set("filter[project_id][_eq]", projectId);
@@ -473,13 +478,17 @@ export async function saveDirectusUserProfile(input) {
 
 export async function saveDirectusStyleProfile(input) {
   const locale = assertLocale(input.locale);
+  const projectId = String(input.projectId || input.project || "");
   const params = new URLSearchParams({ limit: "1", sort: "-version,-date_updated", fields: "id,version,status" });
   params.set("filter[target_locale][_eq]", locale);
   params.set("filter[content_type][_eq]", input.contentType || "general");
   params.set("filter[domain][_eq]", input.domain || "general");
+  if (projectId) params.set("filter[project_id][_eq]", projectId);
+  else params.set("filter[project_id][_empty]", "true");
   const existing = await request(`/items/style_profiles?${params}`);
   const previous = existing[0];
   const saved = await request("/items/style_profiles", { method: "POST", body: {
+    project_id: projectId,
     name: input.name,
     target_locale: locale,
     content_type: input.contentType || "general",
@@ -498,12 +507,13 @@ export async function saveDirectusStyleProfile(input) {
     status: input.status || "active"
   } });
   if (previous?.id && saved.status === "active") await request(`/items/style_profiles/${previous.id}`, { method: "PATCH", body: { status: "inactive" } });
-  return { id: saved.id, name: saved.name, source: "style-library", instruction: saved.instructions, reviewRubric: saved.review_rubric || null, examples: saved.examples || [], rules: arrayValue(saved.rules), version: saved.version, locale, contentType: saved.content_type, contentTags: arrayValue(saved.content_tags), domain: saved.domain, sourceBatchId: saved.source_batch_id || "", learningRunId: saved.learning_run_id || "", status: saved.status };
+  return { id: saved.id, projectId, name: saved.name, source: "style-library", instruction: saved.instructions, reviewRubric: saved.review_rubric || null, examples: saved.examples || [], rules: arrayValue(saved.rules), version: saved.version, locale, contentType: saved.content_type, contentTags: arrayValue(saved.content_tags), domain: saved.domain, sourceBatchId: saved.source_batch_id || "", learningRunId: saved.learning_run_id || "", status: saved.status };
 }
 
 function mapStyleLearningRun(item) {
   return {
     id: item.id,
+    projectId: item.project_id || "",
     batchId: item.batch_id || "",
     filename: item.filename || "",
     locale: item.target_locale,
@@ -525,6 +535,7 @@ function mapStyleLearningRun(item) {
 
 export async function saveDirectusStyleLearningRun(input) {
   const body = input.id ? {} : {
+    project_id: input.projectId || input.project || "",
     batch_id: String(input.batchId || ""),
     filename: String(input.filename || ""),
     target_locale: assertLocale(input.locale),
@@ -543,6 +554,7 @@ export async function saveDirectusStyleLearningRun(input) {
   };
   if (input.id) {
     const fields = {
+      projectId: ["project_id", (value) => String(value || "")],
       batchId: ["batch_id", (value) => String(value || "")],
       filename: ["filename", (value) => String(value || "")],
       locale: ["target_locale", (value) => assertLocale(value)],
@@ -573,9 +585,10 @@ export async function getDirectusStyleLearningRuns(locale, options = {}) {
   const params = new URLSearchParams({
     limit: String(Math.min(500, Math.max(1, Number(options.limit) || 100))),
     sort: "-date_created",
-    fields: "id,batch_id,filename,target_locale,content_type,content_tags,domain,evidence_count,summary,rules,examples,caveat,confidence,status,promoted_profile_id,generated_by,date_created"
+    fields: "id,project_id,batch_id,filename,target_locale,content_type,content_tags,domain,evidence_count,summary,rules,examples,caveat,confidence,status,promoted_profile_id,generated_by,date_created"
   });
   params.set("filter[target_locale][_eq]", assertLocale(locale));
+  if (options.projectId) params.set("filter[project_id][_eq]", String(options.projectId));
   if (options.batchId) params.set("filter[batch_id][_eq]", options.batchId);
   if (options.status) params.set("filter[status][_eq]", options.status);
   return (await request(`/items/style_learning_runs?${params}`)).map(mapStyleLearningRun);
@@ -583,6 +596,7 @@ export async function getDirectusStyleLearningRuns(locale, options = {}) {
 
 export async function saveDirectusQaRun(input) {
   return request("/items/qa_runs", { method: "POST", body: {
+    project_id: input.projectId || "",
     target_locale: assertLocale(input.locale), content_type: input.contentType || "general", domain: input.domain || "general",
     source: input.source, initial_translation: input.initialTranslation, final_translation: input.finalTranslation,
     score: input.score, status: input.status, iterations: input.iterations || 0, issues: input.issues || [], term_decisions: input.termDecisions || [], human_decisions: input.humanDecisions || [], references: input.references || [],
@@ -593,6 +607,7 @@ export async function saveDirectusQaRun(input) {
 export async function saveDirectusQaCase(input) {
   const embedding = input.embedding ?? await embedSource(input.source);
   return request("/items/qa_cases", { method: "POST", body: {
+    project_id: input.projectId || "", project: input.projectId || input.project || "",
     target_locale: assertLocale(input.locale), content_type: input.contentType || "general", domain: input.domain || "general",
     source: input.source, rejected_translation: input.rejectedTranslation, corrected_translation: input.correctedTranslation || "",
     issues: input.issues || [], score_before: input.scoreBefore, score_after: input.scoreAfter, status: input.status || "review",
@@ -600,14 +615,15 @@ export async function saveDirectusQaCase(input) {
   } });
 }
 
-export async function getDirectusQaCases(locale, { contentType = "general", domain = "general", limit = 200 } = {}) {  assertLocale(locale);
+export async function getDirectusQaCases(locale, { contentType = "general", domain = "general", projectId = "", limit = 200 } = {}) {  assertLocale(locale);
   const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(500, limit));
-  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_created", fields: "id,target_locale,content_type,domain,source,rejected_translation,corrected_translation,issues,score_before,score_after,status,embedding,date_created" });
+  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_created", fields: "id,project_id,target_locale,content_type,domain,source,rejected_translation,corrected_translation,issues,score_before,score_after,status,embedding,date_created" });
   params.set("filter[target_locale][_eq]", locale);
   if (contentType) params.set("filter[content_type][_eq]", contentType);
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   const items = await request(`/items/qa_cases?${params}`);
   return items.filter((item) => (!domain || domain === "general" || item.domain === domain || item.domain === "general") && item.status === "human_approved").map((item) => ({
-    id: item.id, locale: item.target_locale, contentType: item.content_type, domain: item.domain || "general", source: item.source,
+    id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type, domain: item.domain || "general", source: item.source,
     rejectedTranslation: item.rejected_translation, correctedTranslation: item.corrected_translation, issues: arrayValue(item.issues),
     scoreBefore: Number(item.score_before) || 0, scoreAfter: Number(item.score_after) || 0, status: item.status, embedding: item.embedding || null, createdAt: item.date_created
   }));
@@ -659,8 +675,9 @@ export async function saveDirectusCorpus(input) {
   const id = input.id || randomUUID();
   const document = {
     id,
+    project_id: input.projectId || "",
     name: String(input.name || "未命名语料").trim(),
-    source_language: "zh-CN",
+    source_language: "ja-JP",
     domain: input.domain || "general",
     content_type: input.contentType || "general",
     text: String(input.text || ""),
@@ -670,6 +687,7 @@ export async function saveDirectusCorpus(input) {
   const saved = await request("/items/corpus_documents", { method: "POST", body: document });
   return {
     id: saved.id,
+    projectId: saved.project_id || "",
     name: saved.name,
     sourceLanguage: saved.source_language,
     domain: saved.domain,
@@ -687,7 +705,7 @@ export async function saveDirectusImportPreview(input) {
     body: {
       filename: input.filename,
       file_type: input.fileType,
-      source_language: "zh-CN",
+      source_language: "ja-JP",
       project_id: input.projectId || "",
       requested_locale: input.requestedLocale,
       row_count: input.statistics?.rowsScanned || 0,
@@ -703,6 +721,7 @@ export async function saveDirectusImportPreview(input) {
     }
   });
   const records = input.candidates.map((candidate) => ({
+    project_id: input.projectId || "",
     source: candidate.source,
     target: candidate.target,
     target_locale: candidate.locale,
@@ -904,7 +923,7 @@ export async function approveDirectusQaCase(id) {
   return Boolean(saved?.id);
 }
 
-function batchMetrics(segments = []) {
+function batchMetrics(segments = [], runState = "") {
   const selected = segments.filter((segment) => segment.selected !== false);
   const completedSegments = selected.filter((segment) => segment.status === "done" && segment.translation).length;
   const failedSegments = selected.filter((segment) => segment.status === "error").length;
@@ -914,13 +933,14 @@ function batchMetrics(segments = []) {
   }).length;
   return {
     totalSegments: selected.length, completedSegments, failedSegments, qaPending,
-    status: failedSegments ? "needs_attention" : completedSegments < selected.length ? "in_progress" : qaPending ? "review" : "completed"
+    status: runState === "ready" ? "ready" : runState === "paused" ? "paused" : failedSegments ? "needs_attention" : completedSegments < selected.length ? "in_progress" : qaPending ? "review" : "completed"
   };
 }
 
 export async function saveDirectusBatchRun(input) {
   const id = String(input.batchId || randomUUID());
-  const metrics = batchMetrics(input.segments || []);
+  const runState = String(input.runState || "");
+  const metrics = batchMetrics(input.segments || [], runState);
   const body = {
     filename: String(input.filename || ""),
     project_id: input.projectId || "",
@@ -931,6 +951,9 @@ export async function saveDirectusBatchRun(input) {
     segmentation_mode: String(input.segmentationMode || "sentence"),
     structure: input.structure ?? null,
     segments: input.segments || [],
+    ...(Object.hasOwn(input, "subBatches") ? { sub_batches: input.subBatches || [] } : {}),
+    ...(Object.hasOwn(input, "runnerOptions") ? { runner_options: input.runnerOptions || {} } : {}),
+    ...(runState ? { run_state: runState } : {}),
     task_status: metrics.status,
     total_segments: metrics.totalSegments,
     completed_segments: metrics.completedSegments,
@@ -947,7 +970,7 @@ export async function saveDirectusBatchRun(input) {
 
 export async function getDirectusBatchRun(batchId) {
   try {
-    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,structure,segments,date_updated`);
+    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,structure,segments,sub_batches,runner_options,run_state,date_updated`);
     return {
       batchId: item.id,
       filename: item.filename || "",
@@ -959,6 +982,9 @@ export async function getDirectusBatchRun(batchId) {
       segmentationMode: item.segmentation_mode || "sentence",
       structure: item.structure ?? null,
       segments: arrayValue(item.segments),
+      subBatches: arrayValue(item.sub_batches),
+      runnerOptions: item.runner_options || {},
+      runState: item.run_state || "ready",
       updatedAt: item.date_updated || null
     };
   } catch (error) {
@@ -968,30 +994,30 @@ export async function getDirectusBatchRun(batchId) {
 }
 
 function summarizeBatchRun(item) {
-  const fallbackMetrics = item.segments ? batchMetrics(arrayValue(item.segments)) : null;
+  const fallbackMetrics = item.segments ? batchMetrics(arrayValue(item.segments), item.run_state || "") : null;
   const totalSegments = item.total_segments == null ? fallbackMetrics?.totalSegments || 0 : Number(item.total_segments);
   const completedSegments = item.completed_segments == null ? fallbackMetrics?.completedSegments || 0 : Number(item.completed_segments);
   const failedSegments = item.failed_segments == null ? fallbackMetrics?.failedSegments || 0 : Number(item.failed_segments);
   const qaPending = item.qa_pending == null ? fallbackMetrics?.qaPending || 0 : Number(item.qa_pending);
-  const status = item.task_status || fallbackMetrics?.status || "in_progress";
+  const status = item.task_status || fallbackMetrics?.status || "ready";
   return {
     batchId: item.id, filename: item.filename || "未命名任务", projectId: item.project_id || "", locale: item.target_locale || "",
     contentType: item.content_type || "general", domain: item.domain || "general", format: item.format || "",
-    segmentationMode: item.segmentation_mode || "sentence", status,
+    segmentationMode: item.segmentation_mode || "sentence", status, runState: item.run_state || "ready",
     totalSegments, completedSegments, failedSegments, qaPending,
     createdAt: item.date_created || null, updatedAt: item.date_updated || item.date_created || null
   };
 }
 
 export async function listDirectusBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
-  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,task_status,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,run_state,task_status,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[filename][_icontains]", String(search).slice(0, 120));
   const items = await request(`/items/batch_runs?${params}`);
   for (const item of items.filter((entry) => entry.total_segments == null)) {
     const legacy = await request(`/items/batch_runs/${encodeURIComponent(item.id)}?fields=segments`);
-    const metrics = batchMetrics(arrayValue(legacy.segments));
+    const metrics = batchMetrics(arrayValue(legacy.segments), item.run_state || "");
     Object.assign(item, { task_status: metrics.status, total_segments: metrics.totalSegments, completed_segments: metrics.completedSegments, failed_segments: metrics.failedSegments, qa_pending: metrics.qaPending });
     await request(`/items/batch_runs/${encodeURIComponent(item.id)}`, { method: "PATCH", body: { task_status: metrics.status, total_segments: metrics.totalSegments, completed_segments: metrics.completedSegments, failed_segments: metrics.failedSegments, qa_pending: metrics.qaPending } });
   }
@@ -1002,6 +1028,7 @@ export async function listDirectusBatchRuns({ locale = "", status = "", search =
 export async function saveDirectusQaTask(input) {
   const id = String(input.id || randomUUID());
   const body = {
+    project_id: input.projectId || "",
     title: String(input.title || String(input.sourceText || "").slice(0, 40) || "未命名质检"),
     target_locale: assertLocale(input.locale),
     content_type: String(input.contentType || "general"),
@@ -1022,14 +1049,14 @@ export async function saveDirectusQaTask(input) {
   const existing = await request(`/items/qa_tasks?${params}`);
   if (existing[0]?.id) await request(`/items/qa_tasks/${encodeURIComponent(id)}`, { method: "PATCH", body });
   else await request("/items/qa_tasks", { method: "POST", body: { ...body, id } });
-  return { id, ...body };
+  return { id, projectId: body.project_id || "", ...body };
 }
 
 export async function getDirectusQaTask(id) {
   try {
-    const item = await request(`/items/qa_tasks/${encodeURIComponent(String(id))}?fields=id,title,target_locale,content_type,domain,source_text,translation_text,source_count,translation_count,overall_score,dimension_scores,summary,alignment_note,model,report,date_created,date_updated`);
+    const item = await request(`/items/qa_tasks/${encodeURIComponent(String(id))}?fields=id,project_id,title,target_locale,content_type,domain,source_text,translation_text,source_count,translation_count,overall_score,dimension_scores,summary,alignment_note,model,report,date_created,date_updated`);
     return {
-      id: item.id, title: item.title || "", locale: item.target_locale, contentType: item.content_type || "general", domain: item.domain || "general",
+      id: item.id, projectId: item.project_id || "", title: item.title || "", locale: item.target_locale, contentType: item.content_type || "general", domain: item.domain || "general",
       sourceText: item.source_text || "", translationText: item.translation_text || "",
       segmentCounts: { source: Number(item.source_count) || 0, translation: Number(item.translation_count) || 0 },
       overallScore: item.overall_score ?? null, dimensionScores: item.dimension_scores ?? null,
@@ -1042,13 +1069,14 @@ export async function getDirectusQaTask(id) {
   }
 }
 
-export async function listDirectusQaTasks({ locale = "", status = "", search = "", limit = 200 } = {}) {
-  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,title,target_locale,content_type,domain,source_count,overall_score,summary,date_created,date_updated" });
+export async function listDirectusQaTasks({ locale = "", projectId = "", status = "", search = "", limit = 200 } = {}) {
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,project_id,title,target_locale,content_type,domain,source_count,overall_score,summary,date_created,date_updated" });
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[title][_icontains]", String(search).slice(0, 120));
   const items = await request(`/items/qa_tasks?${params}`);
   const summaries = items.map((item) => ({
-    id: item.id, type: "autoqa", title: item.title || "未命名质检", locale: item.target_locale || "",
+    id: item.id, projectId: item.project_id || "", type: "autoqa", title: item.title || "未命名质检", locale: item.target_locale || "",
     contentType: item.content_type || "general", domain: item.domain || "general",
     status: Number.isFinite(item.overall_score) ? (item.overall_score >= 90 ? "completed" : "review") : "completed",
     overallScore: Number.isFinite(item.overall_score) ? item.overall_score : null,
@@ -1072,6 +1100,7 @@ export async function deleteDirectusQaTask(id) {
 export async function saveDirectusShare(input) {
   const token = String(input.token || randomUUID().replace(/-/g, ""));
   const body = {
+    project_id: input.projectId || "",
     token,
     batch_id: String(input.batchId || ""),
     qa_task_id: String(input.qaTaskId || ""),
@@ -1091,18 +1120,18 @@ export async function saveDirectusShare(input) {
   const existing = await request(`/items/shares?${params}`);
   if (existing[0]?.id) await request(`/items/shares/${encodeURIComponent(existing[0].id)}`, { method: "PATCH", body });
   else await request("/items/shares", { method: "POST", body });
-  return { token, ...body };
+  return { token, projectId: body.project_id || "", ...body };
 }
 
 export async function getDirectusShare(token) {
   try {
-    const params = new URLSearchParams({ limit: "1", fields: "id,token,batch_id,qa_task_id,filename,target_locale,content_type,domain,meta,segments,feedbacks,status,glossed_segments,total_segments,date_created,date_updated" });
+    const params = new URLSearchParams({ limit: "1", fields: "id,project_id,token,batch_id,qa_task_id,filename,target_locale,content_type,domain,meta,segments,feedbacks,status,glossed_segments,total_segments,date_created,date_updated" });
     params.set("filter[token][_eq]", String(token));
     const items = await request(`/items/shares?${params}`);
     const item = items[0];
     if (!item) return null;
     return {
-      token: item.token, batchId: item.batch_id || "", qaTaskId: item.qa_task_id || "", filename: item.filename || "",
+      token: item.token, projectId: item.project_id || "", batchId: item.batch_id || "", qaTaskId: item.qa_task_id || "", filename: item.filename || "",
       locale: item.target_locale, contentType: item.content_type || "general", domain: item.domain || "general",
       meta: item.meta ?? null, segments: arrayValue(item.segments), feedbacks: arrayValue(item.feedbacks),
       status: item.status || "ready", glossedSegments: Number(item.glossed_segments) || 0, totalSegments: Number(item.total_segments) || 0,
@@ -1114,13 +1143,14 @@ export async function getDirectusShare(token) {
   }
 }
 
-export async function listDirectusShares({ batchId = "", qaTaskId = "", limit = 100 } = {}) {
-  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 100))), sort: "-date_updated", fields: "id,token,batch_id,qa_task_id,filename,target_locale,content_type,domain,meta,segments,feedbacks,status,glossed_segments,total_segments,date_created,date_updated" });
+export async function listDirectusShares({ projectId = "", batchId = "", qaTaskId = "", limit = 100 } = {}) {
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 100))), sort: "-date_updated", fields: "id,project_id,token,batch_id,qa_task_id,filename,target_locale,content_type,domain,meta,segments,feedbacks,status,glossed_segments,total_segments,date_created,date_updated" });
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (batchId) params.set("filter[batch_id][_eq]", String(batchId));
   if (qaTaskId) params.set("filter[qa_task_id][_eq]", String(qaTaskId));
   const items = await request(`/items/shares?${params}`);
   return items.map((item) => ({
-    token: item.token, batchId: item.batch_id || "", qaTaskId: item.qa_task_id || "", filename: item.filename || "",
+    token: item.token, projectId: item.project_id || "", batchId: item.batch_id || "", qaTaskId: item.qa_task_id || "", filename: item.filename || "",
     locale: item.target_locale, contentType: item.content_type || "general", domain: item.domain || "general",
     meta: item.meta ?? null, segments: arrayValue(item.segments), feedbacks: arrayValue(item.feedbacks),
     status: item.status || "ready", glossedSegments: Number(item.glossed_segments) || 0, totalSegments: Number(item.total_segments) || 0,
@@ -1169,6 +1199,7 @@ export async function deleteDirectusShare(token) {
 export async function saveDirectusBackgroundTask(input) {
   const id = String(input.id || randomUUID());
   const body = {
+    project_id: input.projectId || "",
     task_type: String(input.type || "term_import"),
     title: String(input.title || "后台任务"),
     target_locale: input.locale ? assertLocale(input.locale) : null,
@@ -1181,14 +1212,14 @@ export async function saveDirectusBackgroundTask(input) {
   const existing = await request(`/items/background_tasks?${params}`);
   if (existing[0]?.id) await request(`/items/background_tasks/${encodeURIComponent(id)}`, { method: "PATCH", body });
   else await request("/items/background_tasks", { method: "POST", body: { ...body, id } });
-  return { id, ...body };
+  return { id, projectId: body.project_id || "", ...body };
 }
 
 export async function getDirectusBackgroundTask(id) {
   try {
-    const item = await request(`/items/background_tasks/${encodeURIComponent(String(id))}?fields=id,task_type,title,target_locale,status,progress,payload,date_created,date_updated`);
+    const item = await request(`/items/background_tasks/${encodeURIComponent(String(id))}?fields=id,project_id,task_type,title,target_locale,status,progress,payload,date_created,date_updated`);
     return {
-      id: item.id, type: item.task_type || "term_import", title: item.title || "",
+      id: item.id, projectId: item.project_id || "", type: item.task_type || "term_import", title: item.title || "",
       locale: item.target_locale || "", status: item.status || "in_progress",
       progress: item.progress ?? { percent: 0, phase: "queued", message: "已进入后台队列", completed: 0, total: 0 },
       payload: item.payload ?? {},
@@ -1200,13 +1231,14 @@ export async function getDirectusBackgroundTask(id) {
   }
 }
 
-export async function listDirectusBackgroundTasks({ locale = "", status = "", search = "", limit = 200 } = {}) {
-  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,task_type,title,target_locale,status,progress,payload,date_created,date_updated" });
+export async function listDirectusBackgroundTasks({ locale = "", projectId = "", status = "", search = "", limit = 200 } = {}) {
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,project_id,task_type,title,target_locale,status,progress,payload,date_created,date_updated" });
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[title][_icontains]", String(search).slice(0, 120));
   const items = await request(`/items/background_tasks?${params}`);
   const tasks = items.map((item) => ({
-    id: item.id, type: item.task_type || "term_import", title: item.title || "",
+    id: item.id, projectId: item.project_id || "", type: item.task_type || "term_import", title: item.title || "",
     locale: item.target_locale || "", status: item.status || "in_progress",
     progress: item.progress ?? { percent: 0, phase: "queued", message: "已进入后台队列", completed: 0, total: 0 },
     payload: item.payload ?? {},
@@ -1226,7 +1258,7 @@ export async function deleteDirectusBackgroundTask(id) {
 }
 
 export async function findDirectusStyleProfile(id) {
-  const fields = "id,name,target_locale,content_type,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,generated_by,source_batch_id,learning_run_id,evaluation,status,date_updated";
+  const fields = "id,project_id,name,target_locale,content_type,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,generated_by,source_batch_id,learning_run_id,evaluation,status,date_updated";
   const shape = (item, kind) => ({
     id: item.id, projectId: item.project_id || "", name: item.name, locale: item.target_locale,
     contentType: item.content_type || "", domain: item.domain || "general",
@@ -1268,9 +1300,10 @@ export async function saveDirectusStyleProfileEvaluation(id, evaluation) {
 
 export async function listDirectusStyleProfiles(locale, status, scope = null) {
   assertLocale(locale);
-  const styleParams = new URLSearchParams({ limit: "50", sort: "-version,-date_updated", fields: "id,name,target_locale,content_type,content_tags,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,generated_by,source_batch_id,learning_run_id,evaluation,status,date_updated" });
+  const styleParams = new URLSearchParams({ limit: "50", sort: "-version,-date_updated", fields: "id,project_id,name,target_locale,content_type,content_tags,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,generated_by,source_batch_id,learning_run_id,evaluation,status,date_updated" });
   styleParams.set("filter[target_locale][_eq]", locale);
   if (status) styleParams.set("filter[status][_eq]", status);
+  if (scope?.projectId) styleParams.set("filter[project_id][_eq]", String(scope.projectId));
   if (scope?.contentType) {
     // Without this the shared 50-row page is sorted by version across all
     // scopes, so a young scope's draft can fall off the end and the distill
@@ -1286,7 +1319,7 @@ export async function listDirectusStyleProfiles(locale, status, scope = null) {
   const userProfiles = await request(`/items/user_profiles?${profileParams}`);
   return {
     styleProfiles: styleProfiles.map((item) => ({
-      id: item.id, name: item.name, locale: item.target_locale, contentType: item.content_type, contentTags: arrayValue(item.content_tags), domain: item.domain || "general",
+      id: item.id, projectId: item.project_id || "", name: item.name, locale: item.target_locale, contentType: item.content_type, contentTags: arrayValue(item.content_tags), domain: item.domain || "general",
       instruction: item.instructions, reviewRubric: item.review_rubric || null, examples: arrayValue(item.examples), rules: arrayValue(item.rules), version: Number(item.version) || 1,
       parentId: item.parent_id || null, evidenceCount: Number(item.evidence_count) || 0,
       sourceBatchId: item.source_batch_id || "", learningRunId: item.learning_run_id || "",
@@ -1303,7 +1336,7 @@ export async function listDirectusStyleProfiles(locale, status, scope = null) {
 export async function activateDirectusStyleProfile(id) {
   let target;
   try {
-    target = await request(`/items/style_profiles/${encodeURIComponent(id)}?fields=id,target_locale,content_type,domain,status`);
+    target = await request(`/items/style_profiles/${encodeURIComponent(id)}?fields=id,project_id,target_locale,content_type,domain,status`);
   } catch (error) {
     if (isMissingItem(error)) {
       target = await request(`/items/user_profiles/${encodeURIComponent(id)}?fields=id,project_id,target_locale,status`);
@@ -1323,6 +1356,8 @@ export async function activateDirectusStyleProfile(id) {
   params.set("filter[target_locale][_eq]", target.target_locale);
   params.set("filter[content_type][_eq]", target.content_type);
   params.set("filter[domain][_eq]", target.domain || "general");
+  if (target.project_id) params.set("filter[project_id][_eq]", target.project_id);
+  else params.set("filter[project_id][_empty]", "true");
   params.set("filter[status][_eq]", "active");
   const activeOthers = await request(`/items/style_profiles?${params}`);
   const updates = activeOthers.filter((item) => item.id !== id).map((item) => ({ id: item.id, status: "inactive" }));
@@ -1348,14 +1383,15 @@ export async function rejectDirectusStyleProfile(id) {
   throw error;
 }
 
-export async function listDirectusPendingQaCases(locale) {
+export async function listDirectusPendingQaCases(locale, { projectId = "" } = {}) {
   assertLocale(locale);
-  const params = new URLSearchParams({ limit: "20", sort: "-date_created", fields: "id,target_locale,content_type,domain,source,rejected_translation,corrected_translation,issues,score_before,score_after,status,date_created" });
+  const params = new URLSearchParams({ limit: "20", sort: "-date_created", fields: "id,project_id,target_locale,content_type,domain,source,rejected_translation,corrected_translation,issues,score_before,score_after,status,date_created" });
   params.set("filter[target_locale][_eq]", locale);
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   params.set("filter[status][_eq]", "review");
   const items = await request(`/items/qa_cases?${params}`);
   return items.map((item) => ({
-    id: item.id, locale: item.target_locale, contentType: item.content_type, domain: item.domain || "general", source: item.source,
+    id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type, domain: item.domain || "general", source: item.source,
     rejectedTranslation: item.rejected_translation, correctedTranslation: item.corrected_translation, issues: arrayValue(item.issues),
     scoreBefore: Number(item.score_before) || 0, scoreAfter: Number(item.score_after) || 0, status: item.status, createdAt: item.date_created
   }));
