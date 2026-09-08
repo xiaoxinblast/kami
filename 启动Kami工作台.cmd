@@ -5,6 +5,9 @@ rem Double-click launcher: Docker Desktop -> Directus -> Kami.
 set "WORK_DIR=%~dp0"
 set "DOCKER_DESKTOP_D=D:\Docker\Desktop\Docker Desktop.exe"
 set "DOCKER_DESKTOP_C=C:\Program Files\Docker\Docker\Docker Desktop.exe"
+rem 这台机器的默认 LOCALAPPDATA 下残留了无法删除的 AF_UNIX socket；
+rem 只让 Docker Desktop 使用 D 盘运行时目录，避免启动时卡在 Secrets Engine。
+set "DOCKER_LOCALAPPDATA=D:\Docker\LocalAppData-Codex"
 set "KAMI_EDGE_EXE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
 if not exist "%KAMI_EDGE_EXE%" set "KAMI_EDGE_EXE=%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
 
@@ -22,9 +25,9 @@ if not errorlevel 1 goto :docker_ready
 
 echo [1/4] Starting Docker Desktop...
 if exist "%DOCKER_DESKTOP_D%" (
-  start "" "%DOCKER_DESKTOP_D%"
+  call :start_docker "%DOCKER_DESKTOP_D%"
 ) else if exist "%DOCKER_DESKTOP_C%" (
-  start "" "%DOCKER_DESKTOP_C%"
+  call :start_docker "%DOCKER_DESKTOP_C%"
 ) else (
   echo Docker Desktop was not found. Install and start Docker Desktop first.
   goto :failed
@@ -65,6 +68,14 @@ exit /b %errorlevel%
 
 :open_workbench
 start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "$delay = [int]'%~1'; if ($delay -gt 0) { Start-Sleep -Seconds $delay }; $edge = $env:KAMI_EDGE_EXE; if (Test-Path -LiteralPath $edge) { $profile = Join-Path $env:LOCALAPPDATA 'KamiWorkbench\edge-safe-profile'; Start-Process -FilePath $edge -ArgumentList @('--disable-gpu', ('--user-data-dir=' + $profile), '--no-first-run', '--new-window', 'http://127.0.0.1:4173') } else { Start-Process 'http://127.0.0.1:4173' }"
+exit /b 0
+
+:start_docker
+if not exist "%DOCKER_LOCALAPPDATA%" mkdir "%DOCKER_LOCALAPPDATA%"
+set "KAMI_OLD_LOCALAPPDATA=%LOCALAPPDATA%"
+set "LOCALAPPDATA=%DOCKER_LOCALAPPDATA%"
+start "" "%~1"
+set "LOCALAPPDATA=%KAMI_OLD_LOCALAPPDATA%"
 exit /b 0
 
 :docker_failed
