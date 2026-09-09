@@ -13,7 +13,7 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
 import { applyModelDecisions, classifyImportCandidate, expandNestedTermCandidates, extractTermPairs } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
@@ -1270,6 +1270,17 @@ async function apiHandler(req, res, url) {
     const project = await getProject(projectId);
     if (!project) return json(res, 404, { error: "项目不存在" });
     return json(res, 200, await saveProject({ ...project, ...body, id: projectId }));
+  }
+  if (req.method === "DELETE" && /^\/api\/projects\/[^/]+$/u.test(url.pathname)) {
+    const projectId = decodeURIComponent(url.pathname.slice("/api/projects/".length));
+    if (url.searchParams.get("purge") === "1") {
+      const result = await purgeProject(projectId);
+      return result
+        ? json(res, 200, { ok: true, purged: true, project: result.project, deleted: result.total })
+        : json(res, 404, { error: "项目不存在" });
+    }
+    const project = await deleteProject(projectId);
+    return project ? json(res, 200, { ok: true, purged: false, project }) : json(res, 404, { error: "项目不存在" });
   }
   if (req.method === "GET" && url.pathname === "/api/memories") {
     const locale = assertActiveLocale(url.searchParams.get("locale") || "zh-CN");

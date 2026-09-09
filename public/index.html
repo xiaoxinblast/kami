@@ -39,9 +39,15 @@
           </div>
           <div class="command-dock" aria-label="页面操作">
             <div class="system-actions">
-              <label class="project-switcher"><span>项目</span><select id="projectSelect" aria-label="当前项目"><option value="">正在读取…</option></select></label>
-              <button class="text-action" id="newProject" type="button">新建项目</button>
-              <button class="text-action" id="openProjectSettings" type="button">项目设置</button>
+              <div class="project-switcher" aria-label="项目管理">
+                <span class="project-switcher-label">项目</span>
+                <select id="projectSelect" aria-label="当前项目"><option value="">正在读取…</option></select>
+                <div class="project-switcher-actions">
+                  <button class="project-chip primary" id="newProject" type="button" title="新建项目">新建</button>
+                  <button class="project-chip" id="openProjectSettings" type="button" title="项目设置">设置</button>
+                  <button class="project-chip danger" id="deleteProject" type="button" title="删除当前项目">删除</button>
+                </div>
+              </div>
               <div class="feedback-bell-wrap">
                 <button class="icon-button feedback-bell" id="feedbackBell" title="同事反馈" aria-label="同事反馈">
                   <svg viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.7 6.2 2 6.4H4c.3-.2 2-1.9 2-6.4zM10 19a2 2 0 0 0 4 0" /></svg>
@@ -440,12 +446,29 @@
       </form>
     </dialog>
     <dialog id="projectDialog">
-      <form class="dialog-card" id="projectForm">
+      <form class="dialog-card" id="projectForm" autocomplete="off">
         <div class="dialog-head"><div><span class="card-kicker">PROJECT</span><h2>新建项目</h2></div><button class="icon-button" type="button" data-close="projectDialog" aria-label="关闭">×</button></div>
-        <p class="panel-caption">项目资源彼此隔离。创建后可在项目设置中导入术语库、主/工作 TM 和调整 QA 规则。</p>
-        <label><span>项目名称</span><input name="name" required placeholder="例如：Asia 2026 日中本地化" /></label>
-        <label><span>项目说明</span><textarea name="description" placeholder="可选：产品、版本或交付范围"></textarea></label>
+        <div class="project-form-note">
+          <span class="project-form-note-icon">✦</span>
+          <div><strong>项目级隔离</strong><p>术语库、TM、风格规范、QA 记录和学习轨迹都会绑定到当前项目。</p></div>
+        </div>
+        <label><span>项目名称</span><input name="name" required maxlength="80" placeholder="例如：Asia 2026 日中本地化" /></label>
+        <label><span>项目说明</span><textarea name="description" maxlength="500" placeholder="可选：产品、版本或交付范围"></textarea></label>
         <div class="dialog-actions"><button class="button ghost" type="button" data-close="projectDialog">取消</button><button class="button primary" type="submit">创建项目</button></div>
+      </form>
+    </dialog>
+    <dialog id="deleteProjectDialog">
+      <form class="dialog-card project-delete-card" id="deleteProjectForm">
+        <div class="dialog-head"><div><span class="card-kicker">DANGER ZONE</span><h2>删除项目</h2></div><button class="icon-button" type="button" data-close="deleteProjectDialog" aria-label="关闭">×</button></div>
+        <div class="project-delete-summary">
+          <span class="project-delete-icon" aria-hidden="true">!</span>
+          <div><strong id="deleteProjectName">当前项目</strong><p>不勾选只会从工作台移除，项目数据保留在 Directus；勾选后永久删除项目及关联后台数据。</p></div>
+        </div>
+        <label class="project-delete-choice">
+          <input type="checkbox" id="deleteProjectData" />
+          <span><strong>同时删除后台数据</strong><small>术语、TM、QA、风格规范、学习记录和批次任务等会永久删除，无法恢复。</small></span>
+        </label>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="deleteProjectDialog">取消</button><button class="button danger" type="submit">确认删除</button></div>
       </form>
     </dialog>
     <dialog id="projectSettingsDialog" class="project-settings" aria-labelledby="projectSettingsTitle"></dialog>

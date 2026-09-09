@@ -2234,6 +2234,73 @@ export async function saveDirectusProject(input = {}) {
   return mapProject(saved);
 }
 
+export async function archiveDirectusProject(id) {
+  const project = await getDirectusProject(id);
+  if (!project) return null;
+  const saved = await request(`/items/${PROJECT_COLLECTION}/${encodeURIComponent(String(id))}`, {
+    method: "PATCH",
+    body: { status: "archived" }
+  });
+  return mapProject(saved);
+}
+
+const PROJECT_PURGE_TARGETS = new Map([
+  ["project_resource_libraries", "project_id"],
+  ["terms_zh_cn", "project_id"],
+  ["corpus_documents", "project_id"],
+  ["term_import_batches", "project_id"],
+  ["term_candidates", "project_id"],
+  ["batch_runs", "project_id"],
+  ["user_profiles", "project_id"],
+  ["style_profiles", "project_id"],
+  ["style_evidence", "project_id"],
+  ["style_learning_runs", "project_id"],
+  ["qa_runs", "project_id"],
+  ["qa_cases", "_or"],
+  ["qa_tasks", "project_id"],
+  ["shares", "project_id"],
+  ["background_tasks", "project_id"],
+  ["learning_trajectories", "project"],
+  ["translation_skills", "project"],
+  ["skill_evaluations", "project"],
+  ["quality_assets", "project"],
+  ["quality_runs", "project"],
+  ["training_runs", "project"]
+]);
+for (const collection of new Set(Object.values(MEMORY_COLLECTIONS))) {
+  PROJECT_PURGE_TARGETS.set(collection, collection === "translation_memory_zh_cn" ? "_or" : "project");
+}
+
+function projectScopeFilter(field, projectId) {
+  if (field === "_or") return { _or: [{ project_id: { _eq: projectId } }, { project: { _eq: projectId } }] };
+  return { [field]: { _eq: projectId } };
+}
+
+async function deleteDirectusItemsByFilter(collection, filter) {
+  const params = new URLSearchParams({ limit: "-1", fields: "id", filter: JSON.stringify(filter) });
+  const items = await request(`/items/${collection}?${params}`);
+  const ids = items.map((item) => item.id).filter(Boolean);
+  for (let index = 0; index < ids.length; index += 10) {
+    await Promise.all(ids.slice(index, index + 10).map((id) => request(`/items/${collection}/${encodeURIComponent(String(id))}`, { method: "DELETE" })));
+  }
+  return ids.length;
+}
+
+export async function purgeDirectusProject(id) {
+  const project = await getDirectusProject(id);
+  if (!project) return null;
+  const deleted = {};
+  let total = 0;
+  for (const [collection, field] of PROJECT_PURGE_TARGETS) {
+    const count = await deleteDirectusItemsByFilter(collection, projectScopeFilter(field, id));
+    if (!count) continue;
+    deleted[collection] = count;
+    total += count;
+  }
+  await request(`/items/${PROJECT_COLLECTION}/${encodeURIComponent(String(id))}`, { method: "DELETE" });
+  return { project, deleted, total };
+}
+
 export async function getDirectusResourceLibraries(projectId, { kind = "", limit = 500 } = {}) {
   const params = new URLSearchParams({ limit: String(Math.min(1000, Math.max(1, Number(limit) || 500))), sort: "priority,date_created", fields: "id,project_id,name,kind,role,enabled,priority,description,entry_count,date_created,date_updated" });
   params.set("filter[project_id][_eq]", String(projectId));

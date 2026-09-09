@@ -83,6 +83,8 @@ import {
   ,getDirectusProjects
   ,getDirectusProject
   ,saveDirectusProject
+  ,archiveDirectusProject
+  ,purgeDirectusProject
   ,getDirectusResourceLibraries
   ,saveDirectusResourceLibrary
   ,deleteDirectusResourceLibrary
@@ -186,6 +188,70 @@ async function saveJsonProject(input = {}) {
   };
   await writeJsonAtomic(projectPath(id), project);
   return project;
+}
+
+async function archiveJsonProject(id) {
+  const existing = await getJsonProject(id);
+  if (!existing) return null;
+  return saveJsonProject({ ...existing, status: "archived" });
+}
+
+async function listJsonFiles(directory) {
+  let entries = [];
+  try { entries = await readdir(directory, { withFileTypes: true }); } catch (error) { if (error.code === "ENOENT") return []; throw error; }
+  const files = [];
+  for (const entry of entries) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await listJsonFiles(path));
+    else if (entry.isFile() && entry.name.endsWith(".json")) files.push(path);
+  }
+  return files;
+}
+
+function belongsToProject(value, projectId) {
+  if (!value || typeof value !== "object") return false;
+  return [value.projectId, value.project_id, value.project].some((item) => String(item || "") === String(projectId));
+}
+
+async function purgeJsonProject(id) {
+  const project = await getJsonProject(id);
+  if (!project) return null;
+  let total = 0;
+  for (const directory of ["assets", "memories", "styles", "qa", "batches", "qa-tasks", "shares", "background-tasks", "corpora", "learning"]) {
+    for (const file of await listJsonFiles(join(ROOT, directory))) {
+      let data;
+      try { data = JSON.parse(await readFile(file, "utf8")); } catch { continue; }
+      if (Array.isArray(data)) {
+        const next = data.filter((item) => !belongsToProject(item, id));
+        if (next.length !== data.length) {
+          await writeJsonAtomic(file, next);
+          total += data.length - next.length;
+        }
+        continue;
+      }
+      if (!data || typeof data !== "object") continue;
+      if (belongsToProject(data, id)) {
+        await rm(file, { force: true });
+        total += 1;
+        continue;
+      }
+      let removed = 0;
+      for (const key of Object.keys(data)) {
+        if (!Array.isArray(data[key])) continue;
+        const next = data[key].filter((item) => !belongsToProject(item, id));
+        removed += data[key].length - next.length;
+        data[key] = next;
+      }
+      if (removed) {
+        data.revision = (Number(data.revision) || 0) + 1;
+        await writeJsonAtomic(file, data);
+        total += removed;
+      }
+    }
+  }
+  await rm(projectPath(id), { force: true });
+  await rm(resourceLibraryPath(id), { force: true });
+  return { project, total };
 }
 
 async function getJsonResourceLibraries(projectId, { kind = "", limit = 500 } = {}) {
@@ -1346,6 +1412,14 @@ export async function getProject(id) {
 
 export async function saveProject(input = {}) {
   return usesDirectus() ? saveDirectusProject(input) : saveJsonProject(input);
+}
+
+export async function deleteProject(id) {
+  return usesDirectus() ? archiveDirectusProject(id) : archiveJsonProject(id);
+}
+
+export async function purgeProject(id) {
+  return usesDirectus() ? purgeDirectusProject(id) : purgeJsonProject(id);
 }
 
 export async function getResourceLibraries(projectId, options = {}) {

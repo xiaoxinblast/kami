@@ -48,3 +48,24 @@ test("风格、QA、任务、分享和后台记录按项目隔离", async () => 
   await store.saveBackgroundTask({ projectId: b, type: "batch_export", title: "B 后台" });
   assert.deepEqual((await store.listBackgroundTasks({ projectId: a })).map((item) => item.id), [backgroundA.id]);
 });
+
+test("删除项目会归档并从活动项目列表移除", async () => {
+  const project = await store.saveProject({ name: "待删除项目", description: "删除回归测试" });
+  const archived = await store.deleteProject(project.id);
+  assert.equal(archived.status, "archived");
+  assert.equal((await store.getProjects()).some((item) => item.id === project.id), false);
+  assert.equal((await store.getProject(project.id)).status, "archived");
+});
+
+test("彻底删除项目会清理项目作用域数据", async () => {
+  const project = await store.saveProject({ name: "待彻底删除项目", description: "彻底删除回归测试" });
+  await store.saveMemory("zh-CN", { projectId: project.id, source: "purge-source", target: "purge-target", domain: "general", contentType: "general", qualityStatus: "human_approved", qaScore: 100 });
+  await store.saveStyleProfile({ projectId: project.id, locale: "zh-CN", contentType: "dialogue", domain: "game", name: "purge-style", instruction: "purge", status: "active" });
+  await store.saveResourceLibrary({ projectId: project.id, name: "purge-library", kind: "term_base", role: "reference", priority: 1 });
+  const result = await store.purgeProject(project.id);
+  assert.ok(result.total >= 2);
+  assert.equal(await store.getProject(project.id), null);
+  assert.equal((await store.getMemories("zh-CN", { projectId: project.id })).length, 0);
+  assert.equal(await store.getStyleProfile("zh-CN", "dialogue", "game", { projectId: project.id }), null);
+  assert.deepEqual(await store.getResourceLibraries(project.id), []);
+});

@@ -89,6 +89,11 @@ function renderProjectSelector() {
     ? state.projects.map((project) => `<option value="${escapeHtml(project.id)}"${project.id === state.activeProjectId ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("")
     : '<option value="">暂无项目</option>';
   select.disabled = !state.projects.length;
+  const hasProject = Boolean(state.projects.length);
+  const settingsButton = $("#openProjectSettings");
+  const deleteButton = $("#deleteProject");
+  if (settingsButton) settingsButton.disabled = !hasProject;
+  if (deleteButton) deleteButton.disabled = !hasProject;
 }
 
 async function loadProjects() {
@@ -122,7 +127,10 @@ async function selectProject(projectId) {
 
 async function createProjectFromDialog(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const submitButton = formElement.querySelector('button[type="submit"]');
+  const form = new FormData(formElement);
+  submitButton.disabled = true;
   try {
     const created = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: form.get("name"), description: form.get("description") }) });
     state.projects = [...state.projects, created.project];
@@ -131,11 +139,42 @@ async function createProjectFromDialog(event) {
     state.projectSettings = created.project.settings || null;
     localStorage.setItem("kami-project-id", created.project.id);
     renderProjectSelector();
-    event.currentTarget.reset();
+    formElement.reset();
     $("#projectDialog").close();
     await loadAssets(state.assetLocale);
     toast(`项目已创建：${created.project.name}`);
   } catch (error) { toast(error.message); }
+  finally { submitButton.disabled = false; }
+}
+
+function openDeleteProjectDialog() {
+  if (!state.activeProjectId || !state.activeProject) return toast("请先选择项目");
+  $("#deleteProjectName").textContent = state.activeProject.name || "当前项目";
+  $("#deleteProjectData").checked = false;
+  $("#deleteProjectDialog").showModal();
+}
+
+async function deleteProjectFromDialog(event) {
+  event.preventDefault();
+  const formElement = event.currentTarget;
+  const submitButton = formElement.querySelector('button[type="submit"]');
+  const projectId = state.activeProjectId;
+  const projectName = state.activeProject?.name || "当前项目";
+  const purge = Boolean($("#deleteProjectData")?.checked);
+  if (!projectId) return toast("请先选择项目");
+  if (purge && !confirm(`确认永久删除“${projectName}”及其全部后台数据？此操作无法撤销。`)) return;
+  submitButton.disabled = true;
+  try {
+    await api(`/api/projects/${encodeURIComponent(projectId)}${purge ? "?purge=1" : ""}`, { method: "DELETE" });
+    $("#deleteProjectDialog").close();
+    $("#deleteProjectData").checked = false;
+    await loadProjects();
+    state.assets = {};
+    await loadAssets(state.assetLocale);
+    await loadMemories(state.memoryLocale);
+    toast(purge ? `项目及后台数据已删除：${projectName}` : `项目已从工作台移除：${projectName}`);
+  } catch (error) { toast(error.message); }
+  finally { submitButton.disabled = false; }
 }
 
 let projectSettingsPanel;
@@ -4078,13 +4117,14 @@ function bindEvents() {
   }));
   $("#assetForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       await api("/api/assets", { method: "POST", body: JSON.stringify({ ...projectPayload(), locale: state.assetLocale, term: {
         source: form.get("source"), target: form.get("target"), aliases: String(form.get("aliases") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean),
         forbidden: String(form.get("forbidden") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean), contentTypes: [form.get("contentType")], domains: ["game"], enforcement: "preferred", note: form.get("note")
       } }) });
-      event.currentTarget.reset();
+      formElement.reset();
       $("#assetDialog").close();
       await loadAssets(state.assetLocale);
       toast(`已保存到${state.bootstrap.locales[state.assetLocale].label}术语库`);
@@ -4136,9 +4176,11 @@ function bindEvents() {
   $("#sendToAutoQa").addEventListener("click", sendCurrentTranslationToAutoQa);
   $("#openSettings").addEventListener("click", openSettingsPanel);
   $("#projectSelect").addEventListener("change", (event) => selectProject(event.target.value).catch((error) => toast(error.message)));
-  $("#newProject").addEventListener("click", () => $("#projectDialog").showModal());
+  $("#newProject").addEventListener("click", () => { $("#projectForm").reset(); $("#projectDialog").showModal(); });
   $("#openProjectSettings").addEventListener("click", openProjectSettings);
+  $("#deleteProject").addEventListener("click", openDeleteProjectDialog);
   $("#projectForm").addEventListener("submit", createProjectFromDialog);
+  $("#deleteProjectForm").addEventListener("submit", deleteProjectFromDialog);
   $("#settingsForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try { await submitSettings({ settings: collectSettingsForm() }); }
