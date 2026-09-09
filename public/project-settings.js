@@ -319,7 +319,7 @@ export function createProjectSettingsPanel(dialog, { api, onSaved }) {
   dialog.addEventListener("change", edit);
 
   return {
-    open(project, libraries) {
+    open(project, libraries, { initialTab = "libraries" } = {}) {
       draft = createProjectDraft(project, libraries);
       initial = signature();
       validationShown = false;
@@ -336,7 +336,7 @@ export function createProjectSettingsPanel(dialog, { api, onSaved }) {
         <footer class="ps-footer"><p data-save-status role="status" aria-live="polite"></p><div><button type="button" class="ps-cancel" data-cancel-settings>取消</button><button type="submit" class="ps-save" data-save>保存更改</button></div></footer></form>`;
       renderLibraries();
       renderRules();
-      selectTab("libraries");
+      selectTab(tabs.some((item) => item.id === initialTab) ? initialTab : "libraries");
       updateStatus();
       dialog.showModal();
       find('[data-tab="libraries"]').focus();

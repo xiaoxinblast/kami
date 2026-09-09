@@ -8,6 +8,8 @@
     <link rel="icon" type="image/png" href="/assets/kami-favicon-v2.png" />
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/project-settings.css" />
+    <link rel="stylesheet" href="/project-wizard.css" />
+    <link rel="stylesheet" href="/settings-panels.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -432,31 +434,8 @@
       </form>
     </dialog>
 
-    <dialog id="settingsDialog">
-      <form class="dialog-card settings-dialog-card" id="settingsForm">
-        <div class="dialog-head"><div><span class="card-kicker">WORKBENCH TUNING</span><h2>参数设置</h2></div><button class="icon-button" type="button" data-close="settingsDialog" aria-label="关闭">×</button></div>
-        <p class="settings-intro">这些参数原本写死在代码或环境变量里。改动即时生效，无需重启；被环境变量接管的项会标注并置灰。</p>
-        <div id="settingsBody"></div>
-        <div id="settingsNotes" class="settings-notes" hidden></div>
-        <div class="dialog-actions">
-          <button class="button ghost" type="button" id="settingsReset">恢复出厂值</button>
-          <button class="button ghost" type="button" data-close="settingsDialog">取消</button>
-          <button class="button primary" type="submit">保存设置</button>
-        </div>
-      </form>
-    </dialog>
-    <dialog id="projectDialog">
-      <form class="dialog-card" id="projectForm" autocomplete="off">
-        <div class="dialog-head"><div><span class="card-kicker">PROJECT</span><h2>新建项目</h2></div><button class="icon-button" type="button" data-close="projectDialog" aria-label="关闭">×</button></div>
-        <div class="project-form-note">
-          <span class="project-form-note-icon">✦</span>
-          <div><strong>项目级隔离</strong><p>术语库、TM、风格规范、QA 记录和学习轨迹都会绑定到当前项目。</p></div>
-        </div>
-        <label><span>项目名称</span><input name="name" required maxlength="80" placeholder="例如：Asia 2026 日中本地化" /></label>
-        <label><span>项目说明</span><textarea name="description" maxlength="500" placeholder="可选：产品、版本或交付范围"></textarea></label>
-        <div class="dialog-actions"><button class="button ghost" type="button" data-close="projectDialog">取消</button><button class="button primary" type="submit">创建项目</button></div>
-      </form>
-    </dialog>
+    <dialog id="settingsDialog" class="settings-shell" aria-labelledby="settingsPanelTitle"></dialog>
+    <dialog id="projectDialog" class="project-wizard" aria-labelledby="projectWizardTitle"></dialog>
     <dialog id="deleteProjectDialog">
       <form class="dialog-card project-delete-card" id="deleteProjectForm">
         <div class="dialog-head"><div><span class="card-kicker">DANGER ZONE</span><h2>删除项目</h2></div><button class="icon-button" type="button" data-close="deleteProjectDialog" aria-label="关闭">×</button></div>
@@ -480,24 +459,7 @@
         <div class="dialog-actions"><button class="button ghost" type="button" data-close="assetPreflightDialog">取消</button><button class="button primary" id="assetPreflightConfirm" type="button">确认并继续</button></div>
       </div>
     </dialog>
-    <dialog id="providerDialog">
-      <form class="dialog-card" id="providerForm">
-        <div class="dialog-head"><div><span class="card-kicker">OPENAI-COMPATIBLE</span><h2>模型服务设置</h2></div><button class="icon-button" type="button" data-close="providerDialog" aria-label="关闭">×</button></div>
-        <label><span>Base URL</span><input name="baseUrl" placeholder="http://localhost:11434/v1" /></label>
-        <label><span>模型名称</span><input name="model" placeholder="qwen3:14b" /></label>
-        <label><span>快速模型（可选，低风险短文本）</span><input name="fastModel" placeholder="留空则使用主模型" /></label>
-        <label><span>高质量模型（可选，高风险、创译与升级重试）</span><input name="qualityModel" placeholder="留空则使用主模型" /></label>
-        <label><span>机器翻译底模（可选，仅用于 MT + 后编辑路线）</span><input name="mtModel" placeholder="留空则使用快速模型或主模型" /></label>
-        <label><span>Embedding 模型（可选，留空禁用向量检索）</span><input name="embeddingModel" placeholder="nomic-embed-text" /></label>
-        <label><span>Embedding API 地址（可填 Base URL 或完整端点）</span><input name="embeddingBaseUrl" placeholder="http://localhost:11434/v1" /></label>
-        <label><span>输入价格（美元 / 百万 token，用于评测成本门禁）</span><input name="inputPricePerMTok" type="number" step="any" min="0" placeholder="例如 0.27" /></label>
-        <label><span>输出价格（美元 / 百万 token，用于评测成本门禁）</span><input name="outputPricePerMTok" type="number" step="any" min="0" placeholder="例如 1.10" /></label>
-        <label><span>Embedding API Key（留空复用主 Key）</span><input name="embeddingApiKey" type="password" autocomplete="off" /></label>
-        <label><span>API Key（留空保持现有 Key）</span><input name="apiKey" type="password" autocomplete="off" /></label>
-        <p class="provider-security-note" id="providerSecurityNote">保存后使用 Windows 当前用户级加密，不会以明文写入项目。</p>
-        <div class="dialog-actions"><button class="button ghost" type="button" data-close="providerDialog">取消</button><button class="button primary" type="submit">保存设置</button></div>
-      </form>
-    </dialog>
+    <dialog id="providerDialog" class="settings-shell" aria-labelledby="settingsPanelTitle"></dialog>
     <dialog id="termSuggestionDialog">
       <div class="dialog-card suggestion-dialog-card">
         <div class="dialog-head"><div><span class="card-kicker">SMART TERM MATCH</span><h2>确认术语替换</h2></div><button class="icon-button" type="button" data-close="termSuggestionDialog" aria-label="关闭">×</button></div>

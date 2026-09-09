@@ -3,6 +3,8 @@ import { normalizePastedText, shouldRoutePasteToBatch } from "./paste-routing.js
 import { learningEvaluationResult } from "./learning-utils.js";
 import { startWorkbenchSession } from "./session-lifecycle.js";
 import { createProjectSettingsPanel } from "./project-settings.js";
+import { createProjectWizard } from "./project-wizard.js";
+import { createParameterSettingsPanel, createProviderSettingsPanel } from "./settings-panels.js";
 
 startWorkbenchSession();
 
@@ -125,26 +127,64 @@ async function selectProject(projectId) {
   toast(`已切换到项目：${project.name}`);
 }
 
-async function createProjectFromDialog(event) {
-  event.preventDefault();
-  const formElement = event.currentTarget;
-  const submitButton = formElement.querySelector('button[type="submit"]');
-  const form = new FormData(formElement);
-  submitButton.disabled = true;
-  try {
-    const created = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: form.get("name"), description: form.get("description") }) });
-    state.projects = [...state.projects, created.project];
-    state.activeProjectId = created.project.id;
-    state.activeProject = created.project;
-    state.projectSettings = created.project.settings || null;
-    localStorage.setItem("kami-project-id", created.project.id);
-    renderProjectSelector();
-    formElement.reset();
-    $("#projectDialog").close();
-    await loadAssets(state.assetLocale);
-    toast(`项目已创建：${created.project.name}`);
-  } catch (error) { toast(error.message); }
-  finally { submitButton.disabled = false; }
+async function createProjectFromWizard({ name, description }) {
+  const created = await api("/api/projects", { method: "POST", body: JSON.stringify({ name, description }) });
+  state.projects = [...state.projects, created.project];
+  state.activeProjectId = created.project.id;
+  state.activeProject = created.project;
+  state.projectSettings = created.project.settings || null;
+  localStorage.setItem("kami-project-id", created.project.id);
+  renderProjectSelector();
+  state.assets = {};
+  await Promise.all([loadAssets(state.assetLocale), loadMemories(state.memoryLocale)]);
+  return created.project;
+}
+
+async function importWizardSource(file) {
+  await setBatchFile(file);
+  if (!state.batchPreview) throw new Error("待译文件解析失败，请检查文件内容");
+  return { filename: file.name };
+}
+
+async function importWizardTerms(files) {
+  await setImportFiles(files, { intent: "terms", returnView: "workbench" });
+  if (!state.assetPreflight) throw new Error("术语表预检失败，请检查文件格式");
+  return { count: files.length };
+}
+
+async function previewWizardTm(file) {
+  return api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({ ...projectPayload(), filename: file.name, base64: await fileToBase64(file) }) });
+}
+
+async function commitWizardTm(preview) {
+  const candidates = (preview.candidates || []).map((candidate) => ({ ...candidate, selected: true }));
+  const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: false }) });
+  await loadMemories(state.memoryLocale);
+  return result;
+}
+
+async function importWizardStyleGuide(file) {
+  return importStyleGuideFile(file, state.styleLocale);
+}
+
+function finishProjectWizard(summary = []) {
+  const parts = summary.filter(Boolean);
+  toast(parts.length ? `项目初始化完成：${parts.slice(0, 3).join("；")}` : "项目已创建，可稍后在项目设置中继续配置");
+}
+
+let projectWizard;
+function getProjectWizard() {
+  projectWizard ||= createProjectWizard($("#projectDialog"), {
+    onCreateProject: createProjectFromWizard,
+    onImportSource: importWizardSource,
+    onImportTerms: importWizardTerms,
+    onPreviewTm: previewWizardTm,
+    onCommitTm: commitWizardTm,
+    onImportStyleGuide: importWizardStyleGuide,
+    onOpenQaSettings: () => openProjectSettings({ tab: "qa" }),
+    onFinished: finishProjectWizard
+  });
+  return projectWizard;
 }
 
 function openDeleteProjectDialog() {
@@ -178,7 +218,7 @@ async function deleteProjectFromDialog(event) {
 }
 
 let projectSettingsPanel;
-async function openProjectSettings() {
+async function openProjectSettings({ tab = "libraries" } = {}) {
   if (!state.activeProjectId) return toast("请先选择项目");
   const button = $("#openProjectSettings");
   button.disabled = true;
@@ -197,7 +237,7 @@ async function openProjectSettings() {
         toast("项目设置已保存");
       }
     });
-    projectSettingsPanel.open(project, Array.isArray(libraryPayload.libraries) ? libraryPayload.libraries : []);
+    projectSettingsPanel.open(project, Array.isArray(libraryPayload.libraries) ? libraryPayload.libraries : [], { initialTab: tab });
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 }
@@ -244,18 +284,6 @@ async function watchImportProgress(progressId, control) {
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 350));
   }
-}
-
-function renderProviderSecurity(provider) {
-  const note = $("#providerSecurityNote");
-  if (!note) return;
-  const keys = [
-    provider.persistence?.apiKeyPersisted ? "主 API Key" : "",
-    provider.persistence?.embeddingApiKeyPersisted ? "Embedding API Key" : ""
-  ].filter(Boolean);
-  if (keys.length) note.textContent = `${keys.join("与")}已使用 Windows 当前用户级 DPAPI 加密保存，重启后会自动恢复。`;
-  else if (provider.apiKeyConfigured || provider.embeddingApiKeyConfigured) note.textContent = "当前 Key 已载入内存，但尚未加密持久化；再次保存设置后即可永久保存。";
-  else note.textContent = "保存后使用 Windows 当前用户级 DPAPI 加密，不会以明文写入项目。Embedding 地址与 Key 可独立于主模型配置。";
 }
 
 function renderLocaleStrip(container, selected, onSelect) {
@@ -563,91 +591,36 @@ function sendBatchToAutoQa() {
 }
 
 
-const SETTING_GROUP_LABELS = {
-  quality: "质量与评分",
-  retrieval: "检索与上下文",
-  learning: "学习与蒸馏",
-  share: "分享验证"
-};
-
-/**
- * 参数面板。字段规格由服务端 /api/settings 提供，前端不再抄一份字段表——
- * 抄一份就意味着说明文案和校验区间迟早各说各话。
- */
-// 字段规格、括号选项与语言表在一次会话内不变，取一次缓存起来；
-// 保存后只需要用响应里的新值重绘。
-let settingsMeta = null;
-
-async function openSettingsPanel() {
-  try {
-    const payload = await api("/api/settings");
-    settingsMeta = { groups: payload.groups, titleBracketChoices: payload.titleBracketChoices, locales: payload.locales };
-    renderSettingsPanel(payload);
-    $("#settingsDialog").showModal();
-  } catch (error) { toast(error.message); }
+let providerSettingsPanel;
+function getProviderSettingsPanel() {
+  providerSettingsPanel ||= createProviderSettingsPanel($("#providerDialog"), {
+    api,
+    onSaved(provider) {
+      state.bootstrap.provider = provider;
+      $("#providerLabel").textContent = `${provider.model} · ${new URL(provider.baseUrl).hostname}`;
+      toast("模型设置已更新");
+    }
+  });
+  return providerSettingsPanel;
 }
 
-function renderSettingsPanel({ settings, groups, titleBracketChoices, locales, environmentOverrides }) {
-  const read = (path) => path.split(".").reduce((carry, key) => carry?.[key], settings);
-  const sections = groups.map(({ group, fields }) => `
-    <section class="settings-group">
-      <h3>${escapeHtml(SETTING_GROUP_LABELS[group] || group)}</h3>
-      ${fields.map((field) => {
-        const override = environmentOverrides?.[field.path];
-        return `<label class="settings-field${override ? " overridden" : ""}">
-          <span>${escapeHtml(field.label)}<small>${escapeHtml(field.hint)}</small></span>
-          <input type="number" data-path="${escapeHtml(field.path)}" value="${escapeHtml(String(read(field.path) ?? field.default))}"
-                 min="${field.min}" max="${field.max}" step="${field.step}" ${override ? "disabled" : ""} />
-          ${override ? `<em class="settings-override">由环境变量 ${escapeHtml(override.variable)} 接管</em>` : `<em class="settings-range">${field.min} ~ ${field.max}</em>`}
-        </label>`;
-      }).join("")}
-    </section>`).join("");
-
-  // 作品名括号是风格约定而非语言对错，按语种单独选；空表示不做这项检查。
-  const bracketRows = Object.entries(locales).map(([locale, label]) => `
-    <label class="settings-field">
-      <span>${escapeHtml(label)}<small>${escapeHtml(locale)}</small></span>
-      <select data-bracket="${escapeHtml(locale)}">
-        ${titleBracketChoices.map((choice) => `<option value="${escapeHtml(choice)}"${settings.orthography?.titleBrackets?.[locale] === choice ? " selected" : ""}>${escapeHtml(choice || "不检查")}</option>`).join("")}
-      </select>
-    </label>`).join("");
-
-  $("#settingsBody").innerHTML = `${sections}
-    <section class="settings-group">
-      <h3>作品名括号约定</h3>
-      <p class="settings-group-note">语言层面无效的标点（如韩语里的中文逗号）始终检查，不可关闭；这里只配置作品名用哪对括号。</p>
-      ${bracketRows}
-    </section>`;
-  $("#settingsNotes").hidden = true;
+let parameterSettingsPanel;
+function getParameterSettingsPanel() {
+  parameterSettingsPanel ||= createParameterSettingsPanel($("#settingsDialog"), {
+    api,
+    onSaved(result) {
+      toast(result.notes?.length ? `设置已保存，其中 ${result.notes.length} 项被自动校正` : "设置已保存并立即生效");
+    }
+  });
+  return parameterSettingsPanel;
 }
 
-function collectSettingsForm() {
-  const settings = { orthography: { titleBrackets: {} } };
-  for (const input of $$("#settingsBody input[data-path]")) {
-    if (input.disabled) continue;
-    const keys = input.dataset.path.split(".");
-    const last = keys.pop();
-    const parent = keys.reduce((carry, key) => (carry[key] = carry[key] || {}), settings);
-    parent[last] = Number(input.value);
-  }
-  for (const select of $$("#settingsBody select[data-bracket]")) {
-    settings.orthography.titleBrackets[select.dataset.bracket] = select.value;
-  }
-  return settings;
+function openProviderSettings() {
+  getProviderSettingsPanel().open(state.bootstrap.provider);
 }
 
-async function submitSettings(payload) {
-  const result = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
-  renderSettingsPanel({ ...settingsMeta, ...result });
-  // 被夹紧或整组回落必须让人看见，不能悄悄改掉输入。
-  if (result.notes?.length) {
-    $("#settingsNotes").hidden = false;
-    $("#settingsNotes").innerHTML = `<strong>已自动校正 ${result.notes.length} 项</strong>${result.notes.map((note) => `<div>${escapeHtml(note.label)}：${escapeHtml(note.note)}</div>`).join("")}`;
-    toast(`设置已保存，其中 ${result.notes.length} 项被自动校正`);
-  } else {
-    toast("设置已保存并立即生效");
-    $("#settingsDialog").close();
-  }
+function openParameterSettings() {
+  getParameterSettingsPanel().open().catch((error) => toast(error.message));
 }
 
 async function runAutoQa() {
@@ -2462,25 +2435,31 @@ async function updateStyleLocale(locale) {
   await loadStyleGuidance(locale);
 }
 
+async function importStyleGuideFile(file, locale = state.styleLocale) {
+  if (!file) throw new Error("请先选择风格指南文件");
+  if (!/\.(txt|md|docx)$/iu.test(file.name)) throw new Error("风格指南仅支持 .txt、.md、.docx");
+  if (file.size > 5 * 1024 * 1024) throw new Error("风格指南不能超过 5MB");
+  const result = await api("/api/style-guides/import", { method: "POST", body: JSON.stringify({
+    ...projectPayload(),
+    locale,
+    filename: file.name,
+    base64: await fileToBase64(file)
+  }) });
+  await loadStyleGuidance(locale);
+  return result;
+}
+
 async function importStyleGuide() {
   const file = state.styleGuideFile;
   if (!file) return;
-  if (!/\.(txt|md|docx)$/iu.test(file.name)) return toast("风格指南仅支持 .txt、.md、.docx");
-  if (file.size > 5 * 1024 * 1024) return toast("风格指南不能超过 5MB");
   const button = $("#styleGuideImportButton");
   button.disabled = true;
   $("#styleGuideImportNote").textContent = "正在读取并创建待批准规范……";
   try {
-    const result = await api("/api/style-guides/import", { method: "POST", body: JSON.stringify({
-      ...projectPayload(),
-      locale: state.styleLocale,
-      filename: file.name,
-      base64: await fileToBase64(file)
-    }) });
+    const result = await importStyleGuideFile(file);
     state.styleGuideFile = null;
     $("#styleGuideFile").value = "";
     $("#styleGuideImportNote").textContent = `${result.filename} · ${result.characters} 字 · 已进入待批准规范`;
-    await loadStyleGuidance(state.styleLocale);
     toast("风格指南已导入，请检查后批准启用");
   } catch (error) {
     button.disabled = false;
@@ -4139,58 +4118,17 @@ function bindEvents() {
     state.feedbackStatusFilter = $("#feedbackStatusFilter").value;
     renderFeedbackPage();
   });
-  $("#openProvider").addEventListener("click", () => {
-    const provider = state.bootstrap.provider;    $("#providerForm [name=baseUrl]").value = provider.baseUrl;
-    $("#providerForm [name=model]").value = provider.model;
-    $("#providerForm [name=fastModel]").value = provider.fastModel || "";
-    $("#providerForm [name=qualityModel]").value = provider.qualityModel || "";
-    $("#providerForm [name=mtModel]").value = provider.mtModel || "";
-    $("#providerForm [name=embeddingModel]").value = provider.embeddingModel || "";
-    $("#providerForm [name=embeddingBaseUrl]").value = provider.embeddingBaseUrl || "";
-    $("#providerForm [name=inputPricePerMTok]").value = provider.inputPricePerMTok || "";
-    $("#providerForm [name=outputPricePerMTok]").value = provider.outputPricePerMTok || "";
-    const apiKeyInput = $("#providerForm [name=apiKey]");
-    apiKeyInput.value = "";
-    apiKeyInput.placeholder = provider.apiKeyConfigured ? "已配置 · 留空保持不变" : "未配置 · 如需鉴权请填写";
-    const embeddingKeyInput = $("#providerForm [name=embeddingApiKey]");
-    embeddingKeyInput.value = "";
-    embeddingKeyInput.placeholder = provider.embeddingApiKeyConfigured ? "已配置 · 留空保持不变" : "未配置 · 留空复用主 Key";
-    renderProviderSecurity(provider);
-    $("#providerDialog").showModal();
-  });
-  $("#providerForm").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    try {
-      const provider = await api("/api/provider", { method: "POST", body: JSON.stringify(Object.fromEntries(form)) });
-      state.bootstrap.provider = provider;
-      $("#providerLabel").textContent = `${provider.model} · ${new URL(provider.baseUrl).hostname}`;
-      renderProviderSecurity(provider);
-      $("#providerDialog").close();
-      toast("模型设置已更新");
-    } catch (error) { toast(error.message); }
-  });
+  $("#openProvider").addEventListener("click", openProviderSettings);
   $("#confirmTermReplace").addEventListener("click", applyTermSuggestion);
   $("#toggleTargetEdit").addEventListener("click", toggleTargetEdit);
   $("#acceptTranslation").addEventListener("click", acceptSingleTranslation);
   $("#sendToAutoQa").addEventListener("click", sendCurrentTranslationToAutoQa);
-  $("#openSettings").addEventListener("click", openSettingsPanel);
+  $("#openSettings").addEventListener("click", openParameterSettings);
   $("#projectSelect").addEventListener("change", (event) => selectProject(event.target.value).catch((error) => toast(error.message)));
-  $("#newProject").addEventListener("click", () => { $("#projectForm").reset(); $("#projectDialog").showModal(); });
+  $("#newProject").addEventListener("click", () => getProjectWizard().open());
   $("#openProjectSettings").addEventListener("click", openProjectSettings);
   $("#deleteProject").addEventListener("click", openDeleteProjectDialog);
-  $("#projectForm").addEventListener("submit", createProjectFromDialog);
   $("#deleteProjectForm").addEventListener("submit", deleteProjectFromDialog);
-  $("#settingsForm").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try { await submitSettings({ settings: collectSettingsForm() }); }
-    catch (error) { toast(error.message); }
-  });
-  $("#settingsReset").addEventListener("click", async () => {
-    if (!confirm("恢复出厂值会覆盖当前全部参数设置，确认继续？")) return;
-    try { await submitSettings({ reset: true }); }
-    catch (error) { toast(error.message); }
-  });
   $("#acceptAllSegments").addEventListener("click", acceptAllSegments);
   $("#batchToAutoQa").addEventListener("click", sendBatchToAutoQa);
   $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
