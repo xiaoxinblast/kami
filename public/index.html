@@ -439,15 +439,17 @@
     <dialog id="deleteProjectDialog">
       <form class="dialog-card project-delete-card" id="deleteProjectForm">
         <div class="dialog-head"><div><span class="card-kicker">DANGER ZONE</span><h2>删除项目</h2></div><button class="icon-button" type="button" data-close="deleteProjectDialog" aria-label="关闭">×</button></div>
-        <div class="project-delete-summary">
-          <span class="project-delete-icon" aria-hidden="true">!</span>
-          <div><strong id="deleteProjectName">当前项目</strong><p>不勾选只会从工作台移除，项目数据保留在 Directus；勾选后永久删除项目及关联后台数据。</p></div>
+        <p class="project-delete-intro">选择要从工作台移除的项目。未勾选“同时删除后台数据”时，项目数据会保留在 Directus。</p>
+        <div class="project-delete-toolbar">
+          <label class="project-select-all"><input type="checkbox" id="deleteProjectSelectAll" /> 全选</label>
+          <span id="deleteProjectCount">已选 0 个</span>
         </div>
+        <div class="project-delete-list" id="deleteProjectList"></div>
         <label class="project-delete-choice">
           <input type="checkbox" id="deleteProjectData" />
           <span><strong>同时删除后台数据</strong><small>术语、TM、QA、风格规范、学习记录和批次任务等会永久删除，无法恢复。</small></span>
         </label>
-        <div class="dialog-actions"><button class="button ghost" type="button" data-close="deleteProjectDialog">取消</button><button class="button danger" type="submit">确认删除</button></div>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="deleteProjectDialog">取消</button><button class="button danger" type="submit" id="deleteProjectConfirm">删除选中项目</button></div>
       </form>
     </dialog>
     <dialog id="projectSettingsDialog" class="project-settings" aria-labelledby="projectSettingsTitle"></dialog>

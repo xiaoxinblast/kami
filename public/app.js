@@ -188,33 +188,59 @@ function getProjectWizard() {
 }
 
 function openDeleteProjectDialog() {
-  if (!state.activeProjectId || !state.activeProject) return toast("请先选择项目");
-  $("#deleteProjectName").textContent = state.activeProject.name || "当前项目";
+  if (!state.projects.length) return toast("当前没有可删除的项目");
+  $("#deleteProjectList").innerHTML = state.projects.map((project) => `
+    <label class="project-delete-row">
+      <input type="checkbox" value="${escapeHtml(project.id)}" ${project.id === state.activeProjectId ? "checked" : ""} />
+      <span><strong>${escapeHtml(project.name)}</strong><small>${escapeHtml(project.description || "未填写项目说明")}</small></span>
+      ${project.id === state.activeProjectId ? '<em>当前项目</em>' : ""}
+    </label>`).join("");
+  $("#deleteProjectSelectAll").checked = false;
   $("#deleteProjectData").checked = false;
+  updateDeleteSelection();
+  updateDeleteConfirmLabel();
   $("#deleteProjectDialog").showModal();
+}
+
+function updateDeleteSelection() {
+  const rows = $$("#deleteProjectList input[type=checkbox]");
+  const selected = rows.filter((input) => input.checked);
+  $("#deleteProjectCount").textContent = `已选 ${selected.length} 个`;
+  $("#deleteProjectSelectAll").checked = rows.length > 0 && selected.length === rows.length;
+  $("#deleteProjectConfirm").disabled = selected.length === 0;
+}
+
+function updateDeleteConfirmLabel() {
+  const purge = Boolean($("#deleteProjectData")?.checked);
+  $("#deleteProjectConfirm").textContent = purge ? "永久删除选中项目" : "删除选中项目";
 }
 
 async function deleteProjectFromDialog(event) {
   event.preventDefault();
   const formElement = event.currentTarget;
   const submitButton = formElement.querySelector('button[type="submit"]');
-  const projectId = state.activeProjectId;
-  const projectName = state.activeProject?.name || "当前项目";
+  const projectIds = $$("#deleteProjectList input[type=checkbox]:checked").map((input) => input.value);
   const purge = Boolean($("#deleteProjectData")?.checked);
-  if (!projectId) return toast("请先选择项目");
-  if (purge && !confirm(`确认永久删除“${projectName}”及其全部后台数据？此操作无法撤销。`)) return;
+  if (!projectIds.length) return toast("请至少选择一个项目");
+  if (purge && !confirm(`确认永久删除选中的 ${projectIds.length} 个项目及其全部后台数据？此操作无法撤销。`)) return;
   submitButton.disabled = true;
+  submitButton.textContent = "正在删除…";
   try {
-    await api(`/api/projects/${encodeURIComponent(projectId)}${purge ? "?purge=1" : ""}`, { method: "DELETE" });
+    const results = await Promise.allSettled(projectIds.map((projectId) => api(`/api/projects/${encodeURIComponent(projectId)}${purge ? "?purge=1" : ""}`, { method: "DELETE" })));
+    const failed = results.filter((result) => result.status === "rejected");
     $("#deleteProjectDialog").close();
     $("#deleteProjectData").checked = false;
     await loadProjects();
     state.assets = {};
     await loadAssets(state.assetLocale);
     await loadMemories(state.memoryLocale);
-    toast(purge ? `项目及后台数据已删除：${projectName}` : `项目已从工作台移除：${projectName}`);
+    if (failed.length) toast(`已删除 ${projectIds.length - failed.length} 个项目，${failed.length} 个失败：${failed[0].reason?.message || "未知错误"}`);
+    else toast(purge ? `已永久删除 ${projectIds.length} 个项目及后台数据` : `已从工作台移除 ${projectIds.length} 个项目`);
   } catch (error) { toast(error.message); }
-  finally { submitButton.disabled = false; }
+  finally {
+    submitButton.disabled = false;
+    updateDeleteConfirmLabel();
+  }
 }
 
 let projectSettingsPanel;
@@ -4128,6 +4154,12 @@ function bindEvents() {
   $("#newProject").addEventListener("click", () => getProjectWizard().open());
   $("#openProjectSettings").addEventListener("click", openProjectSettings);
   $("#deleteProject").addEventListener("click", openDeleteProjectDialog);
+  $("#deleteProjectSelectAll").addEventListener("change", (event) => {
+    $$("#deleteProjectList input[type=checkbox]").forEach((input) => { input.checked = event.target.checked; });
+    updateDeleteSelection();
+  });
+  $("#deleteProjectList").addEventListener("change", updateDeleteSelection);
+  $("#deleteProjectData").addEventListener("change", updateDeleteConfirmLabel);
   $("#deleteProjectForm").addEventListener("submit", deleteProjectFromDialog);
   $("#acceptAllSegments").addEventListener("click", acceptAllSegments);
   $("#batchToAutoQa").addEventListener("click", sendBatchToAutoQa);
