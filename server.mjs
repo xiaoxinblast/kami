@@ -14,10 +14,10 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, listLibraryEntries, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, listLibraryEntries, listLibraryFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
-import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
+import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
 import { countMemories, deleteBatchRun, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
@@ -1868,7 +1868,10 @@ async function apiHandler(req, res, url) {
       libraries: libraries.map((library) => ({
         ...library,
         entryCount: stats.get(library.id)?.entryCount || 0,
-        lastEntryAt: stats.get(library.id)?.lastEntryAt || ""
+        lastEntryAt: stats.get(library.id)?.lastEntryAt || "",
+        // TM 库里的"几个文件"：工作 TM 是按翻译文件累积的，库行要能看出来。
+        fileCount: stats.get(library.id)?.fileCount || 0,
+        latestFile: stats.get(library.id)?.latestFile || ""
       }))
     });
   }
@@ -2014,10 +2017,20 @@ async function apiHandler(req, res, url) {
     const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset")) || 0));
     const result = await listLibraryEntries({
       locale, kind, projectId, libraryId,
+      // sourceFile=__none__ 表示"未标注来源"那一桶（单句翻译等没有文件名的行）。
+      sourceFile: (url.searchParams.get("sourceFile") || "").trim(),
       search: (url.searchParams.get("search") || "").trim(),
       limit, offset
     });
-    return json(res, 200, { ...result, kind, libraryId, limit, offset });
+    return json(res, 200, { ...result, kind, libraryId, sourceFile: (url.searchParams.get("sourceFile") || "").trim(), limit, offset });
+  }
+  if (req.method === "GET" && url.pathname === "/api/library-files") {
+    // 库 → 文件 → 条目 的中间层：TM 库里每个来源文件多少条、几个批次、最近什么时候。
+    const locale = assertActiveLocale(url.searchParams.get("locale") || "zh-CN");
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
+    const libraryId = String(url.searchParams.get("libraryId") || "").trim();
+    if (!projectId || !libraryId) return json(res, 400, { error: "缺少项目或资源库" });
+    return json(res, 200, { libraryId, files: await listLibraryFiles({ locale, projectId, libraryId }) });
   }
   if (req.method === "DELETE" && url.pathname === "/api/library-entries") {
     // "删库并删除库内条目"：先按库把条目 id 全量取回，再分批删（逐条 DELETE 在
@@ -2027,10 +2040,11 @@ async function apiHandler(req, res, url) {
     const projectId = String(url.searchParams.get("projectId") || "").trim();
     const libraryId = String(url.searchParams.get("libraryId") || "").trim();
     if (!projectId || !libraryId) return json(res, 400, { error: "缺少项目或资源库" });
-    const { items } = await listLibraryEntries({ locale, kind, projectId, libraryId, search: "", limit: 0, offset: 0 });
+    const sourceFile = (url.searchParams.get("sourceFile") || "").trim();
+    const { items } = await listLibraryEntries({ locale, kind, projectId, libraryId, sourceFile, search: "", limit: 0, offset: 0 });
     const ids = items.map((item) => item.id);
     const deleted = await deleteLibraryEntries(locale, kind, ids);
-    logInfo("已删除库内条目", { locale, kind, libraryId, requested: ids.length, deleted });
+    logInfo("已删除库内条目", { locale, kind, libraryId, sourceFile, requested: ids.length, deleted });
     return json(res, 200, { deleted, requested: ids.length });
   }
   if (req.method === "POST" && url.pathname === "/api/library-export") {
@@ -2040,10 +2054,12 @@ async function apiHandler(req, res, url) {
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     const kind = body.kind === "tm" ? "tm" : "term";
     const libraryId = String(body.libraryId || "").trim();
+    const sourceFile = String(body.sourceFile || "").trim();
     const libraries = await getResourceLibraries(projectId);
     const library = libraryId ? libraries.find((item) => item.id === libraryId) : null;
     if (libraryId && !library) return json(res, 404, { error: "资源库不存在或不属于当前项目" });
-    const label = library ? library.name : `全部${kind === "tm" ? " TM" : "术语"}库`;
+    const fileLabel = sourceFile ? ` · ${sourceFile === "__none__" ? "未标注来源" : sourceFile}` : "";
+    const label = `${library ? library.name : `全部${kind === "tm" ? " TM" : "术语"}库`}${fileLabel}`;
     const task = await createBackgroundTask({
       type: "batch_export",
       title: `导出 · ${label}`,
@@ -2053,7 +2069,7 @@ async function apiHandler(req, res, url) {
     });
     (async () => {
       try {
-        const { items } = await listLibraryEntries({ locale, kind, projectId, libraryId, search: "", limit: 0, offset: 0 });
+        const { items } = await listLibraryEntries({ locale, kind, projectId, libraryId, sourceFile, search: "", limit: 0, offset: 0 });
         await updateBackgroundTaskProgress(task.id, { progress: { phase: "exporting", message: `正在生成表格（${items.length} 条）`, percent: 55, completed: 0, total: items.length } });
         const exported = await buildLibraryExport({ kind, locale, libraryName: label, items });
         const directory = join(DATA_ROOT, "exports");
@@ -2066,6 +2082,7 @@ async function apiHandler(req, res, url) {
             kind: "library_export",
             libraryId,
             libraryName: label,
+            sourceFile,
             count: items.length,
             filename: exported.filename,
             mimeType: exported.mimeType,
@@ -4805,9 +4822,15 @@ async function evaluateQaBatch(batchId, projectId = "") {
     }).filter((memory) => memory?.libraryEnabled === true);
     const narrowedQaCases = narrowByDomain(localeQaCases, domain);
     const narrowedMemories = narrowByDomain(scopedMemories, domain);
+    // 工作 TM 的机器草稿只在本文件内互认：别的文件的机器译文没有人工确认，
+    // 也常与当前文件的设定冲突，不再跨文件进入参考位。
+    const fileScopedMemories = scopeMachineDraftsToFile(narrowedMemories.items, {
+      sourceFile: body.sourceFile || body.neighborContext?.document || "",
+      batchId: body.batchId || ""
+    });
     domainResolution.relaxedRetrieval = narrowedMemories.relaxed || narrowedQaCases.relaxed;
     const qaGuidance = rankQaCases(body.source, narrowedQaCases.items, { limit: qaCaseLimit, queryEmbedding });
-    const translationReferences = rankTranslationMemories(body.source, narrowedMemories.items, {
+    const translationReferences = rankTranslationMemories(body.source, fileScopedMemories, {
       limit: memoryLimit,
       queryEmbedding,
       contentTags: classification.contentTags || [],

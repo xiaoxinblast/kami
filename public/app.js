@@ -51,6 +51,9 @@ const state = {
   importTermLibraryId: "",
   importTmLibraryId: "",
   memoryImportTargetId: "",
+  // TM 库的第三层：当前打开的来源文件（""=停在文件列表，__none__=未标注来源）。
+  memoryLibraryFile: "",
+  memoryLibraryFiles: [],
   memoryImportFile: null,
   memoryImportPreview: null,
   styleGuideFile: null,
@@ -542,7 +545,7 @@ function switchView(view) {
   if (view === "assets") updateAssetLocale(state.assetLocale);
   if (view === "memories") updateMemoryLocale(state.memoryLocale);
   if (view === "assets") renderLibraryShell("term");
-  if (view === "memories") renderLibraryShell("tm");
+  if (view === "memories") { renderLibraryShell("tm"); renderLibraryFiles("tm"); }
   if (view === "tasks") loadTasks().catch((error) => toast(error.message));
   if (view === "styles") loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message));
   if (view === "workbench") setTranslationMode(state.translationMode);
@@ -4444,10 +4447,15 @@ function libraryRowMarkup(kind, library) {
   const roleLabel = libraryRoleLabel(kind, library);
   const roleClass = kind === "term" ? "term" : (library.role || "reference");
   const id = escapeHtml(library.id);
+  // 工作 TM / 主 TM 是按翻译文件往里写的：把"几个文件"直接写在库行上，
+  // 不然用户只看到一个总数，不知道里面其实是好几批。
+  const fileBadge = kind === "tm" && Number(library.fileCount) > 0
+    ? `<span class="library-badge files">${Number(library.fileCount)} 个文件</span>`
+    : "";
   return `<tr class="library-row${library.enabled ? "" : " is-disabled"}" data-library-kind="${kind}" data-library-id="${id}">
     <td><label class="library-toggle"><input type="checkbox" data-library-toggle="1" data-kind="${kind}" data-id="${id}" ${library.enabled ? "checked" : ""} aria-label="启用/停用 ${escapeHtml(library.name)}" /><span aria-hidden="true"></span></label></td>
     <td><span class="library-badge ${roleClass}">${escapeHtml(roleLabel)}</span></td>
-    <td><strong>${escapeHtml(library.name || "未命名资源库")}</strong><small>${escapeHtml(library.description || "")}</small></td>
+    <td><strong>${escapeHtml(library.name || "未命名资源库")}</strong>${fileBadge}<small>${escapeHtml(library.latestFile ? `最近：${library.latestFile}` : library.description || "")}</small></td>
     <td>日 → 简中</td>
     <td class="library-count">${entries}</td>
     <td>${Number(library.priority) || 1}</td>
@@ -4503,19 +4511,109 @@ function renderMemoryLibrarySummary() {
 /** 两级切换：库列表 ↔ 条目视图，面包屑显示当前库。 */
 function renderLibraryShell(kind) {
   const libraryId = activeLibraryId(kind);
+  const fileId = kind === "tm" ? state.memoryLibraryFile : "";
   const listView = $(kind === "term" ? "#assetLibraryView" : "#memoryLibraryView");
+  const filesView = kind === "tm" ? $("#memoryFilesView") : null;
   const entryView = $(kind === "term" ? "#assetEntryView" : "#memoryEntryView");
   const breadcrumb = $(kind === "term" ? "#assetBreadcrumb" : "#memoryBreadcrumb");
+  const backButton = $(kind === "term" ? "#assetBreadcrumbBack" : "#memoryBreadcrumbBack");
   const nameNode = $(kind === "term" ? "#assetBreadcrumbName" : "#memoryBreadcrumbName");
   const metaNode = $(kind === "term" ? "#assetBreadcrumbMeta" : "#memoryBreadcrumbMeta");
+  const fileNode = kind === "tm" ? $("#memoryBreadcrumbFile") : null;
   const library = libraryId ? libraryById(kind, libraryId) : null;
+  // 库里还没有按文件分组的条目时不停在空的文件层，直接进条目（不然是个死胡同）。
+  const hasFiles = (state.memoryLibraryFiles || []).length > 0;
+  const showFiles = kind === "tm" && Boolean(libraryId) && !fileId && hasFiles;
   if (listView) listView.hidden = Boolean(libraryId);
-  if (entryView) entryView.hidden = !libraryId;
+  if (filesView) filesView.hidden = !showFiles;
+  if (entryView) entryView.hidden = !(libraryId && !showFiles);
   if (breadcrumb) breadcrumb.hidden = !libraryId;
+  if (backButton) backButton.textContent = fileId ? "← 返回文件列表" : "← 返回库列表";
   if (library) {
     if (nameNode) nameNode.textContent = library.name || "未命名资源库";
     if (metaNode) metaNode.textContent = `${libraryRoleLabel(kind, library)} · ${Number(library.entryCount) || 0} 条 · 日 → 简中 · 优先级 ${Number(library.priority) || 1}`;
   }
+  if (fileNode) {
+    fileNode.hidden = !fileId;
+    fileNode.textContent = fileId ? `当前文件：${fileId === "__none__" ? "未标注来源" : fileId}` : "";
+  }
+}
+
+/** 库 → 文件 → 条目 的中间层：工作 TM / 主 TM 按翻译文件分开显示。 */
+async function loadLibraryFiles(kind, libraryId) {
+  const locale = kind === "term" ? state.assetLocale : state.memoryLocale;
+  const params = new URLSearchParams({ locale, projectId: state.activeProjectId || "", libraryId });
+  const payload = await api(`/api/library-files?${params}`);
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  if (kind === "tm") state.memoryLibraryFiles = files;
+  return files;
+}
+
+function renderLibraryFiles(kind) {
+  if (kind !== "tm") return;
+  const body = $("#memoryFileBody");
+  if (!body) return;
+  const files = state.memoryLibraryFiles || [];
+  body.innerHTML = files.length ? files.map((file) => {
+    const key = escapeHtml(file.sourceFile || "__none__");
+    const label = file.sourceFile || "未标注来源";
+    const batch = file.batchId ? `${file.batchCount > 1 ? `${file.batchCount} 个批次 · ` : ""}${String(file.batchId).slice(0, 8)}` : "—";
+    return `<tr class="library-row" data-file-key="${key}">
+      <td><strong>${escapeHtml(label)}</strong>${file.sourceFile ? "" : "<small>单句翻译等没有文件名的条目</small>"}</td>
+      <td class="library-count">${Number(file.entryCount) || 0}</td>
+      <td>${escapeHtml(batch)}</td>
+      <td>${escapeHtml(formatLibraryTime(file.lastEntryAt))}</td>
+      <td class="library-actions">
+        <button class="button secondary small" type="button" data-file-action="open" data-key="${key}">打开</button>
+        <button class="button ghost small" type="button" data-file-action="export" data-key="${key}">导出</button>
+        <button class="button ghost small danger" type="button" data-file-action="delete" data-key="${key}">删除该文件草稿</button>
+      </td></tr>`;
+  }).join("") : '<tr><td colspan="5" class="table-empty">这个库里还没有按文件分组的条目</td></tr>';
+  // 文件数据是异步到的：渲染完要重算一次外壳（有没有文件决定停在文件层还是直接进条目），
+  // 否则中途的重绘会按"空文件表"把文件层隐藏掉。
+  renderLibraryShell(kind);
+}
+
+async function openLibraryFile(kind, fileKey) {
+  if (kind !== "tm") return;
+  state.memoryLibraryFile = String(fileKey || "");
+  renderLibraryShell(kind);
+  const search = $("#memorySearch");
+  if (search) search.value = "";
+  await loadLibraryEntries("tm", { append: false });
+}
+
+async function closeLibraryFile(kind) {
+  if (kind !== "tm") return;
+  state.memoryLibraryFile = "";
+  renderLibraryShell(kind);
+  // 先用已有数据把文件列表画出来（切换要立刻生效），刷新在后台做。
+  renderLibraryFiles(kind);
+  loadLibraryFiles(kind, state.memoryLibraryId)
+    .then(() => renderLibraryFiles(kind))
+    .catch(() => {});
+}
+
+/** 删掉某个文件在这个库里产生的条目（工作 TM 的按批次清理）。 */
+async function deleteLibraryFile(kind, fileKey) {
+  const file = (state.memoryLibraryFiles || []).find((item) => (item.sourceFile || "__none__") === fileKey);
+  const label = file?.sourceFile || "未标注来源";
+  const count = Number(file?.entryCount) || 0;
+  const choice = await openChoiceDialog({
+    kicker: "DELETE FILE ENTRIES",
+    title: `删除「${label}」的条目`,
+    summary: `这会删除该文件在这个库里的 ${count} 条条目（例如工作 TM 里这个文件产生的机器译文）。其它文件的条目不受影响。`,
+    options: [
+      { id: "delete", label: `删除这 ${count} 条`, hint: "只删这个文件在这个库里的条目，别的文件不动" },
+      { id: "cancel", label: "取消", hint: "什么都不做" }
+    ]
+  });
+  if (choice !== "delete") return;
+  const locale = state.memoryLocale;
+  await api(`/api/library-entries?locale=${encodeURIComponent(locale)}&kind=${kind}&projectId=${encodeURIComponent(state.activeProjectId)}&libraryId=${encodeURIComponent(state.memoryLibraryId)}&sourceFile=${encodeURIComponent(fileKey)}`, { method: "DELETE" });
+  toast(`已删除「${label}」的 ${count} 条条目`);
+  await loadAssetsSafeRefresh("tm");
+  await closeLibraryFile("tm");
 }
 
 async function loadLibraryEntries(kind, { append = false } = {}) {
@@ -4524,6 +4622,8 @@ async function loadLibraryEntries(kind, { append = false } = {}) {
   const params = new URLSearchParams({ locale, kind, limit: String(ENTRY_PAGE_SIZE), search: entrySearchValue(kind) });
   if (state.activeProjectId) params.set("projectId", state.activeProjectId);
   if (libraryId) params.set("libraryId", libraryId);
+  // TM 库停在文件列表时不取条目；打开某个文件后只取这个文件的行。
+  if (kind === "tm" && state.memoryLibraryFile) params.set("sourceFile", state.memoryLibraryFile);
   if (append) params.set("offset", String(activeEntries(kind).length));
   const payload = await api(`/api/library-entries?${params}`);
   const items = Array.isArray(payload.items) ? payload.items : [];
@@ -4573,17 +4673,32 @@ function renderLibraryEntries(kind) {
     return;
   }
   $("#memoryList").innerHTML = items.length ? items.map((item) => `
-    <div class="asset-row" data-entry-id="${escapeHtml(item.id)}"><div class="asset-row-main"><strong>${escapeHtml(item.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(item.target)}</strong><div class="asset-meta"><span>${escapeHtml(libraryById("tm", item.libraryId)?.name || (item.qualityStatus === "human_approved" ? "人工确认" : item.qualityStatus === "machine_verified" ? "机器译文" : "候选"))}</span><span>${item.qualityStatus === "human_approved" ? "人工确认" : item.qualityStatus === "machine_verified" ? "机器译文" : "候选"}</span>${item.entryKey ? `<span>${escapeHtml(item.entryKey)}</span>` : ""}${item.sourceFile ? `<span>${escapeHtml(item.sourceFile)}</span>` : ""}${item.sourceRow ? `<span>第 ${item.sourceRow} 行</span>` : ""}</div></div><div class="asset-row-actions"><button class="button ghost small" type="button" data-memory-action="edit" data-id="${escapeHtml(item.id)}">编辑</button><button class="button ghost small danger" type="button" data-memory-action="delete" data-id="${escapeHtml(item.id)}">删除</button></div></div>
+    <div class="asset-row" data-entry-id="${escapeHtml(item.id)}"><div class="asset-row-main"><strong>${escapeHtml(item.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(item.target)}</strong><div class="asset-meta"><span>${escapeHtml(libraryById("tm", item.libraryId)?.name || (item.qualityStatus === "human_approved" ? "人工确认" : item.qualityStatus === "machine_verified" ? "机器译文" : "候选"))}</span><span>${item.qualityStatus === "human_approved" ? "人工确认" : item.qualityStatus === "machine_verified" ? "机器译文" : "候选"}</span>${item.entryKey ? `<span>${escapeHtml(item.entryKey)}</span>` : ""}${item.sourceFile ? `<span>${escapeHtml(item.sourceFile)}</span>` : ""}${item.batchId ? `<span>批次 ${escapeHtml(String(item.batchId).slice(0, 8))}</span>` : ""}${item.sourceRow ? `<span>第 ${item.sourceRow} 行</span>` : ""}</div></div><div class="asset-row-actions"><button class="button ghost small" type="button" data-memory-action="edit" data-id="${escapeHtml(item.id)}">编辑</button><button class="button ghost small danger" type="button" data-memory-action="delete" data-id="${escapeHtml(item.id)}">删除</button></div></div>
   `).join("") : `<div class="empty-list">${entriesEmptyText("tm")}</div>`;
 }
 
 async function openLibrary(kind, libraryId) {
   if (kind === "term") state.assetLibraryId = String(libraryId || "");
   else state.memoryLibraryId = String(libraryId || "");
+  // 打开 TM 库先看"来源文件"这一层（工作 TM 的语义就是按文件分开的）；
+  // 术语库没有文件语义，直接进条目。
+  if (kind === "tm") {
+    state.memoryLibraryFile = "";
+    state.memoryLibraryFiles = [];
+    if (state.memoryLibraryId) {
+      try {
+        await loadLibraryFiles("tm", state.memoryLibraryId);
+      } catch (error) {
+        toast(error.message);
+      }
+    }
+    renderLibraryFiles("tm");
+  }
   renderLibraryShell(kind);
   const search = $(kind === "term" ? "#assetSearch" : "#memorySearch");
   if (search) search.value = "";
-  await loadLibraryEntries(kind, { append: false });
+  const showFiles = kind === "tm" && Boolean(state.memoryLibraryId) && (state.memoryLibraryFiles || []).length > 0;
+  if (!showFiles) await loadLibraryEntries(kind, { append: false });
 }
 
 async function closeLibrary(kind) {
@@ -4593,6 +4708,8 @@ async function closeLibrary(kind) {
     state.assetEntryTotal = 0;
   } else {
     state.memoryLibraryId = "";
+    state.memoryLibraryFile = "";
+    state.memoryLibraryFiles = [];
     state.memories = [];
     state.memoryEntryTotal = 0;
   }
@@ -4664,9 +4781,10 @@ function importIntoLibrary(kind, libraryId) {
   openMemoryImportDialog(library.id);
 }
 
-async function exportLibrary(kind, libraryId, button) {
+async function exportLibrary(kind, libraryId, button, sourceFile = "") {
   const library = libraryId ? libraryById(kind, libraryId) : null;
-  const label = library ? library.name : `全部${libraryKindLabel(kind)}`;
+  const fileLabel = sourceFile ? ` · ${sourceFile === "__none__" ? "未标注来源" : sourceFile}` : "";
+  const label = `${library ? library.name : `全部${libraryKindLabel(kind)}`}${fileLabel}`;
   if (button) {
     button.disabled = true;
     button.textContent = "提交中…";
@@ -4678,7 +4796,8 @@ async function exportLibrary(kind, libraryId, button) {
         ...projectPayload(),
         locale: kind === "term" ? state.assetLocale : state.memoryLocale,
         kind,
-        libraryId: libraryId || ""
+        libraryId: libraryId || "",
+        sourceFile: sourceFile || ""
       })
     });
     toast(`「${label}」导出已进入任务中心，跑完在那里下载 Excel`);
@@ -6199,7 +6318,27 @@ function bindEvents() {
     });
   }
   $("#assetBreadcrumbBack").addEventListener("click", () => closeLibrary("term").catch((error) => toast(error.message)));
-  $("#memoryBreadcrumbBack").addEventListener("click", () => closeLibrary("tm").catch((error) => toast(error.message)));
+  // 面包屑返回是"退一步"：在文件层里先退到文件列表，在文件列表里才退到库列表。
+  $("#memoryBreadcrumbBack").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    // 切换期间禁用：连点两次会连跳两级，既容易点错也会让页面处于中间状态。
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      if (state.memoryLibraryFile) await closeLibraryFile("tm");
+      else await closeLibrary("tm");
+    } catch (error) { toast(error.message); }
+    finally { button.disabled = false; }
+  });
+  $("#memoryFileBody").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-file-action]");
+    if (!button) return;
+    const key = button.dataset.key || "";
+    if (button.dataset.fileAction === "open") openLibraryFile("tm", key).catch((error) => toast(error.message));
+    else if (button.dataset.fileAction === "export") {
+      exportLibrary("tm", state.memoryLibraryId, button, key);
+    } else if (button.dataset.fileAction === "delete") deleteLibraryFile("tm", key).catch((error) => toast(error.message));
+  });
   $("#assetList").addEventListener("click", (event) => {
     const button = event.target.closest("[data-term-action]");
     if (!button) return;

@@ -25,10 +25,23 @@ const server = http.createServer(async (req, res) => {
   let data = [];
   if (req.method === "GET" && url.pathname.startsWith("/items/")) {
     requests.push({ method: "GET", collection, query: url.search, fields });
-    if (url.searchParams.get("groupBy") === "library_id") {
-      data = collection === "terms_zh_cn"
-        ? [{ library_id: "term-1", count: "5856", max: { date_created: "2026-09-18T13:38:29Z" } }]
-        : [{ library_id: "tm-master", count: "8012", max: { date_created: "2026-09-18T10:14:14Z" } }];
+    const grouped = url.searchParams.getAll("groupBy[]");
+    if (grouped.length) {
+      if (grouped.includes("library_id")) {
+        // 库统计：术语只按库分组；TM 还按来源文件分组，用来算"几个文件"。
+        data = collection === "terms_zh_cn"
+          ? [{ library_id: "term-1", count: "5856", max: { date_created: "2026-09-18T13:38:29Z" } }]
+          : [
+            { library_id: "tm-master", source_file: "Asia_batch18_new.xlsx_zho-CN.mqxliff", count: "60", max: { date_created: "2026-09-18T10:14:14Z" } },
+            { library_id: "tm-master", source_file: "Trophy.xlsx_zho-CN.mqxliff", count: "6", max: { date_created: "2026-09-18T09:00:00Z" } }
+          ];
+      } else {
+        // 文件清单：按 source_file + batch_id 分组。
+        data = [
+          { source_file: "Asia_batch18_new.xlsx_zho-CN.mqxliff", batch_id: "batch-a", count: "60", max: { date_created: "2026-09-18T10:14:14Z" } },
+          { source_file: "Asia_batch18_new.xlsx_zho-CN.mqxliff", batch_id: "batch-b", count: "3", max: { date_created: "2026-09-18T11:00:00Z" } }
+        ];
+      }
     } else if (fields === "id,aliases") {
       data = termRows.map((row) => ({ id: row.id, aliases: row.aliases }));
     } else if (url.searchParams.get("aggregate[count]") !== null) {
@@ -69,6 +82,7 @@ const {
   deleteDirectusMemory,
   getDirectusAsset,
   getDirectusLibraryStats,
+  listDirectusLibraryFiles,
   listDirectusLibraryEntries,
   updateDirectusMemory
 } = await import("../src/directus-store.mjs");
@@ -79,10 +93,25 @@ test("库统计按 library_id 聚合出条目数与最新条目时间", async ()
   assert.equal(stats.get("term-1").termCount, 5856);
   assert.equal(stats.get("term-1").entryCount, 5856);
   assert.equal(stats.get("term-1").lastEntryAt, "2026-09-18T13:38:29Z");
-  assert.equal(stats.get("tm-master").memoryCount, 8012);
-  const grouped = requests.find((call) => call.query.includes("groupBy=library_id"));
+  // TM 侧一并按来源文件分组：条目数是各文件之和，"几个文件"取组数。
+  assert.equal(stats.get("tm-master").memoryCount, 66);
+  assert.equal(stats.get("tm-master").fileCount, 2);
+  assert.equal(stats.get("tm-master").latestFile, "Asia_batch18_new.xlsx_zho-CN.mqxliff");
+  const grouped = requests.find((call) => call.query.includes("groupBy%5B%5D=library_id"));
   assert.ok(grouped.query.includes("aggregate%5Bcount%5D=*"), "要有条目数聚合");
   assert.ok(grouped.query.includes("aggregate%5Bmax%5D=date_created"), "要有最新条目时间聚合");
+});
+
+test("文件清单把同一文件的多个批次合并成一行，按最近更新排序", async () => {
+  requests.length = 0;
+  const files = await listDirectusLibraryFiles({ locale: "zh-CN", projectId: "project-a", libraryId: "tm-master" });
+  assert.equal(files.length, 1);
+  assert.equal(files[0].sourceFile, "Asia_batch18_new.xlsx_zho-CN.mqxliff");
+  assert.equal(files[0].entryCount, 63, "两个批次的条目要相加");
+  assert.equal(files[0].batchCount, 2);
+  assert.equal(files[0].lastEntryAt, "2026-09-18T11:00:00Z");
+  const query = requests.find((call) => call.query.includes("groupBy%5B%5D=source_file"));
+  assert.ok(query.query.includes("filter%5Blibrary_id%5D%5B_eq%5D=tm-master"), "文件清单要限定在打开的库里");
 });
 
 test("库条目列表按库过滤、分页并映射术语/TM 两种字段", async () => {

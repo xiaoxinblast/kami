@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { calculateQaScore, presentAiQaIssues } from "../src/qa.mjs";
-import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "../src/translation-memory.mjs";
+import { narrowByDomain, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "../src/translation-memory.mjs";
 
 test("翻译记忆检索优先同义近似且已验证的译例", () => {
   const ranked = rankTranslationMemories("高级通行证现已开放购买", [
@@ -127,4 +127,33 @@ test("空池不会被误报成放宽", () => {
   const { items, relaxed } = narrowByDomain([], "marketing");
   assert.deepEqual(items, []);
   assert.equal(relaxed, false, "本来就没有资产，不是领域收窄造成的");
+});
+
+test("工作 TM 的机器草稿按文件隔离：只认本文件（或同批次）的草稿", () => {
+  const memories = [
+    { id: "human", qualityStatus: "human_approved", sourceFile: "别的文件.xlsx", batchId: "b-other" },
+    { id: "same-file", qualityStatus: "machine_verified", sourceFile: "本次文件.xlsx", batchId: "b-old" },
+    { id: "other-file", qualityStatus: "machine_verified", sourceFile: "别的文件.xlsx", batchId: "b-other" },
+    { id: "same-batch", qualityStatus: "machine_verified", sourceFile: "", batchId: "b-now" }
+  ];
+  const scoped = scopeMachineDraftsToFile(memories, { sourceFile: "本次文件.xlsx", batchId: "b-now" });
+  assert.deepEqual(scoped.map((item) => item.id), ["human", "same-file", "same-batch"]);
+  // 别的文件的机器草稿被挡掉：它没有人工确认，也常和当前文件的设定冲突。
+  assert.equal(scoped.some((item) => item.id === "other-file"), false);
+});
+
+test("当前翻译没有来源信息时不隔离，避免把参考清空", () => {
+  const memories = [
+    { id: "a", qualityStatus: "machine_verified", sourceFile: "别的文件.xlsx", batchId: "b-other" }
+  ];
+  assert.equal(scopeMachineDraftsToFile(memories, {}).length, 1);
+  assert.equal(scopeMachineDraftsToFile(memories, { sourceFile: "", batchId: "" }).length, 1);
+});
+
+test("同一文件重跑（批次不同）仍然认自己上一次的机器译文", () => {
+  const memories = [
+    { id: "old-run", qualityStatus: "machine_verified", sourceFile: "本次文件.xlsx", batchId: "b-old" }
+  ];
+  const scoped = scopeMachineDraftsToFile(memories, { sourceFile: "本次文件.xlsx", batchId: "b-new" });
+  assert.deepEqual(scoped.map((item) => item.id), ["old-run"]);
 });

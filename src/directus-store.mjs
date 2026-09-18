@@ -853,28 +853,33 @@ async function aliasMatchIds(locale, projectId, needle) {
   return cached.entries.filter((entry) => entry.text.includes(query)).map((entry) => entry.id).slice(0, 200);
 }
 
-function applyLibraryEntryFilters(params, { projectId = "", libraryId = "", search = "", aliasIds = [] } = {}) {
+function applyLibraryEntryFilters(params, { projectId = "", libraryId = "", sourceFile = "", search = "", aliasIds = [] } = {}) {
   let group = 0;
   const nextGroup = () => `filter[_and][${group++}]`;
   if (projectId) params.set(`${nextGroup()}[project_id][_eq]`, String(projectId));
   if (libraryId) params.set(`${nextGroup()}[library_id][_eq]`, String(libraryId));
+  // 工作 TM 按文件隔离后要能只看某个文件的行；"未标注来源"用 _empty 取空文件名。
+  if (sourceFile === "__none__") params.set(`${nextGroup()}[source_file][_empty]`, "true");
+  else if (sourceFile) params.set(`${nextGroup()}[source_file][_eq]`, String(sourceFile));
   if (search) {
     const base = nextGroup();
     params.set(`${base}[_or][0][source][_icontains]`, String(search));
     params.set(`${base}[_or][1][target][_icontains]`, String(search));
-    if (aliasIds.length) params.set(`${base}[_or][2][id][_in]`, aliasIds.join(","));
+    // 文件名也参与搜索：几千条工作 TM 草稿里"只想看这个文件"是最常见的诉求。
+    params.set(`${base}[_or][2][source_file][_icontains]`, String(search));
+    if (aliasIds.length) params.set(`${base}[_or][3][id][_in]`, aliasIds.join(","));
   }
   return params;
 }
 
 /** 术语库 / 记忆库页的条目列表：按库过滤 + 搜索 + 分页（limit<=0 取全量，供导出用）。 */
-export async function listDirectusLibraryEntries({ locale, kind = "term", projectId = "", libraryId = "", search = "", limit = 100, offset = 0 } = {}) {
+export async function listDirectusLibraryEntries({ locale, kind = "term", projectId = "", libraryId = "", sourceFile = "", search = "", limit = 100, offset = 0 } = {}) {
   assertLocale(locale);
   const terms = kind !== "tm";
   const collection = terms ? collectionFor(locale) : memoryCollectionFor(locale);
   const fields = terms ? TERM_ENTRY_FIELDS : MEMORY_ENTRY_FIELDS;
   const aliasIds = terms && search ? await aliasMatchIds(locale, projectId, search) : [];
-  const filters = { projectId, libraryId, search, aliasIds };
+  const filters = { projectId, libraryId, sourceFile: terms ? "" : sourceFile, search, aliasIds };
   const countParams = applyLibraryEntryFilters(new URLSearchParams({ "aggregate[count]": "*" }), filters);
   const countResult = await request(`/items/${collection}?${countParams}`);
   const total = Number(countResult?.[0]?.count ?? 0);
@@ -911,29 +916,72 @@ function toMemoryEntry(item) {
 /** 库列表要的实时条目数 / 最新条目时间：一次 groupBy 聚合拿全项目的库分组。 */
 export async function getDirectusLibraryStats(locale, projectId = "") {
   assertLocale(locale);
-  const read = async (collection) => {
-    const params = new URLSearchParams({ "aggregate[count]": "*", "aggregate[max]": "date_created", groupBy: "library_id" });
+  const read = async (collection, withFiles = false) => {
+    const params = new URLSearchParams({ "aggregate[count]": "*", "aggregate[max]": "date_created" });
+    params.append("groupBy[]", "library_id");
+    // TM 一起按来源文件分组：库列表要显示"这个工作 TM 里有多少个文件"。
+    if (withFiles) params.append("groupBy[]", "source_file");
     if (projectId) params.set("filter[project_id][_eq]", String(projectId));
     const rows = await request(`/items/${collection}?${params}`);
     return rows;
   };
   const stats = new Map();
-  const [termRows, memoryRows] = await Promise.all([read(collectionFor(locale)), read(memoryCollectionFor(locale))]);
+  const [termRows, memoryRows] = await Promise.all([read(collectionFor(locale)), read(memoryCollectionFor(locale), true)]);
   for (const [kind, rows] of [["term", termRows], ["tm", memoryRows]]) {
     for (const row of rows || []) {
       const libraryId = row.library_id == null ? "" : String(row.library_id);
       if (!libraryId) continue;
-      const bucket = stats.get(libraryId) || { entryCount: 0, termCount: 0, memoryCount: 0, lastEntryAt: "" };
+      const bucket = stats.get(libraryId) || { entryCount: 0, termCount: 0, memoryCount: 0, lastEntryAt: "", fileCount: 0, latestFile: "" };
       const count = Number(row.count) || 0;
       bucket.entryCount += count;
       if (kind === "term") bucket.termCount += count;
-      else bucket.memoryCount += count;
+      else {
+        bucket.memoryCount += count;
+        // 每个分组就是"库 × 来源文件"：组数即文件数，时间最新的那个当作最近文件。
+        if (row.source_file) {
+          bucket.fileCount += 1;
+          const stamp = row.max?.date_created || "";
+          if (stamp >= (bucket.latestFileAt || "")) {
+            bucket.latestFileAt = stamp;
+            bucket.latestFile = String(row.source_file);
+          }
+        }
+      }
       const stamp = row.max?.date_created || "";
       if (stamp && stamp > bucket.lastEntryAt) bucket.lastEntryAt = stamp;
       stats.set(libraryId, bucket);
     }
   }
   return stats;
+}
+
+/**
+ * 工作 TM / 主 TM 下的"来源文件"清单：库页面第三层用。
+ * 按 source_file + batch_id 分组，合并成"每个文件多少条、几个批次、最近什么时候"。
+ */
+export async function listDirectusLibraryFiles({ locale, projectId = "", libraryId = "" } = {}) {
+  assertLocale(locale);
+  const params = new URLSearchParams({ "aggregate[count]": "*", "aggregate[max]": "date_created" });
+  params.append("groupBy[]", "source_file");
+  params.append("groupBy[]", "batch_id");
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  if (libraryId) params.set("filter[library_id][_eq]", String(libraryId));
+  const rows = await request(`/items/${memoryCollectionFor(locale)}?${params}`, { timeoutMs: 60_000 });
+  const groups = new Map();
+  for (const row of rows || []) {
+    const sourceFile = row.source_file == null ? "" : String(row.source_file);
+    const key = sourceFile || "__none__";
+    const group = groups.get(key) || { sourceFile, entryCount: 0, batchCount: 0, lastEntryAt: "", batchId: "" };
+    group.entryCount += Number(row.count) || 0;
+    if (row.batch_id) group.batchCount += 1;
+    const stamp = row.max?.date_created || "";
+    if (stamp >= group.lastEntryAt) {
+      group.lastEntryAt = stamp;
+      if (row.batch_id) group.batchId = String(row.batch_id);
+    }
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((left, right) => String(right.lastEntryAt).localeCompare(String(left.lastEntryAt)));
 }
 
 /**

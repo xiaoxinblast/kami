@@ -14,6 +14,7 @@ import {
   getDirectusAssets,
   getDirectusAssetStats,
   getDirectusLibraryStats,
+  listDirectusLibraryFiles,
   listDirectusLibraryEntries,
   updateDirectusMemory,
   getDirectusMetadata,
@@ -612,10 +613,10 @@ async function getJsonAsset(locale, id) {
 }
 
 /** 术语库 / 记忆库页的条目列表（JSON 存储）：与 Directus 实现同一套过滤与分页口径。 */
-async function listJsonLibraryEntries({ locale, kind = "term", projectId = "", libraryId = "", search = "", limit = 100, offset = 0 } = {}) {
+async function listJsonLibraryEntries({ locale, kind = "term", projectId = "", libraryId = "", sourceFile = "", search = "", limit = 100, offset = 0 } = {}) {
   assertLocale(locale);
   const needle = String(search || "").trim().toLocaleLowerCase();
-  const matches = (item) => (!needle || [item.source, item.target, ...(kind === "tm" ? [item.entryKey] : item.aliases || [])]
+  const matches = (item) => (!needle || [item.source, item.target, ...(kind === "tm" ? [item.entryKey, item.sourceFile] : item.aliases || [])]
     .some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
   const rows = kind === "tm"
     ? (await readJson(join(ROOT, "memories", `${locale}.json`), [])).map((item) => ({ ...item, locale }))
@@ -623,6 +624,7 @@ async function listJsonLibraryEntries({ locale, kind = "term", projectId = "", l
   const filtered = rows
     .filter((item) => (!projectId || String(item.projectId || "") === String(projectId)))
     .filter((item) => (!libraryId || String(item.libraryId || "") === String(libraryId)))
+    .filter((item) => (!sourceFile || (sourceFile === "__none__" ? !String(item.sourceFile || "").trim() : String(item.sourceFile || "") === sourceFile)))
     .filter(matches)
     .sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")));
   const start = Math.max(0, Math.trunc(Number(offset)) || 0);
@@ -637,13 +639,28 @@ async function getJsonLibraryStats(locale, projectId = "") {
   ]);
   const stats = new Map();
   const collect = (rows, kind) => {
+    const filesByLibrary = new Map();
     for (const row of rows) {
       const libraryId = String(row.libraryId || "");
       if (!libraryId || (projectId && String(row.projectId || "") !== String(projectId))) continue;
-      const bucket = stats.get(libraryId) || { entryCount: 0, termCount: 0, memoryCount: 0, lastEntryAt: "" };
+      const bucket = stats.get(libraryId) || { entryCount: 0, termCount: 0, memoryCount: 0, lastEntryAt: "", fileCount: 0, latestFile: "" };
       bucket.entryCount += 1;
       if (kind === "term") bucket.termCount += 1;
-      else bucket.memoryCount += 1;
+      else {
+        bucket.memoryCount += 1;
+        const file = String(row.sourceFile || "").trim();
+        if (file) {
+          const files = filesByLibrary.get(libraryId) || new Set();
+          files.add(file);
+          filesByLibrary.set(libraryId, files);
+          bucket.fileCount = files.size;
+          const stamp = String(row.createdAt || row.updatedAt || "");
+          if (stamp >= (bucket.latestFileAt || "")) {
+            bucket.latestFileAt = stamp;
+            bucket.latestFile = file;
+          }
+        }
+      }
       const stamp = String(row.createdAt || row.updatedAt || "");
       if (stamp > bucket.lastEntryAt) bucket.lastEntryAt = stamp;
       stats.set(libraryId, bucket);
@@ -652,6 +669,30 @@ async function getJsonLibraryStats(locale, projectId = "") {
   collect(terms, "term");
   collect(memories, "tm");
   return stats;
+}
+
+async function listJsonLibraryFiles({ locale, projectId = "", libraryId = "" } = {}) {
+  assertLocale(locale);
+  const rows = await readJson(join(ROOT, "memories", `${locale}.json`), []);
+  const groups = new Map();
+  for (const row of rows) {
+    if (projectId && String(row.projectId || "") !== String(projectId)) continue;
+    if (libraryId && String(row.libraryId || "") !== String(libraryId)) continue;
+    const sourceFile = String(row.sourceFile || "").trim();
+    const key = sourceFile || "__none__";
+    const group = groups.get(key) || { sourceFile, entryCount: 0, batchCount: 0, lastEntryAt: "", batchId: "", batches: new Set() };
+    group.entryCount += 1;
+    if (row.batchId) group.batches.add(String(row.batchId));
+    const stamp = String(row.createdAt || row.updatedAt || "");
+    if (stamp >= group.lastEntryAt) {
+      group.lastEntryAt = stamp;
+      if (row.batchId) group.batchId = String(row.batchId);
+    }
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .map(({ batches, ...group }) => ({ ...group, batchCount: batches ? batches.size : group.batchCount }))
+    .sort((left, right) => String(right.lastEntryAt).localeCompare(String(left.lastEntryAt)));
 }
 
 async function updateJsonMemory(locale, id, patch = {}) {
@@ -1671,6 +1712,11 @@ export async function listLibraryEntries(options) {
 /** 库列表的实时条目数与最新条目时间，按 library_id 聚合。 */
 export async function getLibraryStats(locale, projectId) {
   return usesDirectus() ? getDirectusLibraryStats(locale, projectId) : getJsonLibraryStats(locale, projectId);
+}
+
+/** TM 库下的来源文件清单（库 → 文件 → 条目 的中间层）。 */
+export async function listLibraryFiles(options) {
+  return usesDirectus() ? listDirectusLibraryFiles(options) : listJsonLibraryFiles(options);
 }
 
 /** 批量删除库内条目（删库时二选一里的"连条目一起删"）。 */

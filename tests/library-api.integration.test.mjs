@@ -64,6 +64,7 @@ test("库页面能用：条目按库过滤、条目编辑删除、库导出、�
     const tmEntries = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}&limit=50`);
     assert.equal(tmEntries.total, 1);
     assert.equal(tmEntries.items[0].libraryId, masterTm.id);
+    assert.equal(tmEntries.items[0].sourceFile, "库接口测试.xlsx", "条目要记住来自哪个翻译文件");
     const memoryId = tmEntries.items[0].id;
     const updated = await request(`${appUrl}/api/memories/${encodeURIComponent(memoryId)}?locale=zh-CN`, {
       method: "PATCH",
@@ -74,6 +75,48 @@ test("库页面能用：条目按库过滤、条目编辑删除、库导出、�
     await request(`${appUrl}/api/memories/${encodeURIComponent(memoryId)}?locale=zh-CN`, { method: "DELETE" });
     const afterDelete = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}&limit=50`);
     assert.equal(afterDelete.total, 0);
+
+    // 3b) 库 → 文件 → 条目：同一个库里按翻译文件分开，导出/清理都能只针对某个文件
+    const commitTm = (filename, candidates) => request(`${appUrl}/api/tm-import/commit`, {
+      method: "POST",
+      body: JSON.stringify({ batchId: randomUUID(), projectId, filename, styleEvidence: false, tmLibraryId: masterTm.id, candidates })
+    });
+    await commitTm("Asia_batch18_new.xlsx_zho-CN.mqxliff", [
+      { source: "崩兆の片", target: "崩兆碎片", locale: "zh-CN", assetType: "memory", selected: true },
+      { source: "幽骨の礫", target: "幽骨砾石", locale: "zh-CN", assetType: "memory", selected: true }
+    ]);
+    await commitTm("Trophy.xlsx_zho-CN.mqxliff", [
+      { source: "トロフィー", target: "奖杯", locale: "zh-CN", assetType: "memory", selected: true }
+    ]);
+    const files = await request(`${appUrl}/api/library-files?locale=zh-CN&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}`);
+    assert.equal(files.files.length, 2, "两个翻译文件应该分成两组");
+    const batch18 = files.files.find((file) => file.sourceFile === "Asia_batch18_new.xlsx_zho-CN.mqxliff");
+    assert.equal(batch18.entryCount, 2);
+    assert.ok(batch18.batchId, "文件组要带上它来自哪个批次");
+    const scopedEntries = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}&sourceFile=${encodeURIComponent("Asia_batch18_new.xlsx_zho-CN.mqxliff")}&limit=50`);
+    assert.equal(scopedEntries.total, 2, "只取这个文件的条目");
+
+    const fileExport = await request(`${appUrl}/api/library-export`, {
+      method: "POST",
+      body: JSON.stringify({ locale: "zh-CN", projectId, kind: "tm", libraryId: masterTm.id, sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff" })
+    });
+    let fileTask = null;
+    const fileDeadline = Date.now() + 60_000;
+    while (Date.now() < fileDeadline) {
+      fileTask = await request(`${appUrl}/api/background-tasks/${encodeURIComponent(fileExport.taskId)}`);
+      if (["completed", "failed"].includes(fileTask.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    assert.equal(fileTask?.status, "completed");
+    assert.equal(fileTask.payload.sourceFile, "Asia_batch18_new.xlsx_zho-CN.mqxliff");
+    assert.equal(fileTask.payload.count, 2, "文件级导出只导这个文件");
+    await request(`${appUrl}/api/background-tasks/${encodeURIComponent(fileExport.taskId)}`, { method: "DELETE" });
+
+    const removed = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}&sourceFile=${encodeURIComponent("Asia_batch18_new.xlsx_zho-CN.mqxliff")}`, { method: "DELETE" });
+    assert.equal(removed.deleted, 2, "按文件清理只删这个文件的机器草稿");
+    const remaining = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}&limit=50`);
+    assert.equal(remaining.total, 1, "别的文件的条目不受影响");
+    assert.equal(remaining.items[0].sourceFile, "Trophy.xlsx_zho-CN.mqxliff");
 
     // 4) 库导出：后台任务 → 下载 Excel → 列头与条目数正确
     const exportStarted = await request(`${appUrl}/api/library-export`, {

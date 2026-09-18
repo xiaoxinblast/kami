@@ -1481,6 +1481,8 @@ dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 36px); 
 .library-badge.working { color: #7b5217; background: #fff0d5; }
 .library-badge.reference { color: #4a5568; background: #eceff4; }
 .library-badge.merge { color: #6b7568; background: #eef1ea; }
+.library-badge.files { margin-left: 6px; color: #3f5b7a; background: #e8eff7; }
+.library-crumb { color: #3f5b7a !important; }
 .library-toggle { display: inline-flex; align-items: center; cursor: pointer; }
 .library-toggle input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .library-toggle span { position: relative; display: inline-block; width: 34px; height: 19px; border-radius: 999px; background: #d7ddd4; transition: .15s; }

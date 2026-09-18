@@ -302,6 +302,31 @@ export function splitReferenceAuthority(references = []) {
 }
 
 /**
+ * 工作 TM 的机器草稿按文件隔离。
+ *
+ * 工作 TM 记的是"某个文件翻译过程中机器自己产出的译文"，它的价值是本文件内的一致性：
+ * 同一个文件重跑时沿用自己上一次的机器译文，术语、语气、人名不会漂。跨文件复用这些草稿
+ * 既没有人工确认，也常和另一个文件的设定冲突，因此默认不参与检索。
+ *
+ *   - 人工批准的记忆（主 TM、人工导入）永不隔离，它们是跨文件的权威参考；
+ *   - 机器草稿只保留 `source_file` 与当前文件相同、或（没有文件名时）`batchId` 相同的那部分；
+ *   - 当前这次翻译自身没有来源信息（例如单句翻译没带文件名）时不做隔离，避免把参考清空。
+ */
+export function scopeMachineDraftsToFile(memories = [], { sourceFile = "", batchId = "" } = {}) {
+  const list = Array.isArray(memories) ? memories : [];
+  const file = normalizeMemoryText(sourceFile || "");
+  const batch = String(batchId || "").trim();
+  if (!file && !batch) return list;
+  return list.filter((memory) => {
+    if (memory?.qualityStatus === "human_approved") return true;
+    const memoryFile = normalizeMemoryText(memory?.sourceFile || "");
+    if (file && memoryFile) return memoryFile === file;
+    const memoryBatch = String(memory?.batchId || "").trim();
+    return Boolean(batch && memoryBatch && memoryBatch === batch);
+  });
+}
+
+/**
  * 领域是**收窄**维度，不是必要条件。记忆、QA 案例与风格证据都按
  * `item.domain === domain || item.domain === "general"` 严格过滤，而本项目
  * 99% 资产都归在 game 下（风格规范 7/7、记忆 592/597、证据 1951/1966）——

@@ -326,7 +326,7 @@
             <div class="panel-head"><div><span class="card-kicker">TRANSLATION MEMORY LIBRARIES</span><h2>记忆库 TM</h2><p class="panel-caption">主 TM 接收人工确认译文，工作 TM 接收通过 QA 的机器译文，参考 TM 只读参与检索。库设置与「项目设置 → 资源库」同步。</p></div><div class="asset-count" id="memoryCount">0 条</div></div>
             <div class="library-breadcrumb" id="memoryBreadcrumb" hidden>
               <button class="button ghost small" type="button" id="memoryBreadcrumbBack">← 返回库列表</button>
-              <div><strong id="memoryBreadcrumbName">主 TM</strong><small id="memoryBreadcrumbMeta"></small></div>
+              <div><strong id="memoryBreadcrumbName">主 TM</strong><small id="memoryBreadcrumbMeta"></small><small class="library-crumb" id="memoryBreadcrumbFile" hidden></small></div>
             </div>
             <div id="memoryLibraryView">
               <div class="library-table-wrap">
@@ -335,7 +335,16 @@
                   <tbody id="memoryLibraryBody"></tbody>
                 </table>
               </div>
-              <p class="isolation-note">导入人工 TM 时先选目标库（行内「导入」）；主 TM 收人工确认译文，工作 TM 收机器译文，参考 TM 只参与检索。</p>
+              <p class="isolation-note">导入人工 TM 时先选目标库（行内「导入」）；主 TM 收人工确认译文，工作 TM 收机器译文并按翻译文件分开，参考 TM 只参与检索。</p>
+            </div>
+            <div id="memoryFilesView" hidden>
+              <div class="library-table-wrap">
+                <table class="library-table">
+                  <thead><tr><th>来源文件</th><th>条目数</th><th>批次</th><th>最近更新</th><th>操作</th></tr></thead>
+                  <tbody id="memoryFileBody"></tbody>
+                </table>
+              </div>
+              <p class="isolation-note" id="memoryFilesNote">工作 TM 按翻译文件分开：每个文件一批机器译文，只在同一个文件内参与一致性参考；这里的「打开」只看该文件的条目。</p>
             </div>
             <div id="memoryEntryView" hidden>
               <div class="asset-search"><input id="memorySearch" placeholder="搜索日语原文、简体中文译文或条目 ID" /></div>

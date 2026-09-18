@@ -58,9 +58,13 @@ test("记忆库显示总数、按页加载，搜索走服务端", { skip: !proce
         projectId: "project-1",
         libraries: [
           { id: "term-1", projectId: "project-1", name: "术语库", kind: "term_base", role: "reference", enabled: true, priority: 1, entryCount: 1200, lastEntryAt: "2026-09-18T10:00:00Z" },
-          { id: "tm-master", projectId: "project-1", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1, entryCount: 1200, lastEntryAt: "2026-09-18T10:00:00Z" },
-          { id: "tm-working", projectId: "project-1", name: "工作 TM", kind: "translation_memory", role: "working", enabled: true, priority: 2, entryCount: 66, lastEntryAt: "2026-09-18T11:00:00Z" }
+          { id: "tm-master", projectId: "project-1", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1, entryCount: 1200, lastEntryAt: "2026-09-18T10:00:00Z", fileCount: 2, latestFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff" },
+          { id: "tm-working", projectId: "project-1", name: "工作 TM", kind: "translation_memory", role: "working", enabled: true, priority: 2, entryCount: 66, lastEntryAt: "2026-09-18T11:00:00Z", fileCount: 1, latestFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff" }
         ]
+      };
+      else if (url.pathname === "/api/library-files") payload = {
+        libraryId: "tm-master",
+        files: [{ sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff", entryCount: 1200, batchCount: 1, batchId: "23c6e25c-a697-499a-851c-c0d5cd518f1a", lastEntryAt: "2026-09-18T10:00:00Z" }]
       };
       else if (url.pathname === "/api/feedback/pending" || url.pathname === "/api/feedback") payload = [];
       else if (url.pathname === "/api/qa-cases/pending") payload = [];
@@ -75,8 +79,15 @@ test("记忆库显示总数、按页加载，搜索走服务端", { skip: !proce
     assert.match(await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-master"]').textContent(), /主 TM/u);
     assert.match(await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-working"]').textContent(), /工作 TM · 66|66/u);
     await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-master"] [data-library-action="open"]').click();
+    // 第三层：TM 库先进"来源文件"列表，再进条目（工作 TM 是按文件分开的）。
+    await page.waitForSelector('#memoryFileBody .library-row[data-file-key="Asia_batch18_new.xlsx_zho-CN.mqxliff"]');
+    assert.match(await page.locator("#memoryFileBody").textContent(), /Asia_batch18_new\.xlsx_zho-CN\.mqxliff/u);
+    assert.match(await page.locator("#memoryFilesView .isolation-note").textContent(), /按翻译文件分开/u);
+    await page.locator('#memoryFileBody [data-file-action="open"]').click();
     await page.waitForSelector("#memoryList .asset-row");
     assert.equal(memoryQueries.at(-1).get("libraryId"), "tm-master", "条目列表要按打开的库过滤");
+    assert.equal(memoryQueries.at(-1).get("sourceFile"), "Asia_batch18_new.xlsx_zho-CN.mqxliff", "只取这个文件的条目");
+    assert.match(await page.locator("#memoryBreadcrumbFile").textContent(), /当前文件：Asia_batch18_new/u);
 
     assert.equal(await page.locator("#memoryList .asset-row").count(), 3, "第一页只渲染服务端返回的 3 条");
     assert.equal(await page.locator("#memoryCount").textContent(), "已显示 3 / 共 1200 条");

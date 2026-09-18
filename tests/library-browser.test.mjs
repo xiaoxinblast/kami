@@ -26,10 +26,11 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
 
   const calls = [];
   const writes = [];
+  const entryQueries = [];
   const libraries = [
     { id: "term-1", projectId: "project-1", name: "术语库", kind: "term_base", role: "reference", enabled: true, priority: 1, entryCount: 5856, lastEntryAt: "2026-09-18T13:38:29Z" },
-    { id: "tm-master", projectId: "project-1", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1, entryCount: 8012, lastEntryAt: "2026-09-18T10:14:14Z" },
-    { id: "tm-working", projectId: "project-1", name: "工作 TM", kind: "translation_memory", role: "working", enabled: true, priority: 2, entryCount: 66, lastEntryAt: "2026-09-18T12:03:15Z" }
+    { id: "tm-master", projectId: "project-1", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1, entryCount: 8012, lastEntryAt: "2026-09-18T10:14:14Z", fileCount: 2, latestFile: "Asia_Batch15_new.xlsx_zho-CN.mqxliff" },
+    { id: "tm-working", projectId: "project-1", name: "工作 TM", kind: "translation_memory", role: "working", enabled: true, priority: 2, entryCount: 66, lastEntryAt: "2026-09-18T12:03:15Z", fileCount: 1, latestFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff" }
   ];
   const entries = {
     "term-1": [
@@ -37,7 +38,11 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
       { id: "t2", source: "ガード", target: "防御", note: "", libraryId: "term-1", contentTypes: ["item_name"], provenance: "kami-workbench" }
     ],
     "tm-master": [
-      { id: "m1", source: "メンテナンスは明日開始します。", target: "维护明天开始。", libraryId: "tm-master", qualityStatus: "human_approved", entryKey: "ID-1" }
+      { id: "m1", source: "メンテナンスは明日開始します。", target: "维护明天开始。", libraryId: "tm-master", qualityStatus: "human_approved", entryKey: "ID-1", sourceFile: "Asia_Batch15_new.xlsx_zho-CN.mqxliff" }
+    ],
+    "tm-working": [
+      { id: "w1", source: "崩兆の片", target: "崩兆碎片", libraryId: "tm-working", qualityStatus: "machine_verified", sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff", batchId: "23c6e25c-a697-499a-851c-c0d5cd518f1a" },
+      { id: "w2", source: "幽骨の礫", target: "幽骨砾石", libraryId: "tm-working", qualityStatus: "machine_verified", sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff", batchId: "23c6e25c-a697-499a-851c-c0d5cd518f1a" }
     ]
   };
   try {
@@ -72,8 +77,18 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
       }
       if (path === "/api/library-entries" && method === "GET") {
         const libraryId = url.searchParams.get("libraryId") || "";
-        const items = libraryId ? entries[libraryId] || [] : Object.values(entries).flat();
-        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items, total: items.length, kind: url.searchParams.get("kind"), libraryId }) });
+        const sourceFile = url.searchParams.get("sourceFile") || "";
+        entryQueries.push(url.searchParams);
+        let items = libraryId ? entries[libraryId] || [] : Object.values(entries).flat();
+        if (sourceFile) items = items.filter((item) => (item.sourceFile || "") === sourceFile);
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items, total: items.length, kind: url.searchParams.get("kind"), libraryId, sourceFile }) });
+      }
+      if (path === "/api/library-files" && method === "GET") {
+        const libraryId = url.searchParams.get("libraryId");
+        const files = libraryId === "tm-working"
+          ? [{ sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff", entryCount: 2, batchCount: 1, batchId: "23c6e25c-a697-499a-851c-c0d5cd518f1a", lastEntryAt: "2026-09-18T12:03:15Z" }]
+          : [{ sourceFile: "Asia_Batch15_new.xlsx_zho-CN.mqxliff", entryCount: 1, batchCount: 1, batchId: "15aabbcc-1111-2222-3333-444455556666", lastEntryAt: "2026-09-18T10:14:14Z" }];
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ libraryId, files }) });
       }
       if (path === "/api/library-entries" && method === "DELETE") {
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ deleted: 2 }) });
@@ -201,6 +216,9 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
     // 提交后弹窗要能关掉（关掉不影响后台任务），否则挡住后面的页面。
     await page.locator("#assetPreflightClose").click();
     await page.waitForFunction(() => document.querySelector("#assetPreflightDialog")?.open === false);
+    // 后台导入任务完成时会把界面切回它出发的页面（术语库）。等它切完再往下走，
+    // 否则这次切换会正好砸在后面的记忆库步骤中间，把文件层"藏"起来。
+    await page.waitForFunction(() => document.querySelector("#view-assets")?.classList.contains("active"), null, { timeout: 30_000 });
 
     // 记忆库页：库列表显示主 TM / 工作 TM 与各自条目数
     await page.locator('.nav-item[data-view="memories"]').click();
@@ -213,6 +231,52 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/library-list-tm.png`, animations: "disabled" });
     }
+
+    // 第三层：工作 TM → 来源文件 → 条目。每个文件的机器草稿是分开的。
+    const workingRow = page.locator('#memoryLibraryBody .library-row[data-library-id="tm-working"]');
+    assert.match(await workingRow.textContent(), /1 个文件/u, "TM 库行要显示按几个翻译文件分开");
+    await workingRow.locator('[data-library-action="open"]').click();
+    await page.waitForSelector('#memoryFileBody .library-row[data-file-key="Asia_batch18_new.xlsx_zho-CN.mqxliff"]');
+    const fileRow = page.locator('#memoryFileBody .library-row[data-file-key="Asia_batch18_new.xlsx_zho-CN.mqxliff"]');
+    assert.match(await fileRow.textContent(), /Asia_batch18_new\.xlsx_zho-CN\.mqxliff/u);
+    assert.match(await fileRow.textContent(), /23c6e25c/u, "文件行要显示它来自哪个批次");
+    assert.match(await page.locator("#memoryFilesView .isolation-note").textContent(), /按翻译文件分开/u);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/library-files-tm.png`, animations: "disabled" });
+    }
+    await fileRow.locator('[data-file-action="export"]').click();
+    await page.waitForFunction(() => document.querySelector("#toast")?.classList.contains("show"));
+    const fileExport = writes.filter((call) => call.path === "/api/library-export").at(-1);
+    assert.equal(fileExport.body.sourceFile, "Asia_batch18_new.xlsx_zho-CN.mqxliff", "文件级导出只导这个文件");
+    assert.equal(fileExport.body.libraryId, "tm-working");
+    await fileRow.locator('[data-file-action="open"]').click();
+    await page.waitForSelector("#memoryList .asset-row");
+    assert.equal(entryQueries.at(-1).get("libraryId"), "tm-working");
+    assert.equal(entryQueries.at(-1).get("sourceFile"), "Asia_batch18_new.xlsx_zho-CN.mqxliff", "只取这个文件的条目");
+    assert.match(await page.locator("#memoryList .asset-row").first().textContent(), /崩兆の片/u);
+    assert.match(await page.locator("#memoryList .asset-row").first().textContent(), /批次 23c6e25c/u);
+    assert.match(await page.locator("#memoryBreadcrumbFile").textContent(), /当前文件：Asia_batch18_new/u);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/library-file-entries.png`, animations: "disabled" });
+    }
+    // 面包屑是"退一步"：先回文件列表，再回库列表。
+    await page.locator("#memoryBreadcrumbBack").click();
+    await page.waitForSelector('#memoryFileBody .library-row[data-file-key="Asia_batch18_new.xlsx_zho-CN.mqxliff"]');
+    assert.equal(await page.locator("#memoryEntryView").isHidden(), true);
+    // 等文件层真正渲染出来再点下一次返回，否则可能点在还在切换中的按钮上。
+    await page.waitForFunction(() => {
+      const files = document.querySelector("#memoryFilesView");
+      const entries = document.querySelector("#memoryEntryView");
+      return files && !files.hidden && entries && entries.hidden;
+    });
+    assert.equal(await page.locator("#memoryBreadcrumbFile").isHidden(), true, "回到文件列表后不再显示当前文件");
+    // 连点两下会连跳两级（真实用户也可能这么点），这里只要最终回到库列表就算通过。
+    await page.waitForFunction(() => {
+      const button = document.querySelector("#memoryBreadcrumbBack");
+      return button && !button.disabled;
+    });
+    await page.locator("#memoryBreadcrumbBack").click();
+    await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-working"]');
 
     // 导出的任务行要能直接下载（库导出复用 batch_export 的下载按钮）
     await page.locator('.nav-item[data-view="tasks"]').click();
