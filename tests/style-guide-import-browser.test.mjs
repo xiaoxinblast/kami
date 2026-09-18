@@ -30,6 +30,20 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
   let imported = false;
   let guideStatus = "active";
   const profileActions = [];
+  // 8058 字那种规模：正文尾部放一行唯一标记，只有真的渲染全文才看得到。
+  const guideTail = "尾部校验：省略号一律使用 ……（U+2026 两个一组）。";
+  const guideInstruction = [
+    "# 品牌语气指南",
+    "编译自：品牌指南.docx（权威综合文档）",
+    "====================",
+    "## 1.1 引号",
+    "・中文译文只能用弯引号“”（U+201C / U+201D）",
+    "・绝对禁止使用日式角引号「」（U+300C / U+300D）",
+    ...Array.from({ length: 60 }, (_, index) => `・条款 ${index + 1}：保持克制、不用感叹号。`),
+    "## 1.3 省略号",
+    "・使用中文省略号 ……（U+2026，两个三点省略号为一组）",
+    guideTail
+  ].join("\n");
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     const errors = [];
@@ -61,8 +75,18 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
       else if (url.pathname === "/api/qa-cases/pending") payload = [];
       else if (url.pathname === "/api/style-profiles") payload = imported
         ? {
-          userProfiles: [{ id: "up-1", name: "风格指南 · 品牌语气", instruction: "1. 语气克制。\n2. 不用感叹号。", examples: [], version: 1, evidenceCount: 0, status: guideStatus, updatedAt: "2026-09-18T12:00:00Z" }],
-          styleProfiles: [], evidencePools: [], learningRuns: []
+          // 人工指南是整篇文档：标题、分隔线、正文，末尾还有一行"只有全文才看得到"的校验行。
+          userProfiles: [{
+            id: "up-1", name: "风格指南 · 品牌语气", instruction: guideInstruction,
+            examples: [], version: 1, evidenceCount: 0, status: guideStatus, updatedAt: "2026-09-18T12:00:00Z"
+          }],
+          // 蒸馏出来的才是"一条一条的规则"，这里给 30 条验证不再被截断到 24 条。
+          styleProfiles: [{
+            id: "sp-1", name: "简体中文 marketing 风格", contentType: "marketing", domain: "game",
+            instruction: Array.from({ length: 30 }, (_, index) => `规则 ${index + 1}`).join("\n"),
+            examples: [], version: 1, evidenceCount: 12, status: "draft"
+          }],
+          evidencePools: [], learningRuns: []
         }
         : { userProfiles: [], styleProfiles: [], evidencePools: [], learningRuns: [] };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
@@ -90,17 +114,26 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
     assert.ok(importBody, "应该发起导入请求");
     assert.equal(importBody.filename, "品牌语气.md");
     assert.match(await page.locator("#styleGuideImportNote").textContent(), /已启用：品牌语气\.md · 1234 字/u);
-    await page.waitForSelector("#styleGuidanceList .style-guidance-card.active");
-    assert.match(await page.locator("#styleGuidanceList .style-guidance-card").first().textContent(), /已启用/u);
+    // 蒸馏出来的规则是 draft：这里等规则卡片渲染出来（人工指南不在这个列表里）。
+    await page.waitForSelector("#styleGuidanceList .style-guidance-card");
+    assert.match(await page.locator("#styleGuidanceList .style-guidance-card").first().textContent(), /共 30 条规则/u, "蒸馏规则不再被截断到 24 条");
+    assert.equal(await page.locator("#styleGuidanceList .style-rule-list > div").count(), 30, "30 条规则要全部渲染");
 
     // 人工风格指南模块：哪一份、是否启用、多少字、什么时候更新，一眼可见
     await page.waitForSelector("#manualGuideStatus .manual-guide-card.active");
     const guideText = await page.locator("#manualGuideStatus").textContent();
     assert.match(guideText, /品牌语气/u);
     assert.match(guideText, /正在作为最高优先级风格规则参与翻译/u);
-    const guideInstruction = "1. 语气克制。\n2. 不用感叹号。";
     assert.ok(guideText.includes(`v1 · 正文 ${[...guideInstruction].length} 字`), `模块要显示正文字数：${guideText}`);
     assert.match(guideText, /已启用/u);
+    // 全文：不能只渲染前 1500 字，尾巴那行必须能看到
+    assert.ok(guideText.includes(guideTail), "查看正文要渲染整篇文档，不能截断");
+    assert.equal(await page.locator(".manual-guide-card [data-action=copy-guide]").count(), 1, "要能复制全文");
+    await page.locator(".manual-guide-card .manual-guide-details summary").click();
+    assert.equal(await page.locator(".manual-guide-card .guide-doc").isVisible(), true, "展开后显示全文文档");
+    assert.equal(await page.locator(".manual-guide-card .guide-doc-heading").count() >= 3, true, "按文档结构渲染标题");
+    // 人工指南不再混进"当前规则与待批准规范"的逐条列表
+    assert.equal(await page.locator("#styleGuidanceList .style-guidance-card", { hasText: "风格指南 · 品牌语气" }).count(), 0, "人工指南不按条列在规则表里");
     assert.equal(await page.locator('.manual-guide-card [data-action="disable"]').count(), 1, "启用状态要给停用入口");
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });

@@ -70,14 +70,16 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     await page.locator("#styleGuideFile").setInputFiles({ name: "项目风格指南.md", mimeType: "text/markdown", buffer: Buffer.from("对白使用自然口语。", "utf8") });
     assert.equal(await page.locator("#styleGuideImportButton").isDisabled(), false);
     await page.locator("#styleGuideImportButton").click();
-    await page.getByText("风格指南 · 项目风格指南", { exact: true }).waitFor();
-    await page.getByText("人工上传，正文未被改写", { exact: false }).waitFor();
+    await page.waitForSelector("#styleGuideImportNote.is-ok");
     assert.match(await page.locator("#styleGuideImportNote").textContent(), /已启用：项目风格指南\.md · 9 字/u);
-    assert.equal(await page.locator("#styleGuidanceList .style-state", { hasText: "已启用" }).count(), 1, "人工风格指南导入后直接是启用状态");
     // 顶部的人工风格指南模块要能一眼看出"有、哪一份、已启用"
     const manualGuide = await page.locator("#manualGuideStatus").textContent();
     assert.match(manualGuide, /项目风格指南/u);
     assert.match(manualGuide, /已启用/u);
+    assert.match(manualGuide, /查看正文（全文 9 字/u);
+    // 人工指南是一整篇文档，不再混进"一条一条"的规则列表里
+    assert.equal(await page.locator("#styleGuidanceList .style-guidance-card").count(), 0);
+    assert.match(await page.locator("#styleGuidanceList").textContent(), /人工导入的风格指南在上面的「人工风格指南」模块里单独展示/u);
     if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-guide-upload.png`, animations: "disabled" });
     assert.deepEqual(errors, []);
   } finally {

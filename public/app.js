@@ -3643,7 +3643,39 @@ async function importStyleGuide() {
 }
 
 function splitStyleRules(instruction) {
-  return String(instruction || "").split(/\r?\n|；/u).map((item) => item.trim()).filter(Boolean).slice(0, 24);
+  // 不再截断：规则条数由蒸馏结果决定，界面上少显示几条会让人以为规范只有这些。
+  return String(instruction || "").split(/\r?\n|；/u).map((item) => item.trim()).filter(Boolean);
+}
+
+/**
+ * 人工导入的风格指南是一整篇文档（可能几千字、带 Markdown 标题），不是"一条一条的规则"。
+ * 这里按标题 / 分隔线还原它的结构，正文一行都不丢。
+ */
+function renderStyleGuideDocument(text) {
+  const blocks = [];
+  for (const raw of String(text || "").split(/\r?\n/u)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^[=\-*_]{3,}$/u.test(line)) { blocks.push('<hr class="guide-doc-divider" />'); continue; }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/u);
+    if (heading) {
+      const level = Math.min(4, heading[1].length);
+      blocks.push(`<p class="guide-doc-heading lv${level}">${escapeHtml(heading[2])}</p>`);
+      continue;
+    }
+    blocks.push(`<p>${escapeHtml(line)}</p>`);
+  }
+  return blocks.length ? blocks.join("") : '<p class="guide-doc-empty">正文为空</p>';
+}
+
+/** 人工指南卡片里的"查看正文"：全文渲染（不截断），并给一个复制入口。 */
+function renderManualGuideDocument(instruction) {
+  const text = String(instruction || "");
+  const characters = [...text].length;
+  return `<details class="style-examples manual-guide-details"><summary>查看正文（全文 ${characters} 字，按文档结构展开）</summary>
+    <div class="guide-doc">${renderStyleGuideDocument(text)}</div>
+    <div class="guide-doc-footer"><button class="button ghost small" type="button" data-action="copy-guide">复制全文</button><small>正文按导入时的原文保存，没有被改写</small></div>
+  </details>`;
 }
 
 function formatStyleTime(value) {
@@ -3680,7 +3712,7 @@ function renderManualGuide(profiles) {
     : `<button class="button secondary small" data-action="activate">${status === "draft" ? "批准并启用" : "重新启用"}</button>`;
   container.innerHTML = `<article class="manual-guide-card ${escapeHtml(status)}" data-profile-id="${escapeHtml(current.id)}">
     <div class="manual-guide-head"><div><strong>${escapeHtml(String(current.name || "").replace(/^风格指南 · /u, ""))}</strong><small>${escapeHtml(statusNote)} · v${Number(current.version) || 1} · 正文 ${[...String(current.instruction || "")].length} 字 · 最近更新 ${escapeHtml(formatStyleTime(current.updatedAt))}${history ? ` · 另有 ${history} 个历史版本` : ""}</small></div><span class="style-state ${escapeHtml(status)}">${statusLabel}</span></div>
-    <div class="manual-guide-actions"><details class="style-examples"><summary>查看正文</summary><p class="manual-guide-text">${escapeHtml(String(current.instruction || "").slice(0, 1500))}</p></details>${action}</div>
+    <div class="manual-guide-actions">${renderManualGuideDocument(current.instruction)}${action}</div>
   </article>`;
 }
 
@@ -3698,10 +3730,11 @@ function renderStyleGuidance() {
   const pending = state.styleData?.pending || [];
   const learningRuns = learningRunsFromPayload(profiles);
   const statusFilter = $("#styleStatus")?.value || "";
-  const items = [
-    ...(profiles.userProfiles || []).map((item) => ({ ...item, kind: "user", scopeLabel: "全局风格规范" })),
-    ...(profiles.styleProfiles || []).map((item) => ({ ...item, kind: "style", scopeLabel: `${contentTypeLabel(item.contentType)} · ${item.domain}` }))
-  ].filter((item) => !statusFilter || item.status === statusFilter);
+  // 人工导入的指南是"整篇文档"，它有自己的模块（上面那块，含全文与启用开关）。
+  // 这里只列从语料蒸馏 / 复盘出来的规则——它们才是真正一条一条的规则。
+  const items = (profiles.styleProfiles || [])
+    .map((item) => ({ ...item, kind: "style", scopeLabel: `${contentTypeLabel(item.contentType)} · ${item.domain}` }))
+    .filter((item) => !statusFilter || item.status === statusFilter);
   const activeCount = [...(profiles.userProfiles || []), ...(profiles.styleProfiles || [])].filter((item) => item.status === "active").length;
   $("#styleGuidanceCount").textContent = `${activeCount} 条启用 · ${items.length} 条显示`;
   renderManualGuide(profiles);
@@ -3721,17 +3754,27 @@ function renderStyleGuidance() {
     return `<article class="style-guidance-card ${escapeHtml(item.status)}" data-profile-id="${escapeHtml(item.id)}">
       <div class="style-guidance-head"><div><strong>${escapeHtml(item.name)}</strong><small>适用范围：${escapeHtml(state.bootstrap.locales[state.styleLocale].label)} × ${escapeHtml(item.scopeLabel)} · v${item.version}</small><small>生成方式：${escapeHtml(item.name.startsWith("风格指南 · ") ? "人工上传，正文未被改写" : item.name.includes("复盘修订") ? "AIQA 复盘结合已沉淀语料" : "同类双语语料自动精炼")} · ${item.evidenceCount} 条证据${sourceBatchId ? ` · 来源批次 ${escapeHtml(String(sourceBatchId).slice(0, 8))}` : ""}</small></div><span class="style-state ${escapeHtml(item.status)}">${item.status === "active" ? "已启用" : item.status === "draft" ? "待批准" : "已停用"}</span></div>
       ${learningSummary ? `<p class="style-learning-summary">本批浓缩：${escapeHtml(learningSummary)}</p>` : ""}
+      <p class="style-rule-count">共 ${rules.length} 条规则</p>
       <div class="style-rule-list">${rules.length ? rules.map((rule, index) => `<div><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}</p></div>`).join("") : '<div class="batch-detail-empty">该版本没有可展示的规则条目</div>'}</div>
       ${examples.length ? `<details class="style-examples"><summary>查看 ${examples.length} 个正反例</summary>${examples.map((example) => `<div><strong>${example.type === "negative" ? "反例" : "正例"}</strong><p>${escapeHtml(example.source || "")}</p><p>${escapeHtml(example.target || "")}</p><small>${escapeHtml(example.reason || "")}</small></div>`).join("")}</details>` : ""}
       <div class="style-guidance-actions"><button class="button ${item.status === "active" ? "ghost" : "secondary"} small" data-action="${item.status === "active" ? "disable" : "activate"}">${item.status === "active" ? "停用（保留历史）" : "批准并启用"}</button></div>
     </article>`;
-  }).join("") : '<div class="empty-list">当前筛选条件下没有风格规则</div>';
+  }).join("") : '<div class="empty-list">当前筛选条件下没有自动蒸馏的规则条目；人工导入的风格指南在上面的「人工风格指南」模块里单独展示（它是一整篇文档，不按条计）。</div>';
   $("#styleQaCount").textContent = `${pending.length} 条`;
   $("#styleQaList").innerHTML = pending.length ? pending.map((item) => `<div class="qa-case-row" data-case-id="${escapeHtml(item.id)}"><div><small>${Math.round(item.scoreBefore)} → ${Math.round(item.scoreAfter)} · ${escapeHtml(item.source.slice(0, 55))}</small><p><s>${escapeHtml((item.rejectedTranslation || "").slice(0, 90))}</s> → <strong>${escapeHtml((item.correctedTranslation || "").slice(0, 90))}</strong></p></div><div class="qa-case-actions"><button class="button secondary small" data-action="approve-case">采纳为反例</button><button class="button ghost small" data-action="dispose-case">作废</button></div></div>`).join("") : '<div class="empty-list">当前没有待审核案例</div>';
 
   $$(".style-guidance-card [data-action], #manualGuideStatus [data-action]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.closest("[data-profile-id]").dataset.profileId;
     const action = button.dataset.action;
+    if (action === "copy-guide") {
+      // 指南可能几千字：复制走剪贴板，内容直接从当前数据里取，不依赖 DOM 截断。
+      const guide = (state.styleData?.profiles?.userProfiles || []).find((item) => item.id === id);
+      try {
+        await navigator.clipboard.writeText(String(guide?.instruction || ""));
+        toast("已复制人工风格指南全文");
+      } catch (error) { toast(`复制失败：${error.message}`); }
+      return;
+    }
     button.disabled = true;
     try {
       await api(`/api/style-profiles/${encodeURIComponent(id)}/${action === "activate" ? "activate" : "reject"}`, { method: "POST", body: JSON.stringify(projectPayload()) });
