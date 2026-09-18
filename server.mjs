@@ -1225,7 +1225,8 @@ async function commitTermImport(body, onProgress = null) {
           contentTags,
           qualityStatus: "human_approved", qaScore: 100, provenance: "table-import", sourceFile,
           batchId: body.batchId, sourceRow: candidate.rowNumber, projectId, project: projectId, libraryId: masterTm?.id || "",
-          entryId: candidate.entryId || "", previousSource: candidate.previousSource || "", nextSource: candidate.nextSource || ""
+          entryId: candidate.entryId || "", entryKey: candidate.entryKey || "",
+          previousSource: candidate.previousSource || "", nextSource: candidate.nextSource || ""
         });
         const allowStyleEvidence = candidate.styleEvidence === true || (candidate.styleEvidence === undefined && body.styleEvidence !== false);
         const evidence = allowStyleEvidence ? await saveStyleEvidence({

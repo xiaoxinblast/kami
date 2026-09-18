@@ -3057,7 +3057,8 @@ async function previewMemoryImport() {
     const failureText = failures.length ? `；${failures.length} 个文件解析失败：${failures.map((item) => `${item.filename}（${item.error}）`).join("、")}` : "";
     $("#memoryImportNote").textContent = `本地预检识别 ${preview.candidates.length} 条双语 TM（来自 ${files.length - failures.length} / ${files.length} 个文件，用时 ${elapsedText(startedAt)}）；尚未调用模型，也尚未写入数据库${failureText}。${evidenceText}`;
     $("#memoryImportPreview").hidden = false;
-    $("#memoryImportPreviewBody").innerHTML = preview.candidates.slice(0, 500).map((candidate, index) => `<tr><td><input type="checkbox" data-memory-index="${index}" ${candidate.selected ? "checked" : ""} /></td><td>${escapeHtml(candidate.entryId || "")}</td><td>${escapeHtml(candidate.source)}</td><td>${escapeHtml(candidate.target)}</td><td>${escapeHtml([candidate.sourceFile, candidate.sourceRow ? `第 ${candidate.sourceRow} 行` : ""].filter(Boolean).join(" · "))}</td></tr>`).join("") || '<tr><td colspan="5" class="table-empty">没有可写入的双语条目</td></tr>';
+    // 条目 ID 列优先显示 memoQ 的 x-mmq-context（稳定身份），没有才退回表内序号。
+    $("#memoryImportPreviewBody").innerHTML = preview.candidates.slice(0, 500).map((candidate, index) => `<tr><td><input type="checkbox" data-memory-index="${index}" ${candidate.selected ? "checked" : ""} /></td><td>${escapeHtml(candidate.entryKey || candidate.entryId || "")}</td><td>${escapeHtml(candidate.source)}</td><td>${escapeHtml(candidate.target)}</td><td>${escapeHtml([candidate.sourceFile, candidate.sourceRow ? `第 ${candidate.sourceRow} 行` : ""].filter(Boolean).join(" · "))}</td></tr>`).join("") || '<tr><td colspan="5" class="table-empty">没有可写入的双语条目</td></tr>';
     $("#memoryImportConfirm").disabled = !preview.candidates.length;
   } catch (error) {
     $("#memoryImportNote").textContent = `预检失败：${error.message}`;

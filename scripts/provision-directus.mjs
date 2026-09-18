@@ -174,6 +174,7 @@ function memoryFields() {
     textField("source_file", "来源文件", { width: "half", sort: 11 }),
     textField("batch_id", "批次 ID", { width: "half", sort: 12 }),
     textField("entry_id", "来源条目 ID", { width: "half", sort: 12 }),
+    textField("entry_key", "条目身份键", { width: "half", note: "memoQ x-mmq-context 等稳定条目 ID：改稿重导时按它覆盖原行，不再堆新译文。", sort: 12 }),
     textField("previous_source", "上一条原文", { multiline: true, sort: 13 }),
     textField("next_source", "下一条原文", { multiline: true, sort: 14 }),
     { field: "source_row", type: "integer", meta: { interface: "input", width: "half", sort: 13, translations: label("来源行号") }, schema: { is_nullable: true } },

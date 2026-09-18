@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { assertLocale, LOCALES } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { createDefaultProjectSettings, sanitizeProjectSettings } from "./project-config.mjs";
+import { memoryMatchAttempts } from "./translation-memory.mjs";
 import {
   deleteDirectusAsset,
   getDirectusAssets,
@@ -332,7 +333,14 @@ async function saveJsonMemory(locale, input) {
   const target = String(input.target || "").trim();
   const embedding = input.embedding ?? await embedSource(source);
   const projectId = String(input.projectId || "").trim();
-  const existing = items.find((item) => item.source === source && item.target === target && String(item.projectId || "").trim() === projectId);
+  const scoped = items.filter((item) => String(item.projectId || "").trim() === projectId);
+  let existing = null;
+  for (const attempt of memoryMatchAttempts({ ...input, source, target })) {
+    existing = attempt.kind === "entry"
+      ? scoped.find((item) => String(item.entryKey || "").trim() === attempt.entryKey)
+      : scoped.find((item) => item.source === attempt.source && item.target === attempt.target);
+    if (existing) break;
+  }
   const item = { id: existing?.id || randomUUID(), ...existing, ...input, locale, source, target, ...(embedding ? { embedding } : {}), updatedAt: new Date().toISOString(), createdAt: existing?.createdAt || new Date().toISOString() };
   if (existing) items[items.indexOf(existing)] = item;
   else items.unshift(item);

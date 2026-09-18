@@ -3,6 +3,26 @@ import { MEMORY_PURPOSES, partitionTranslationMemories } from "./asset-governanc
 
 const QUALITY_RANK = Object.freeze({ human_approved: 2, machine_verified: 1, provisional: 0, rejected: -1 });
 
+/**
+ * TM 行的定位顺序（Directus 与 JSON 两个存储共用同一份规则）：
+ *   1) 同项目 + 同条目 ID：memoQ 把条目身份写在 `context[context-type=x-mmq-context]` 里，
+ *      同一个文档的交付版/工作版、改稿重导都共享它，因此应该**覆盖原来那一行**，
+ *      而不是再堆一条新译文；
+ *   2) 同项目 + 原文 + 译文：没有条目 ID（表格导入）时的兜底去重。
+ *
+ * 注意：trans-unit 的 `id` 只是文件内序号（每个文件都从 1 开始），不能当条目身份，
+ * 所以这里只认 x-mmq-context 这类稳定 ID，不认 unitId。
+ */
+export function memoryMatchAttempts({ source = "", target = "", entryKey = "" } = {}) {
+  const attempts = [];
+  const key = String(entryKey || "").trim();
+  if (key) attempts.push({ kind: "entry", entryKey: key });
+  const trimmedSource = String(source || "").trim();
+  const trimmedTarget = String(target || "").trim();
+  if (trimmedSource && trimmedTarget) attempts.push({ kind: "pair", source: trimmedSource, target: trimmedTarget });
+  return attempts;
+}
+
 function tokenOverlap(left, right) {
   const a = new Set([...normalizeSource(left)]);
   const b = new Set([...normalizeSource(right)]);

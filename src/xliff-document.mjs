@@ -315,7 +315,14 @@ function parseXliffXml(xml, format) {
     const source = node.children.find((child) => child.local === "source");
     if (!source) fail(`第 ${index + 1} 个 trans-unit 缺少 source`);
     const target = node.children.find((child) => child.local === "target") || null;
-    const contexts = descendants(node).filter((child) => child.local === "context").map((child) => textContent(xml, child)).filter(Boolean);
+    const contextNodes = descendants(node).filter((child) => child.local === "context").map((child) => ({
+      type: (attributeValue(attributes(xml, child), "context-type") || "").toLowerCase(),
+      value: textContent(xml, child)
+    }));
+    const contexts = contextNodes.map((item) => item.value).filter(Boolean);
+    // memoQ 把"这一条的稳定 ID"写在 x-mmq-context 里（如 CARD2_QST_13_0300_0500_00_vns），
+    // trans-unit 的 id 只是文件内序号（每个文件都从 1 开始），不能当条目身份用。
+    const memoQContext = contextNodes.find((item) => item.type === "x-mmq-context")?.value || "";
     const notes = descendants(node).filter((child) => child.local === "note").map((child) => textContent(xml, child)).filter(Boolean);
     const sourceMixed = mixedText(xml, source);
     const targetMixed = target ? mixedText(xml, target) : { text: "" };
@@ -334,6 +341,7 @@ function parseXliffXml(xml, format) {
       sourceTagIds: sourceMixed.tagIds,
       locked,
       context: contexts.join(" | "),
+      memoQContext,
       note: notes.join(" | ")
     };
   });
@@ -416,6 +424,7 @@ export function extractXliffPairs(buffer, filename) {
     .filter((unit) => unit.sourceText.trim() && unit.targetText.trim())
     .map((unit) => ({
       entryId: unit.id,
+      entryKey: unit.memoQContext || "",
       source: unit.sourceText,
       target: unit.targetText,
       previousSource: parsed.units[unit.index - 2]?.sourceText || "",

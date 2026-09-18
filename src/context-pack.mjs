@@ -53,6 +53,8 @@ export function buildContextPack({ source, locale, classification, matches, doma
       libraryRole: item.libraryRole || "",
       libraryPriority: Number.isFinite(Number(item.libraryPriority)) ? Number(item.libraryPriority) : null,
       entryId: item.entryId || "",
+      // 条目身份键与来源文件：确认模型的参考译例确实来自这条记录（memoQ 的 x-mmq-context）。
+      entryKey: item.entryKey || "",
       contentType: item.contentType || "general",
       contentTags: Array.isArray(item.contentTags) ? item.contentTags.slice(0, 8) : [],
       provenance: item.provenance || "",

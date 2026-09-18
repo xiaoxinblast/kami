@@ -3,6 +3,7 @@ import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { fetchWithTimeout } from "./provider.mjs";
 import { sanitizeProjectSettings } from "./project-config.mjs";
+import { memoryMatchAttempts } from "./translation-memory.mjs";
 
 export const LOCALE_COLLECTIONS = Object.freeze({
   "zh-CN": "terms_zh_cn",
@@ -240,7 +241,7 @@ export async function initializeDirectusStore() {
 export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, exactContentType = false, projectId = "" } = {}) {
   const collection = memoryCollectionFor(locale);
   const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(1000, limit));
-  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_updated,-date_created", fields: "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,entry_id,previous_source,next_source,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,project_id,library_id,campaign,platform,region,audience,superseded_by,date_created,date_updated" });
+  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_updated,-date_created", fields: "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,entry_id,entry_key,previous_source,next_source,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,project_id,library_id,campaign,platform,region,audience,superseded_by,date_created,date_updated" });
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   const items = await request(`/items/${collection}?${params}`);
   return items.filter((item) =>
@@ -251,6 +252,7 @@ export async function getDirectusMemories(locale, { contentType = "general", dom
     source: item.source,
     target: item.target,
     entryId: item.entry_id || "",
+    entryKey: item.entry_key || "",
     previousSource: item.previous_source || "",
     nextSource: item.next_source || "",
     domain: item.domain || "general",
@@ -290,17 +292,31 @@ export async function saveDirectusMemory(locale, input) {
   const target = String(input.target || "").trim();
   if (!source || !target) throw new Error("翻译记忆的日语原文和简体中文译文不能为空");
   const embedding = input.embedding ?? await embedSource(source);
-  const params = new URLSearchParams({ limit: "1", fields: "id,quality_status,qa_score" });
-  params.set("filter[source][_eq]", source);
-  params.set("filter[target][_eq]", target);
-  if (input.projectId) params.set("filter[project_id][_eq]", String(input.projectId));
-  else params.set("filter[project_id][_empty]", "true");
-  if (input.libraryId) params.set("filter[library_id][_eq]", String(input.libraryId));
-  const existing = await request(`/items/${collection}?${params}`);
+  const scope = (params) => {
+    if (input.projectId) params.set("filter[project_id][_eq]", String(input.projectId));
+    else params.set("filter[project_id][_empty]", "true");
+    if (input.libraryId) params.set("filter[library_id][_eq]", String(input.libraryId));
+    return params;
+  };
+  // 先按条目 ID（memoQ x-mmq-context）找，命中就覆盖原行；再退回 (原文, 译文) 去重。
+  let existing = [];
+  for (const attempt of memoryMatchAttempts({ source, target, entryKey: input.entryKey })) {
+    const params = scope(new URLSearchParams({ limit: "1", fields: "id,quality_status,qa_score" }));
+    if (attempt.kind === "entry") {
+      params.set("filter[entry_key][_eq]", attempt.entryKey);
+    } else {
+      params.set("filter[source][_eq]", attempt.source);
+      params.set("filter[target][_eq]", attempt.target);
+    }
+    existing = await request(`/items/${collection}?${params}`);
+    if (existing[0]) break;
+  }
   const body = {
     source,
     target,
     entry_id: String(input.entryId || ""),
+    // 条目身份：memoQ 的 x-mmq-context 等稳定 ID，用于"改稿重导覆盖原行"。
+    entry_key: String(input.entryKey || ""),
     previous_source: String(input.previousSource || ""),
     next_source: String(input.nextSource || ""),
     domain: input.domain || "general",
