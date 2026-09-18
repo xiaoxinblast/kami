@@ -30,6 +30,29 @@ test("双语资产导入走后台任务，并支持同行批次续跑", async ()
   assert.match(server, /async function recoverInterruptedImportTasks/u);
 });
 
+test("确认导入立刻返回任务号，审核队列写入放到后台并带进度", async () => {
+  const server = await read("../server.mjs");
+  const routeStart = server.indexOf('url.pathname === "/api/assets-import/commit"');
+  const route = server.slice(routeStart, server.indexOf('url.pathname === "/api/assets-import/resume"', routeStart));
+  // 路由里不能再直接写审核队列：那会让弹窗长时间只有一个灰按钮。
+  assert.doesNotMatch(route, /await saveImportPreview\(/u);
+  assert.match(route, /const task = await createBackgroundTask\(/u);
+  assert.match(route, /persistCandidates: true/u);
+  assert.match(server, /persistCandidates: false/u);
+  // 后台链路里写队列，并按条数报进度。
+  const job = server.slice(server.indexOf("async function runAssetImportInBackground"), server.indexOf("async function previewTermImport"));
+  assert.match(job, /正在写入审核队列：0 \/ \$\{working\.length\} 条候选/u);
+  assert.match(job, /\{ onProgress: countReport\(1, 8\) \}/u);
+  assert.match(job, /payload: \{\s*\n\s*batchId: batch \|\| batchId,/u);
+  // 队列写入本身要能报进度：createItemsInChunks -> saveImportPreview -> store 透传回调。
+  const directusStore = await read("../src/directus-store.mjs");
+  assert.match(directusStore, /async function createItemsInChunks\(path, records, \{ onProgress \} = \{\}\)/u);
+  assert.match(directusStore, /onProgress\?\.\(\{ completed: saved\.length, total: records\.length \}\)/u);
+  assert.match(directusStore, /export async function saveDirectusImportPreview\(input, \{ onProgress \} = \{\}\)/u);
+  const store = await read("../src/store.mjs");
+  assert.match(store, /export async function saveImportPreview\(input, options\)/u);
+});
+
 test("术语注释取自原表，记账信息移出 note", async () => {
   const server = await read("../server.mjs");
   assert.match(server, /provenance: `table-import:\$\{String\(sourceFile \|\| "unknown"\)\.slice\(0, 120\)\}\$\{sourceRow \? `#\$\{sourceRow\}` : ""\}`/u);

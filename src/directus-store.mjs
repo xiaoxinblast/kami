@@ -86,12 +86,13 @@ async function request(path, { method = "GET", body, timeoutMs = 10_000 } = {}) 
   return payload?.data ?? payload;
 }
 
-async function createItemsInChunks(path, records) {
+async function createItemsInChunks(path, records, { onProgress } = {}) {
   const saved = [];
   for (const chunk of chunkDirectusRecords(records)) {
     try {
       const result = await request(path, { method: "POST", body: chunk, timeoutMs: DIRECTUS_BULK_WRITE_TIMEOUT_MS });
       saved.push(...(Array.isArray(result) ? result : [result]));
+      onProgress?.({ completed: saved.length, total: records.length });
     } catch (error) {
       error.createdItems = saved;
       throw error;
@@ -723,7 +724,7 @@ export async function saveDirectusCorpus(input) {
   };
 }
 
-export async function saveDirectusImportPreview(input) {
+export async function saveDirectusImportPreview(input, { onProgress } = {}) {
   const batch = await request("/items/term_import_batches", {
     method: "POST",
     body: {
@@ -780,7 +781,12 @@ export async function saveDirectusImportPreview(input) {
   }));
   let saved = [];
   try {
-    saved = records.length ? await createItemsInChunks("/items/term_candidates", records) : [];
+    // 入库前先写审核队列：几千条候选会在这一步花掉最多时间，必须能把进度报出去。
+    saved = records.length
+      ? await createItemsInChunks("/items/term_candidates", records, {
+        onProgress: (update) => onProgress?.({ phase: "queueing", message: `正在写入审核队列：${update.completed} / ${update.total}`, ...update })
+      })
+      : [];
     if (saved.length !== records.length) throw new Error(`Directus candidate write was incomplete (${saved.length}/${records.length})`);
   } catch (error) {
     const knownIds = [...saved, ...(error.createdItems || [])].map((item) => item?.id).filter(Boolean);

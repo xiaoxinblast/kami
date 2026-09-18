@@ -48,6 +48,9 @@ const state = {
   assetImportStyleEvidence: false,
   assetImportTaskId: "",
   assetImportWizard: false,
+  assetImportStartedAt: 0,
+  assetImportProgress: null,
+  assetImportTicker: 0,
   memoryImportFiles: [],
   memoryStyleEvidence: true,
   importPreview: null,
@@ -2717,8 +2720,10 @@ async function setImportFiles(files = [], {
   state.assetImportIntent = intent;
   state.assetImportReturnView = returnView;
   state.assetImportPurpose = resolvedPurpose;
+  // 默认值只在切换类型时由 syncImportPurposeControls 给（人工 TM 默认勾、术语表默认不勾）；
+  // 这里一律以界面上的当前勾选为准，否则用户刚取消的勾选会被"默认值"又勾回去。
   state.assetImportAiCleaning = resolvedPurpose === "term" ? (aiCleaning ?? readImportAiCleaning()) : false;
-  state.assetImportStyleEvidence = styleEvidence ?? (resolvedPurpose === "tm" ? true : readImportStyleEvidence());
+  state.assetImportStyleEvidence = styleEvidence ?? readImportStyleEvidence();
   state.assetImportTaskId = "";
   state.assetImportWizard = fromWizard;
   assetPreflightOutcome = null;
@@ -2837,9 +2842,30 @@ function updateAssetImportProgress(progress = {}) {
   if (!container) return;
   const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
   container.hidden = false;
-  $("#assetImportProgressText").textContent = progress.message || "正在导入";
+  const elapsed = state.assetImportStartedAt ? ` · 已用时 ${((Date.now() - state.assetImportStartedAt) / 1000).toFixed(1)} 秒` : "";
+  $("#assetImportProgressText").textContent = `${progress.message || "正在导入"}${progress.status === "completed" || progress.status === "failed" ? "" : elapsed}`;
   $("#assetImportProgressMeta").textContent = `${percent}%`;
   $("#assetImportProgressBar").style.width = `${percent}%`;
+  container.classList.toggle("is-failed", progress.status === "failed");
+}
+
+/** 提交与执行期间让"已用时"持续走动：静止的界面让人以为卡死了。 */
+function startAssetImportTicker() {
+  stopAssetImportTicker();
+  state.assetImportTicker = window.setInterval(() => {
+    if (!state.assetImportProgress) return;
+    updateAssetImportProgress(state.assetImportProgress);
+  }, 500);
+}
+
+function stopAssetImportTicker() {
+  if (state.assetImportTicker) window.clearInterval(state.assetImportTicker);
+  state.assetImportTicker = 0;
+}
+
+function rememberAssetImportProgress(progress) {
+  state.assetImportProgress = { ...(state.assetImportProgress || {}), ...progress };
+  updateAssetImportProgress(state.assetImportProgress);
 }
 
 function renderAssetPreflight() {
@@ -2871,7 +2897,14 @@ async function confirmAssetPreflight() {
   state.assetImportAiCleaning = aiCleaning;
   state.assetImportStyleEvidence = styleEvidence;
   try {
+    // 点下确认就立刻切成进度视图：这次请求只创建后台任务，但用户不该盯着灰按钮猜。
+    state.assetImportStartedAt = Date.now();
+    state.assetImportProgress = { phase: "submitting", message: "正在创建后台导入任务…", percent: 0 };
+    updateAssetImportProgress(state.assetImportProgress);
+    startAssetImportTicker();
     $("#assetPreflightConfirm").disabled = true;
+    $("#assetPreflightConfirm").textContent = "提交中…";
+    $("#assetPreflightSummary").textContent = `正在创建后台导入任务：${candidates.length} 条条目、${state.importFiles?.length || 0} 个文件。任务一旦创建，关掉这个窗口也会继续跑完。`;
     const result = await api("/api/assets-import/commit", { method: "POST", body: JSON.stringify({
       ...projectPayload(),
       batchId: preview.batchId,
@@ -2895,15 +2928,20 @@ async function confirmAssetPreflight() {
     };
     $("#assetPreflightConfirm").hidden = true;
     $("#assetPreflightClose").hidden = false;
-    updateAssetImportProgress({ message: aiCleaning ? "已在后台排队：先做 AI 清洗" : "已在后台排队：按表导入", percent: 1 });
+    rememberAssetImportProgress({ status: "running", message: aiCleaning ? "任务已创建：先写审核队列，再做 AI 清洗" : "任务已创建：先写审核队列，再按表导入", percent: 1 });
     toast(`已开始后台导入 ${accepted} 条；可以关掉这个窗口继续下一步`);
     if (returnView) {
       $("#assetPreflightTableWrap").hidden = true;
       $("#assetPreflightSummary").textContent = `已提交后台导入：${state.importFiles?.length || 0} 个文件、${accepted} 条双语条目。${aiCleaning ? "先做 AI 清洗再入库。" : "按本地规则分流写入。"}可以关掉这个窗口，向导会继续下一步，进度与结果在任务中心可查。`;
     }
-    watchAssetImportTask(state.assetImportTaskId, { returnView });
-  } catch (error) { toast(error.message); }
-  finally { $("#assetPreflightConfirm").disabled = false; }
+    watchAssetImportTask(state.assetImportTaskId, { returnView }).catch(() => {});
+  } catch (error) {
+    stopAssetImportTicker();
+    rememberAssetImportProgress({ status: "failed", message: `创建后台任务失败：${error.message}`, percent: 0 });
+    $("#assetPreflightConfirm").disabled = false;
+    $("#assetPreflightConfirm").textContent = "确认并继续";
+    toast(error.message);
+  }
 }
 
 /**
@@ -2920,9 +2958,10 @@ async function watchAssetImportTask(taskId, { returnView = "" } = {}) {
       task = await api(`/api/background-tasks/${encodeURIComponent(taskId)}`);
     } catch { finished = true; break; }
     if (!task) { finished = true; break; }
-    updateAssetImportProgress(task.progress || {});
+    rememberAssetImportProgress({ status: task.status, ...(task.progress || {}) });
     if (task.status === "completed" || task.status === "failed" || task.status === "needs_attention") {
       finished = true;
+      stopAssetImportTicker();
       const summary = task.payload?.summary;
       if (task.status === "completed") {
         const skipped = Number(summary?.skipped) || 0;

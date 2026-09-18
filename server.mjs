@@ -878,9 +878,11 @@ async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, per
  *   - 术语表 + 打开 AI 清洗：先让模型逐条判定 keep / rowKind / 句内术语，再按判定分流；
  *   - 人工 TM：整批作为人工确认译文写入主 TM。
  *
+ * 任务创建后立刻返回，审核队列写入、AI 清洗、入库、风格学习都在这条后台链路里，
  * 进度同时写进内存进度表（弹窗轮询）与后台任务（任务中心），关掉页面也会继续跑完。
+ * 续跑（persistCandidates=false）复用已有批次，不重复写审核队列。
  */
-async function runAssetImportInBackground({ taskId, projectId, batchId, filename, candidates, purpose, aiCleaning, styleEvidence }) {
+async function runAssetImportInBackground({ taskId, projectId, batchId, filename, candidates, purpose, aiCleaning, styleEvidence, persistCandidates = false }) {
   let progressWrites = Promise.resolve();
   const reportImmediate = (update) => {
     reportImportProgress(taskId, { status: "running", ...update });
@@ -893,12 +895,38 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
     const inner = Math.max(0, Math.min(100, Number(update?.percent) || 0));
     reportImmediate({ ...update, percent: from + Math.round((inner / 100) * (to - from)) });
   };
+  /** 按条数报进度（写审核队列这种阶段没有内部百分比）。 */
+  const countReport = (from, to) => (update) => {
+    const total = Number(update?.total) || 0;
+    const completed = Number(update?.completed) || 0;
+    const ratio = total ? completed / total : 0;
+    reportImmediate({ ...update, percent: from + Math.round(ratio * (to - from)) });
+  };
+  // 批次号在写队列之后才是"真"的：catch 里也要用得到，所以声明在 try 之外。
+  let batch = batchId;
   try {
     let working = candidates.map((candidate) => ({ ...candidate }));
-    reportImmediate({ phase: "preparing", message: aiCleaning ? "准备 AI 清洗" : "准备按表导入", percent: 3, completed: 0, total: working.length });
+    if (persistCandidates) {
+      reportImmediate({ phase: "queueing", message: `正在写入审核队列：0 / ${working.length} 条候选`, percent: 1, completed: 0, total: working.length });
+      const persisted = await saveImportPreview({
+        batchId: batchId || undefined,
+        projectId,
+        filename,
+        fileType: "multi",
+        requestedLocale: "zh-CN",
+        candidates: working,
+        statistics: { rowsScanned: working.length, pairedRows: working.length },
+        fileMode: "multi",
+        ai: { used: false, requested: aiCleaning }
+      }, { onProgress: countReport(1, 8) });
+      batch = persisted.batchId;
+      working = persisted.candidates;
+      reportImmediate({ phase: "queued", message: `审核队列就绪（${working.length} 条），开始导入`, percent: 9, completed: 0, total: working.length });
+    }
+    reportImmediate({ phase: "preparing", message: aiCleaning ? "准备 AI 清洗" : "准备按表导入", percent: 10, completed: 0, total: working.length });
     let ai = { requested: aiCleaning, used: false, reviewed: 0, total: working.length };
     if (aiCleaning) {
-      const cleaned = await cleanCandidatesWithModel(working, { onProgress: reportImmediate, percentRange: [5, 45] });
+      const cleaned = await cleanCandidatesWithModel(working, { onProgress: reportImmediate, percentRange: [12, 45] });
       ai = cleaned.ai;
       const nested = expandNestedTermCandidates(working);
       if (nested.length) working = [...working, ...nested];
@@ -917,7 +945,7 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
         return { ...candidate, assetType: kind === "memory" ? "memory" : "term", styleEvidence };
       });
     const result = await commitTermImport(
-      { projectId, batchId, filename, candidates: routed, styleEvidence },
+      { projectId, batchId: batch, filename, candidates: routed, styleEvidence },
       scaleReport(50, 92)
     );
     await progressWrites;
@@ -932,7 +960,7 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
         total: routed.length
       },
       payload: {
-        batchId,
+        batchId: batch || batchId,
         filename,
         purpose,
         aiCleaning,
@@ -949,7 +977,8 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
     await updateBackgroundTaskProgress(taskId, {
       status: "failed",
       progress: { phase: "failed", message: error.message, percent: 100, completed: 0, total: candidates.length },
-      payload: { batchId, filename, purpose, aiCleaning, styleEvidence, error: error.message, resumable: true }
+      // 批次号可能是后台写队列时才拿到的：带上它，任务中心才能用「继续导入」补跑。
+      payload: { batchId: batch || batchId, filename, purpose, aiCleaning, styleEvidence, error: error.message, resumable: Boolean(batch || batchId) }
     }).catch(() => {});
     reportImportProgress(taskId, { status: "failed", phase: "failed", message: error.message, error: error.message, percent: 100 });
     console.error(`[Kami] 双语资产导入失败：${filename} · ${error.message}`);
@@ -1681,35 +1710,27 @@ async function apiHandler(req, res, url) {
       assetType: purpose === "tm" ? "memory" : "term",
       styleEvidence
     }));
-    const persisted = await saveImportPreview({
-      batchId: body.batchId,
-      projectId,
-      filename,
-      fileType: "multi",
-      requestedLocale: "zh-CN",
-      candidates,
-      statistics: { rowsScanned: candidates.length, pairedRows: candidates.length },
-      fileMode: "multi",
-      ai: { used: false, requested: aiCleaning }
-    });
-    // 导入改到后台执行：页面可以关掉继续下一步，进度走任务中心与进度接口。
+    if (!candidates.length) return json(res, 400, { error: "没有可导入的候选" });
+    // 只创建任务就立刻返回：审核队列写入、清洗、入库都在后台链路里，
+    // 否则几千条候选的队列写入会让弹窗长时间只有一个灰掉的按钮。
     const task = await createBackgroundTask({
       type: "asset_import",
       title: `导入 · ${filename}`,
       projectId,
-      progress: { phase: "queued", message: aiCleaning ? "已排队：先做 AI 清洗再入库" : "已排队：按表直接导入", total: persisted.candidates.length }
+      progress: { phase: "queued", message: aiCleaning ? "已排队：先写审核队列，再做 AI 清洗" : "已排队：先写审核队列，再按表导入", total: candidates.length }
     });
     runAssetImportInBackground({
       taskId: task.id,
       projectId,
-      batchId: persisted.batchId,
+      batchId: String(body.batchId || ""),
       filename,
-      candidates: persisted.candidates,
+      candidates,
       purpose,
       aiCleaning,
-      styleEvidence
+      styleEvidence,
+      persistCandidates: true
     }).catch((error) => console.error("[Kami] 双语资产导入后台任务异常", error));
-    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: persisted.batchId, accepted: persisted.candidates.length, purpose, aiCleaning, styleEvidence });
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: String(body.batchId || ""), accepted: candidates.length, purpose, aiCleaning, styleEvidence });
   }
   if (req.method === "POST" && url.pathname === "/api/assets-import/resume") {
     // 续传：用同一个批次的候选重跑一次。已写入的"原文+译文"会被当成重复跳过，
@@ -1744,7 +1765,9 @@ async function apiHandler(req, res, url) {
       candidates,
       purpose,
       aiCleaning,
-      styleEvidence
+      styleEvidence,
+      // 候选已经在这个批次里，续跑不要再写一遍审核队列。
+      persistCandidates: false
     }).catch((error) => console.error("[Kami] 双语资产续传任务异常", error));
     return json(res, 202, { taskId: task.id, batchId, accepted: candidates.length });
   }

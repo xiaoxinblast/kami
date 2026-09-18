@@ -90,6 +90,9 @@ test("预检逐个文件进行，并在界面上显示清单、进度与失败�
   assert.match(styles, /\.import-file-list li\.running em/u);
   // 请求根本没到服务端时，不能只把浏览器的 Failed to fetch 丢给用户。
   assert.match(script, /throw new Error\(generic\s*\n\s*\? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"/u);
+  // 取文件时不能再用"人工 TM 默认勾选"覆盖用户刚改过的勾选状态。
+  assert.match(script, /state\.assetImportStyleEvidence = styleEvidence \?\? readImportStyleEvidence\(\);/u);
+  assert.doesNotMatch(script, /styleEvidence \?\? \(resolvedPurpose === "tm" \? true/u);
   // 导入类请求的额度单独放宽，超限也要给出可读提示而不是掐断连接。
   const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
   assert.match(server, /const IMPORT_BODY_BYTES = 48 \* 1024 \* 1024;/u);

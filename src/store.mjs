@@ -1499,8 +1499,8 @@ export async function saveCorpus(input) {
   return usesDirectus() ? saveDirectusCorpus(input) : saveJsonCorpus(input);
 }
 
-export async function saveImportPreview(input) {
-  return usesDirectus() ? saveDirectusImportPreview(input) : saveJsonImportPreview(input);
+export async function saveImportPreview(input, options) {
+  return usesDirectus() ? saveDirectusImportPreview(input, options) : saveJsonImportPreview(input);
 }
 
 export async function getImportPreview(batchId) {

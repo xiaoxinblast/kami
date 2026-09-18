@@ -297,6 +297,8 @@ select { min-width: 150px; }
 .asset-preflight-options { display: grid; gap: 9px; margin: 0 0 13px; }
 .asset-preflight-options .import-toggle { padding: 9px 11px; border: 1px solid #e3e9df; border-radius: 9px; background: #fbfdf9; }
 .import-progress-note { margin: 9px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.import-progress.is-failed { border-color: #e7c9c5; background: #fdf6f5; }
+.import-progress.is-failed .import-progress-head strong { color: #b4453c; }
 .smart-import-capabilities { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-top: 12px; }
 .smart-import-capabilities > div { display: grid; grid-template-columns: 27px 1fr; gap: 3px 8px; padding: 10px; border-radius: 9px; background: #f4f7f3; }
 .smart-import-capabilities span { grid-row: 1 / 3; display: grid; place-items: center; width: 25px; height: 25px; border-radius: 7px; color: var(--forest); background: var(--mint); font-size: 12px; font-weight: 900; }
