@@ -477,9 +477,15 @@ function refreshActions() {
   } else if (state.view === "styles") {
     primary.textContent = "刷新风格";
   } else if (state.view === "autoqa") {
-    primary.textContent = "开始质检";
-    primary.disabled = !$("#autoQaSource")?.value.trim() || !$("#autoQaTarget")?.value.trim();
-    if ($("#autoQaSource")?.value.trim() || $("#autoQaTarget")?.value.trim()) {
+    // 顶部按钮跟着"来源"走：批次/文件用各自的入口，粘贴文本才用输入框内容。
+    const source = state.qaSource || "batch";
+    primary.textContent = source === "batch" ? "查看质检结果" : "开始质检";
+    primary.disabled = source === "batch"
+      ? !$("#qaBatchSelect")?.value
+      : source === "file"
+        ? !state.qaFile
+        : (!($("#autoQaSource")?.value.trim() && $("#autoQaTarget")?.value.trim()));
+    if (source === "paste" && ($("#autoQaSource")?.value.trim() || $("#autoQaTarget")?.value.trim())) {
       secondary.hidden = false;
       secondary.textContent = "清空";
     }
@@ -852,6 +858,7 @@ function setQaSource(source) {
   state.qaSource = source;
   $$("#qaSourceTabs .qa-source-tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.qaSource === source));
   $$("[data-qa-panel]").forEach((panel) => { panel.hidden = panel.dataset.qaPanel !== source; });
+  refreshActions();
   if (source === "batch") loadQaBatches().catch((error) => toast(error.message));
 }
 
@@ -5260,7 +5267,11 @@ function bindEvents() {
     else if (state.view === "memories") loadMemories(state.memoryLocale).catch((error) => toast(error.message));
     else if (state.view === "styles") loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message));
     else if (state.view === "learning") generateLearningSkill();
-    else if (state.view === "autoqa") runAutoQa().catch((error) => toast(error.message));
+    else if (state.view === "autoqa") {
+      const source = state.qaSource || "batch";
+      const task = source === "batch" ? runQaFromBatch() : source === "file" ? runQaFromFile() : runAutoQa();
+      Promise.resolve(task).catch((error) => toast(error.message));
+    }
     else if (state.view === "feedback") loadFeedbackPage().catch((error) => toast(error.message));
     else $("#assetDialog").showModal();
   });
@@ -5286,6 +5297,7 @@ function bindEvents() {
     state.qaFile = event.target.files?.[0] || null;
     $("#qaFilePrompt").textContent = state.qaFile ? `已选择：${state.qaFile.name}` : "上传双语文件";
     $("#qaFileRun").disabled = !state.qaFile;
+    refreshActions();
   });
   $("#qaFileRun").addEventListener("click", () => runQaFromFile());
   $("#qaFilters").addEventListener("click", (event) => {
