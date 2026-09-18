@@ -185,22 +185,22 @@ test("风格证据：同条目 ID 同作用域只保留最新一条", async () =
   await evidence({ source: "ヴァネッサ", target: "瓦妮莎", machineTranslation: "新机翻", note: "改稿", entryKey: "EVIDENCE_KEY_1", sourceFile: "a.mqxliff" });
 
   const rows = (await getStyleEvidence("zh-CN", { projectId: "project-1" })).filter((item) => item.entryKey === "EVIDENCE_KEY_1");
-  assert.equal(rows.length, 1, "同 ID 同作用域只应留一条");
+  assert.equal(rows.length, 1, "同 ID 同项目只应留一条");
   assert.equal(rows[0].target, "瓦妮莎");
   assert.equal(rows[0].machineTranslation, "新机翻");
   assert.equal(rows[0].note, "改稿");
 });
 
-test("风格证据：同条目 ID 但换了作用域各自留一条", async () => {
+test("风格证据：同条目 ID 换了语体也只留一条（项目级资产不再按作用域分池）", async () => {
   await evidence({ source: "シド", target: "希德", entryKey: "EVIDENCE_KEY_2", contentType: "dialogue", domain: "game" });
   await evidence({ source: "シド", target: "希德", entryKey: "EVIDENCE_KEY_2", contentType: "ui", domain: "game" });
 
   const rows = (await getStyleEvidence("zh-CN", { projectId: "project-1" })).filter((item) => item.entryKey === "EVIDENCE_KEY_2");
-  assert.equal(rows.length, 2);
-  assert.deepEqual(rows.map((item) => item.contentType).sort(), ["dialogue", "ui"]);
+  assert.equal(rows.length, 1, "同一条目在两次导入里被判成不同语体时更新同一条，而不是各留一份");
+  assert.equal(rows[0].contentType, "ui", "语体作为标签跟着最新一次写入更新");
 });
 
-test("风格证据：没有条目 ID 时按原文+译文+作用域去重，不重复累积", async () => {
+test("风格证据：没有条目 ID 时按原文+译文+项目去重，不重复累积", async () => {
   await evidence({ source: "プレミアムパス", target: "高级通行证" });
   await evidence({ source: "プレミアムパス", target: "高级通行证" });
   // 同一份表格重复导入不该让同一句证据加权两次；换了译法才算新证据。
@@ -211,6 +211,6 @@ test("风格证据：没有条目 ID 时按原文+译文+作用域去重，不�
   assert.deepEqual(rows.map((item) => item.target).sort(), ["高级通行证", "高级通行证（改）"].sort());
   assert.equal(styleEvidenceMatch({ entryKey: "" }), null);
   assert.deepEqual(styleEvidenceMatch({ entryKey: "k", locale: "zh-CN", contentType: "dialogue", domain: "game", projectId: "p" }), {
-    entryKey: "k", locale: "zh-CN", contentType: "dialogue", domain: "game", projectId: "p"
+    entryKey: "k", locale: "zh-CN", projectId: "p"
   });
 });

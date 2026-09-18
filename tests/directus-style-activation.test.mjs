@@ -35,16 +35,17 @@ process.env.DIRECTUS_TOKEN = "test-token";
 
 const { activateDirectusStyleProfile } = await import("../src/directus-store.mjs");
 
-test("Directus 激活风格版本时按 locale × contentType × domain 退役全部旧 active", async () => {
+test("Directus 激活风格版本时按项目 + 语言退役全部旧 active", async () => {
   const activated = await activateDirectusStyleProfile("target");
   assert.deepEqual(activated, { id: "target", kind: "style_profile", status: "active" });
   const listRequest = requests.find((item) => item.method === "GET" && item.url.startsWith("/items/style_profiles?"));
   const parsed = new URL(`http://directus${listRequest.url}`);
   assert.equal(parsed.searchParams.get("fields"), "id,status,domain");
   assert.equal(parsed.searchParams.get("filter[target_locale][_eq]"), "ja-JP");
-  assert.equal(parsed.searchParams.get("filter[content_type][_eq]"), "dialogue");
-  assert.equal(parsed.searchParams.get("filter[domain][_eq]"), "game");
   assert.equal(parsed.searchParams.get("filter[status][_eq]"), "active");
+  // 风格资产是项目级的：不能再按语体/领域过滤，否则历史作用域规范会继续 active。
+  assert.equal(parsed.searchParams.get("filter[content_type][_eq]"), null);
+  assert.equal(parsed.searchParams.get("filter[domain][_eq]"), null);
   const bulkPatch = requests.find((item) => item.method === "PATCH" && item.url === "/items/style_profiles");
   assert.deepEqual(bulkPatch.body, [
     { id: "old-v1", status: "inactive" },

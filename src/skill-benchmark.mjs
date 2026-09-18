@@ -8,7 +8,7 @@
 
 import { assertLocale } from "./config.mjs";
 import { classifyContent } from "./classifier.mjs";
-import { getAssets, getMemories, getQaCases, getStyleProfile, getUserProfile } from "./store.mjs";
+import { getAssets, getMemories, getProjectStyleProfile, getQaCases, getUserProfile } from "./store.mjs";
 import { matchTerms } from "./matcher.mjs";
 import { embedSource } from "./embedding.mjs";
 import { rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./translation-memory.mjs";
@@ -48,7 +48,7 @@ export async function createBenchmarkSnapshot(scope, trajectories = [], { prompt
   const normalizedScope = benchmarkScope(scope);
   const [assets, styleProfile, qaCases, memories, userProfile] = await Promise.all([
     getAssets(normalizedScope.locale, { projectId: normalizedScope.project }),
-    getStyleProfile(normalizedScope.locale, normalizedScope.contentType, normalizedScope.domain, { projectId: normalizedScope.project }),
+    getProjectStyleProfile(normalizedScope.locale, { projectId: normalizedScope.project }),
     getQaCases(normalizedScope.locale, { projectId: normalizedScope.project, contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1 }),
     getMemories(normalizedScope.locale, { projectId: normalizedScope.project, contentType: normalizedScope.contentType, domain: normalizedScope.domain, limit: -1, exactContentType: true }),
     getUserProfile(normalizedScope.locale, { projectId: normalizedScope.project })
@@ -113,7 +113,7 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
   const [styleProfile, qaCases, memories, userProfile] = snapshot
     ? [snapshot.styleProfile, snapshot.qaCases || [], snapshot.memories || [], snapshot.userProfile]
     : await Promise.all([
-      getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project }),
+      getProjectStyleProfile(scope.locale, { projectId: scope.project }),
       getQaCases(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, limit: -1 }),
       getMemories(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, limit: -1, exactContentType: true }),
       getUserProfile(scope.locale, { projectId: scope.project })

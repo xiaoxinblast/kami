@@ -12,6 +12,7 @@ import {
   deleteDirectusLibraryEntries,
   deleteDirectusMemory,
   countDirectusStyleEvidenceByScope,
+  countDirectusStyleEvidence,
   getDirectusAsset,
   getDirectusAssets,
   getDirectusAssetStats,
@@ -25,6 +26,7 @@ import {
   countDirectusMemories,
   getDirectusQaCases,
   getDirectusStyleProfile,
+  getDirectusProjectStyleProfile,
   getDirectusStyleEvidence,
   getDirectusQaRuns,
   getDirectusUserProfile,
@@ -442,18 +444,14 @@ async function saveJsonStyleEvidence(input) {
   const items = await readJson(path, []);
   const source = String(input.source || "").trim();
   const embedding = input.embedding ?? await embedSource(source);
-  const match = styleEvidenceMatch({ entryKey: input.entryKey, locale: input.locale, contentType: input.contentType, domain: input.domain, projectId: input.projectId });
+  const match = styleEvidenceMatch({ entryKey: input.entryKey, locale: input.locale, projectId: input.projectId });
   const existing = match
     ? items.find((item) => String(item.entryKey || "").trim() === match.entryKey
       && String(item.locale || "") === match.locale
-      && String(item.contentType || "general") === match.contentType
-      && String(item.domain || "general") === match.domain
       && String(item.projectId || "").trim() === match.projectId)
-    // 没有条目 ID 时退回"原文 + 译文 + 同作用域"去重，避免同一份表格重复导入堆出重复证据。
+    // 没有条目 ID 时退回"原文 + 译文 + 同项目"去重，避免同一份表格重复导入堆出重复证据。
     : items.find((item) => !String(item.entryKey || "").trim()
       && String(item.locale || "") === String(input.locale || "")
-      && String(item.contentType || "general") === String(input.contentType || "general")
-      && String(item.domain || "general") === String(input.domain || "general")
       && String(item.projectId || "").trim() === String(input.projectId || "").trim()
       && normalizeMemoryText(item.source) === normalizeMemoryText(source)
       && normalizeMemoryText(item.target) === normalizeMemoryText(input.target));
@@ -477,7 +475,9 @@ async function saveJsonStyleProfile(input) {
   const path = join(ROOT, "styles", `${assertLocale(input.locale)}.json`);
   const profiles = await readJson(path, []);
   const projectId = String(input.projectId || input.project || "");
-  const previous = profiles.filter((item) => item.contentType === input.contentType && item.domain === input.domain && String(item.projectId || "") === projectId).sort((a, b) => b.version - a.version)[0];
+  // 版本号按「项目 + 语言」递增：风格资产是项目级的，语体与领域只是标签，
+  // 按标签分别计数会让同项目的两份规范共用版本号，"最新 active"就没了确定含义。
+  const previous = profiles.filter((item) => String(item.projectId || "") === projectId).sort((a, b) => (b.version || 0) - (a.version || 0))[0];
   if (previous && input.status !== "draft") previous.status = "inactive";
   const profile = { id: randomUUID(), ...input, projectId, source: "style-library", version: (previous?.version || 0) + 1, parentId: previous?.id || null, status: input.status || "active", updatedAt: new Date().toISOString() };
   profiles.unshift(profile);
@@ -549,6 +549,40 @@ async function countJsonStyleEvidenceByScope(locale, { projectId = "" } = {}) {
   return stats;
 }
 
+/**
+ * 项目级证据计数：风格资产改成"每项目 + 语言一份"之后，闸门与面板都用这份总数，
+ * 不再按语体×领域分池（语体只留作分布展示）。
+ */
+async function countJsonStyleEvidence(locale, { projectId = "" } = {}) {
+  const items = await readJson(join(ROOT, "styles", "evidence.json"), []);
+  const byProvenance = {};
+  const byContentType = new Map();
+  let total = 0;
+  for (const item of items) {
+    if (item.locale !== assertLocale(locale)) continue;
+    if (projectId && String(item.projectId || "") !== String(projectId)) continue;
+    total += 1;
+    const provenance = item.provenance || "other";
+    byProvenance[provenance] = (byProvenance[provenance] || 0) + 1;
+    const contentType = item.contentType || "general";
+    byContentType.set(contentType, (byContentType.get(contentType) || 0) + 1);
+  }
+  return {
+    total,
+    byProvenance,
+    byContentType: [...byContentType.entries()].map(([contentType, count]) => ({ contentType, count })).sort((a, b) => b.count - a.count)
+  };
+}
+
+/** 项目级规范：同项目 + 同语言最新 active 的那一份（不再按作用域挑）。 */
+async function getJsonProjectStyleProfile(locale, { projectId = "" } = {}) {
+  const profiles = await readJson(join(ROOT, "styles", `${assertLocale(locale)}.json`), []);
+  const active = profiles
+    .filter((item) => item.status === "active" && String(item.projectId || "") === String(projectId || ""))
+    .sort((a, b) => (Number(b.version) || 0) - (Number(a.version) || 0) || String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  return active[0] || null;
+}
+
 async function locateJsonStyleProfile(id) {
   for (const locale of Object.keys(LOCALES)) {
     const path = join(ROOT, "styles", `${locale}.json`);
@@ -591,7 +625,9 @@ async function activateJsonStyleProfile(id) {
   }
   for (const item of located.profiles) {
     if (item.id === id) item.status = "active";
-    else if (item.status === "active" && item.contentType === located.target.contentType && item.domain === located.target.domain && String(item.projectId || "") === String(located.target.projectId || "")) item.status = "inactive";
+    // 风格资产是项目级的：激活一个版本时，同项目 + 同语言的其它 active 一律退役，
+    // 否则历史作用域规范会继续参与取值，等于同时存在两份"当前规范"。
+    else if (item.status === "active" && String(item.projectId || "") === String(located.target.projectId || "")) item.status = "inactive";
   }
   located.target.status = "active";
   await writeJsonAtomic(located.path, located.profiles);
@@ -1862,6 +1898,14 @@ export async function getStyleLearningRun(id) {
 /** 风格证据的真实条数（按语体 × 领域 × 来源聚合），用于证据池显示。 */
 export async function countStyleEvidenceByScope(locale, options) {
   return usesDirectus() ? countDirectusStyleEvidenceByScope(locale, options) : countJsonStyleEvidenceByScope(locale, options);
+}
+
+export async function countStyleEvidence(locale, options) {
+  return usesDirectus() ? countDirectusStyleEvidence(locale, options) : countJsonStyleEvidence(locale, options);
+}
+
+export async function getProjectStyleProfile(locale, options) {
+  return usesDirectus() ? getDirectusProjectStyleProfile(locale, options) : getJsonProjectStyleProfile(locale, options);
 }
 
 export async function saveQaRun(input) {

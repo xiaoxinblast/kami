@@ -58,6 +58,57 @@ function rank(item) {
  * records too empty to teach anything. Positives are ordered so that rewrites
  * survive the sample cap; negatives keep the reviewer's stated reason.
  */
+/**
+ * 项目级蒸馏的分层取样。
+ *
+ * 证据池是项目级的（8134 条成就与系统说明、67 条对白……），直接按优先级取前 50 条
+ * 会让最大的那一类吃掉全部名额，"对白要口语、公告要书面"这类规则永远学不到。
+ * 这里先按语体分组轮转，单语体上限 = max(3, ceil(正例上限 / 4))；轮转没填满的名额
+ * 再按组序回流给最大的组，保证总量仍然用满。
+ *
+ * 组内顺序沿用调用方给的顺序（人工采纳与改写证据排在前面），反例原样返回，
+ * 由 shapeDistillEvidence 统一限量。
+ */
+export function stratifyEvidence(evidence = [], { positiveLimit = 30, perTypeCap = null } = {}) {
+  const list = Array.isArray(evidence) ? evidence : [];
+  const limit = Math.max(0, Math.trunc(Number(positiveLimit)) || 0);
+  if (!limit) return list;
+  const cap = Math.max(3, Math.trunc(Number(perTypeCap)) || Math.ceil(limit / 4));
+  const groups = new Map();
+  const negatives = [];
+  for (const item of list) {
+    if (!item) continue;
+    if (isNegativeEvidence(item)) {
+      negatives.push(item);
+      continue;
+    }
+    const type = clean(item.contentType) || "general";
+    if (!groups.has(type)) groups.set(type, []);
+    groups.get(type).push(item);
+  }
+  const ordered = [...groups.values()].sort((a, b) => b.length - a.length);
+  const picked = [];
+  const used = new Array(ordered.length).fill(0);
+  let progressed = true;
+  while (picked.length < limit && progressed) {
+    progressed = false;
+    for (let index = 0; index < ordered.length && picked.length < limit; index += 1) {
+      if (used[index] >= cap || used[index] >= ordered[index].length) continue;
+      picked.push(ordered[index][used[index]]);
+      used[index] += 1;
+      progressed = true;
+    }
+  }
+  // 语体种类少时轮转会被单语体上限卡住，把剩下的名额按组序回流，避免只取到一半。
+  for (let index = 0; index < ordered.length && picked.length < limit; index += 1) {
+    while (used[index] < ordered[index].length && picked.length < limit) {
+      picked.push(ordered[index][used[index]]);
+      used[index] += 1;
+    }
+  }
+  return [...picked, ...negatives];
+}
+
 export function shapeDistillEvidence(evidence = [], { positiveLimit = 30, negativeLimit = 10 } = {}) {
   const list = Array.isArray(evidence) ? evidence : [];
   const positives = [];

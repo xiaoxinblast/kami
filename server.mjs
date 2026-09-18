@@ -14,7 +14,7 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, countStyleEvidenceByScope, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidence, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
@@ -1880,7 +1880,7 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
   const modelFindings = mergeConsistencyFindings(results.filter((result) => result.status === "fulfilled").map((result) => result.value));
   const merged = [...findings, ...modelFindings];
   const provider = getProviderConfig();
-  const styleProfile = await getStyleProfile(run.locale, run.contentType || "general", run.domain || "general", { projectId: run.projectId, scopeFallback: true }).catch(() => null);
+  const styleProfile = await getProjectStyleProfile(run.locale, { projectId: run.projectId }).catch(() => null);
   const qualityReport = buildQualityReport({
     segments, brief: run.contextBrief || null, findings: merged, provider, styleProfile,
     batchId: run.batchId, filename: run.filename, locale: run.locale
@@ -2342,7 +2342,7 @@ async function apiHandler(req, res, url) {
     });
     const ruleId = String(body.ruleId || "").trim();
     if (!ruleId) return json(res, 400, { error: "缺少要退休的规则 id" });
-    const profile = await getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
+    const profile = await getProjectStyleProfile(scope.locale, { projectId: scope.project });
     if (!profile?.id) return json(res, 404, { error: "该作用域没有生效中的风格规范" });
     const rules = retireRule(profile.rules, ruleId, { reason: String(body.reason || "").slice(0, 300) });
     if (!rules) return json(res, 409, { error: "该规则不存在或已经退休" });
@@ -2870,89 +2870,71 @@ async function apiHandler(req, res, url) {
     const status = String(url.searchParams.get("status") || "").trim() || null;
     const projectId = String(url.searchParams.get("projectId") || "").trim();
     if (projectId && !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
-    const [profiles, evidence, qaRuns, learningRuns] = await Promise.all([
+    const [profiles, evidence, qaRuns, learningRuns, totals] = await Promise.all([
       listStyleProfiles(locale, status, { projectId }),
       getStyleEvidence(locale, { projectId, limit: 1_000 }),
       getQaRuns(locale, { projectId, limit: 500 }),
-      getStyleLearningRuns(locale, { projectId, limit: 30 })
+      getStyleLearningRuns(locale, { projectId, limit: 30 }),
+      countStyleEvidence(locale, { projectId }).catch(() => null)
     ]);
-    // 证据池的数字要用真实总数：limit=1000 的列表长度会把 8134 条显示成 1000。
-    const evidenceTotals = await countStyleEvidenceByScope(locale, { projectId }).catch(() => new Map());
-    const pools = new Map();
-    const ensurePool = (contentType, domain) => {
-      const key = `${contentType || "general"}\u0000${domain || "general"}`;
-      if (!pools.has(key)) pools.set(key, {
-        contentType: contentType || "general", domain: domain || "general", evidenceCount: 0,
-        threshold: DISTILL_THRESHOLD, sources: { tableImport: 0, humanAccept: 0, qaReview: 0, revised: 0, negative: 0, other: 0 }
-      });
-      return pools.get(key);
+    // 风格资产是项目级的：面板只展示一个池子。
+    // 数字要用真实总数（limit=1000 的列表长度会把 8134 条显示成 1000），
+    // 语体分布另走 byContentType，只作展示与分层取样的说明。
+    const total = Number(totals?.total) || evidence.length;
+    const byProvenance = totals?.byProvenance || {};
+    const tableImport = Number(byProvenance["table-import"]) || 0;
+    const humanAccept = Number(byProvenance["human-accept"]) || 0;
+    const pool = {
+      contentType: "general",
+      domain: "general",
+      scopeLabel: "全项目",
+      evidenceCount: total,
+      threshold: DISTILL_THRESHOLD,
+      sampled: evidence.length,
+      sources: { tableImport, humanAccept, qaReview: qaRuns.length, revised: 0, negative: 0, other: Math.max(0, total - tableImport - humanAccept) },
+      byContentType: totals?.byContentType || []
     };
     for (const item of evidence) {
-      const pool = ensurePool(item.contentType, item.domain);
       if (isNegativeEvidence(item)) pool.sources.negative += 1;
       // 改写证据带着机器初稿，是信息量最高的一类，单独计数便于判断这个池子够不够"有话可说"。
       if (!isNegativeEvidence(item) && classifyChange(item) === "revised") pool.sources.revised += 1;
     }
-    // 真实条数与来源分布走聚合（不受取样上限影响）；改写/负例这两项仍按取样统计。
-    for (const bucket of evidenceTotals.values()) {
-      const pool = ensurePool(bucket.contentType, bucket.domain);
-      pool.evidenceCount = bucket.total;
-      const tableImport = Number(bucket.byProvenance["table-import"]) || 0;
-      const humanAccept = Number(bucket.byProvenance["human-accept"]) || 0;
-      pool.sources.tableImport = tableImport;
-      pool.sources.humanAccept = humanAccept;
-      pool.sources.other = Math.max(0, bucket.total - tableImport - humanAccept);
-      pool.sampled = evidence.filter((item) => (item.contentType || "general") === bucket.contentType && (item.domain || "general") === bucket.domain).length;
-    }
-    for (const item of qaRuns) ensurePool(item.contentType, item.domain).sources.qaReview += 1;
     return json(res, 200, {
       ...profiles,
       learningRuns,
-      evidencePools: [...pools.values()].sort((a, b) => b.evidenceCount - a.evidenceCount)
+      evidencePools: [pool],
+      evidenceByScope: pool.byContentType
     });
   }
   if (req.method === "POST" && url.pathname === "/api/style-profiles/distill") {
-    // 立即重新蒸馏：不用等下一次批次/导入结束。逐作用域走同一套门禁，够条件才调模型。
+    // 立即重新蒸馏：不用等下一次批次/导入结束。风格资产是项目级的，一次只蒸一份。
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale || "zh-CN");
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     const tuning = getSettings();
-    const totals = await countStyleEvidenceByScope(locale, { projectId });
-    const scopes = [...totals.values()].filter((bucket) => Number(bucket.total) > 0);
-    const results = [];
-    for (const bucket of scopes) {
-      const outcome = await distillStyleProfileIfReady({
-        locale,
-        projectId,
-        contentType: bucket.contentType,
-        domain: bucket.domain,
-        threshold: tuning.learning.styleDistillThreshold,
-        growthWindow: tuning.learning.styleDistillGrowthWindow,
-        positiveLimit: tuning.learning.distillPositiveSamples,
-        negativeLimit: tuning.learning.distillNegativeSamples,
-        staleRounds: tuning.learning.ruleStaleRounds
-      }).catch((error) => ({ distilled: null, failed: error.message }));
-      results.push({
-        contentType: bucket.contentType,
-        domain: bucket.domain,
-        evidenceCount: Number(bucket.total) || 0,
-        distilled: Boolean(outcome.distilled),
-        profile: outcome.distilled
-          ? { id: outcome.distilled.id, name: outcome.distilled.name, version: outcome.distilled.version, rules: (outcome.distilled.rules || []).length }
-          : null,
-        skipped: outcome.skipped || "",
-        reason: outcome.reason || outcome.failed || ""
-      });
-    }
-    logInfo("手动重新蒸馏风格规范", {
-      locale, projectId, scopes: results.length,
-      distilled: results.filter((item) => item.distilled).length
+    const outcome = await distillStyleProfileIfReady({
+      locale,
+      projectId,
+      threshold: tuning.learning.styleDistillThreshold,
+      growthWindow: tuning.learning.styleDistillGrowthWindow,
+      positiveLimit: tuning.learning.distillPositiveSamples,
+      negativeLimit: tuning.learning.distillNegativeSamples,
+      staleRounds: tuning.learning.ruleStaleRounds
+    }).catch((error) => ({ distilled: null, failed: error.message }));
+    logInfo("手动重新蒸馏项目风格规范", {
+      locale, projectId, evidenceCount: Number(outcome.evidenceCount) || 0, distilled: Boolean(outcome.distilled)
     });
     return json(res, 200, {
-      locale, projectId, results,
-      distilled: results.filter((item) => item.distilled).length,
-      skipped: results.filter((item) => !item.distilled).length
+      locale,
+      projectId,
+      evidenceCount: Number(outcome.evidenceCount) || 0,
+      distilled: Boolean(outcome.distilled),
+      profile: outcome.distilled
+        ? { id: outcome.distilled.id, name: outcome.distilled.name, version: outcome.distilled.version, rules: (outcome.distilled.rules || []).length }
+        : null,
+      skipped: outcome.skipped || "",
+      reason: outcome.reason || outcome.failed || ""
     });
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/style-profiles/evaluation-jobs/")) {
@@ -3002,7 +2984,7 @@ async function apiHandler(req, res, url) {
       domain: draft.domain || "general",
       project: body.project || "default"
     });
-    const activeProfile = await getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
+    const activeProfile = await getProjectStyleProfile(scope.locale, { projectId: scope.project });
     const state = validateStylePromotionState({ draft, activeProfile });
     if (!state.valid) {
       const error = new Error(state.reasons.join("；"));
@@ -3015,10 +2997,14 @@ async function apiHandler(req, res, url) {
     // 草稿是从这些原文蒸馏出来的，留出集必须把它们排除，否则评测的是背诵而不是泛化。
     const evidenceIds = new Set((draft.evidenceIds || []).map(String));
     const distilledFromSources = evidenceIds.size
-      ? (await getStyleEvidence(scope.locale, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain, exactScope: true, limit: 1_000 }))
+      ? (await getStyleEvidence(scope.locale, { projectId: scope.project, limit: 1_000 }))
         .filter((item) => evidenceIds.has(String(item.id))).map((item) => item.source)
       : [];
-    const holdout = selectStyleHoldout(await listLearningTrajectories({ ...scope, limit: 500 }), { scope, distilledFromSources });
+    // 规范是项目级的，留出集也要覆盖整个项目：只按 locale + project 取轨迹。
+    const holdout = selectStyleHoldout(
+      await listLearningTrajectories({ locale: scope.locale, project: scope.project, limit: 500 }),
+      { scope, distilledFromSources, projectLevel: true }
+    );
     const minStyleSamples = getSettings().learning.styleEvaluationMinSamples;
     if (holdout.length < minStyleSamples) {
       const error = new Error(`可用留出终稿 ${holdout.length} 条，未达风格评测所需的 ${minStyleSamples} 条（已排除蒸馏用过的 ${distilledFromSources.length} 条原文）`);
@@ -4300,7 +4286,7 @@ async function apiHandler(req, res, url) {
     const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
     const matches = matchTerms(source, assets, { contentType, domain, ...deliveryContext(body, source) });
     const classification = await classify({ text: source, hint: contentType, useModel: false });
-    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId: project, scopeFallback: true });
+    const styleProfile = await getProjectStyleProfile(locale, { projectId: project });
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project }));
     const qaGuidance = rankQaCases(source, await getQaCases(locale, { projectId: project, contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(source) });
     const contextPack = buildContextPack({
@@ -4408,7 +4394,7 @@ async function apiHandler(req, res, url) {
     if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings }) });
     const classification = await classify({ text: body.source || "", hint: contentType, useModel: false });
     const projectId = String(body.projectId || body.project || "default");
-    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId, scopeFallback: true });
+    const styleProfile = await getProjectStyleProfile(locale, { projectId });
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project: projectId }));
     const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { projectId, contentType, domain, limit: -1, scopeFallback: true }), { limit: 3, queryEmbedding: await embedSource(body.source || ""), contentType, domain });
     const contextPack = buildContextPack({
@@ -4486,7 +4472,7 @@ async function evaluateQaFile(body = {}) {
   const assets = (await getProjectAssets(locale, projectId)).assets;
   const contentType = body.contentType && body.contentType !== "auto" ? body.contentType : "general";
   const domain = concreteDomain(body.domain, { contentType });
-  const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId, scopeFallback: true });
+  const styleProfile = await getProjectStyleProfile(locale, { projectId });
   const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { projectId, contentType, domain, limit: 12 })).slice(0, 6);
   const evaluated = await evaluateQaPairList({
     pairs, assets, locale, contentType, domain, projectSettings, styleProfile,
@@ -4615,7 +4601,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     // 术语匹配放在识别之后，用真正生效的语体与领域加权，而不是界面提交的原始值。
     const matches = matchTerms(cleanSource, assets, { contentType: scopeContentType, domain, ...deliveryContext(body, cleanSource) });
     const projectId = String(body.projectId || "");
-    const styleProfile = await getStyleProfile(locale, scopeContentType, domain, { projectId, scopeFallback: true });
+    const styleProfile = await getProjectStyleProfile(locale, { projectId });
     const queryEmbedding = await embedSource(cleanSource);
     const narrowedMemories = narrowByDomain(await getMemories(locale, { projectId, contentType: scopeContentType, domain, limit: -1, scopeFallback: true }), domain);
     const narrowedQaCases = narrowByDomain(await getQaCases(locale, { projectId, contentType: scopeContentType, domain, limit: -1, scopeFallback: true }), domain);
@@ -5217,7 +5203,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     const queryEmbedding = await embedSource(body.source);
     const [storedStyleProfile, localeQaCases, localeMemories, userProfile, projectLibraries] = await Promise.all([
       // 统一降级链：同语体同领域 → 同语体通用 → 通用同领域 → 通用×通用。
-      getStyleProfile(locale, classification.contentType, domain, { projectId, scopeFallback: true }),
+      getProjectStyleProfile(locale, { projectId }),
       getQaCases(locale, { projectId, contentType: classification.contentType, domain, limit: -1, scopeFallback: true }),
       getMemories(locale, { contentType: classification.contentType, domain, limit: -1, scopeFallback: true, projectId }),
       getUserProfile(locale, { projectId }),
@@ -5269,6 +5255,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
           name: storedStyleProfile.name,
           contentType: storedStyleProfile.contentType,
           domain: storedStyleProfile.domain,
+          version: Number(storedStyleProfile.version) || 1,
           rank: Number(storedStyleProfile.scopeRank) || 0
         }
         : null,
@@ -5654,9 +5641,11 @@ const evaluationJobs = createEvaluationJobRunner({
 });
 await evaluationJobs.initialize();
 
-/** 同一作用域的风格规范列表（含草稿与停用版本），供风格评测解析变体。 */
+/** 同一项目的风格规范列表（含草稿与停用版本），供风格评测解析变体。 */
 async function styleProfilesInScope(scope) {
-  const { styleProfiles } = await listStyleProfiles(scope.locale, null, { projectId: scope.project, contentType: scope.contentType, domain: scope.domain });
+  // 规范是项目级的：按语体×领域过滤会让 project-level 草稿在当前作用域下找不到，
+  // 评测直接返回"变体不存在"。
+  const { styleProfiles } = await listStyleProfiles(scope.locale, null, { projectId: scope.project });
   return styleProfiles;
 }
 
@@ -5666,7 +5655,7 @@ async function resolveStyleVariant(id, scope) {
   if (String(id) !== NO_STYLE_PROFILE_ID && !profile) return null;
   const [skill, activeProfile] = await Promise.all([
     ensureChampionTranslationSkill(scope),
-    getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project })
+    getProjectStyleProfile(scope.locale, { projectId: scope.project })
   ]);
   // AIQA 始终看当前生效版本，否则草稿会用自己的标准给自己打分。
   return styleVariant({ id, scope, skill, profile, qaProfile: activeProfile });
@@ -5683,7 +5672,7 @@ const styleEvaluationJobs = createEvaluationJobRunner({
   deps: {
     getSkill: resolveStyleVariant,
     getCurrentChampion: async (scope) => {
-      const active = await getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project });
+      const active = await getProjectStyleProfile(scope.locale, { projectId: scope.project });
       return resolveStyleVariant(active?.id || NO_STYLE_PROFILE_ID, scope);
     },
     validatePromotionState: ({ candidate, currentChampion }) => validateStylePromotionState({
@@ -5749,7 +5738,7 @@ const conflictScanner = createConflictScanner({
   deps: {
     loadScopeRules: async (scope) => {
       const [styleProfile, translationSkill, userProfile] = await Promise.all([
-        getStyleProfile(scope.locale, scope.contentType, scope.domain, { projectId: scope.project }),
+        getProjectStyleProfile(scope.locale, { projectId: scope.project }),
         ensureChampionTranslationSkill(scope),
         getUserProfile(scope.locale, { projectId: scope.project })
       ]);

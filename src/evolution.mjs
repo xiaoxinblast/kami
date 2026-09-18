@@ -1,7 +1,7 @@
 import { distillBatchStyleLearningWithModel, distillStyleProfileWithModel, distillUserProfileWithModel, getProviderConfig, reviewEvolutionWithModel } from "./provider.mjs";
-import { countStyleEvidenceByScope, getQaRuns, getStyleEvidence, getStyleProfile, listStyleProfiles, saveStyleLearningRun, saveStyleProfile, saveUserProfile } from "./store.mjs";
+import { countStyleEvidence, getProjectStyleProfile, getQaRuns, getStyleEvidence, listStyleProfiles, saveStyleLearningRun, saveStyleProfile, saveUserProfile } from "./store.mjs";
 import { STYLE_DISTILL_GROWTH_WINDOW, STYLE_DISTILL_THRESHOLD, evaluateStyleDistillDecision, readStyleDistillState } from "./style-distill-gate.mjs";
-import { positiveEvidenceOnly, shapeDistillEvidence } from "./style-delta.mjs";
+import { positiveEvidenceOnly, shapeDistillEvidence, stratifyEvidence } from "./style-delta.mjs";
 import { DEFAULT_STALE_ROUNDS, applyRulePatch, renderInstruction, summarizeRules } from "./style-rules.mjs";
 import { logWarn } from "./logger.mjs";
 
@@ -11,15 +11,17 @@ export const DISTILL_THRESHOLD = STYLE_DISTILL_THRESHOLD;
 export const DISTILL_GROWTH_WINDOW = STYLE_DISTILL_GROWTH_WINDOW;
 export const PROFILE_THRESHOLD = 3;
 
-/** 证据池按「语体 × 领域」聚合的键，与 countStyleEvidenceByScope 保持一致。 */
-function scopeTotalKey(contentType, domain = "general") {
-  return `${contentType || "general"}\u0000${domain || "general"}`;
-}
+/**
+ * 风格资产的规范作用域：项目级资产一律写这一对值。
+ * 语体与领域仍然写在证据行上，只作标签与抽样分层，不再参与分池。
+ */
+export const PROJECT_STYLE_SCOPE = Object.freeze({ contentType: "general", domain: "general" });
 
 function sampleEvidence(evidence, limits = {}) {
   const human = evidence.filter((item) => item.provenance === "human-accept");
   const rest = evidence.filter((item) => item.provenance !== "human-accept");
-  return shapeDistillEvidence([...human, ...rest], limits);
+  // 先按来源排序（人工采纳最优先），再按语体分层取样，最后交给统一的限量与溯源。
+  return shapeDistillEvidence(stratifyEvidence([...human, ...rest], { positiveLimit: limits.positiveLimit }), limits);
 }
 
 function dedupeQaRuns(runs) {
@@ -107,32 +109,41 @@ export async function distillBatchStyleLearning({ batchId, filename, locale, con
   });
 }
 
+/**
+ * 风格规范蒸馏：项目级。
+ *
+ * 以前按「语体 × 领域」分池，结果是：通用池一旦蒸过一次就永远不增长（新证据都落到
+ * 具体语体池），跨作用域的同类证据被拆成两套，细分池攒够 8 条又各自分叉出一份规范。
+ * 现在证据、闸门、写入全部按「项目 + 语言」口径，语体与领域只作标签。
+ */
 export async function distillStyleProfileIfReady({
-  locale, contentType, domain, projectId = "", sourceBatchId = "", learningRunId = "",
+  locale, projectId = "", sourceBatchId = "", learningRunId = "",
   threshold = DISTILL_THRESHOLD, growthWindow = DISTILL_GROWTH_WINDOW,
   positiveLimit = 50, negativeLimit = 15, staleRounds = DEFAULT_STALE_ROUNDS
 }) {
-  const [evidence, existingProfiles, scopeTotals] = await Promise.all([
-    getStyleEvidence(locale, { projectId, contentType, domain, exactScope: true, limit: 1_000 }),
-    listStyleProfiles(locale, null, { projectId, contentType, domain }),
+  const contentType = PROJECT_STYLE_SCOPE.contentType;
+  const domain = PROJECT_STYLE_SCOPE.domain;
+  const [evidence, existingProfiles, totals] = await Promise.all([
+    getStyleEvidence(locale, { projectId, limit: 1_000 }),
+    listStyleProfiles(locale, null, { projectId }),
     // 抓取上限是 1000：拿列表长度当"池子有多大"，池子超过 1000 条后增长窗口就永远无法满足。
-    countStyleEvidenceByScope(locale, { projectId }).catch(() => new Map())
+    countStyleEvidence(locale, { projectId }).catch(() => null)
   ]);
-  const scopeTotal = Number(scopeTotals.get(scopeTotalKey(contentType, domain))?.total) || evidence.length;
+  const projectTotal = Number(totals?.total) || evidence.length;
   const decision = evaluateStyleDistillDecision({
-    evidenceCount: scopeTotal,
+    evidenceCount: projectTotal,
     ...readStyleDistillState(existingProfiles.styleProfiles, { contentType, domain }),
     threshold,
     growthWindow
   });
   if (!decision.distill) return { distilled: null, ...decision };
-  const previousProfile = await getStyleProfile(locale, contentType, domain, { projectId });
+  const previousProfile = await getProjectStyleProfile(locale, { projectId });
   const { examples, counterExamples } = sampleEvidence(evidence, { positiveLimit, negativeLimit });
   // 规则跨轮累积：模型看到已有规则并只提出增量操作，没提到的规则不会被删掉。
   const existingRules = Array.isArray(previousProfile?.rules) ? previousProfile.rules : [];
   const round = Math.max(0, ...existingRules.map((rule) => Number(rule.lastRound) || 0)) + 1;
   const distilled = await distillStyleProfileWithModel({
-    locale, contentType, domain, examples, counterExamples, previousProfile, existingRules
+    locale, contentType, domain, projectLevel: true, examples, counterExamples, previousProfile, existingRules
   });
   const applied = applyRulePatch(existingRules, distilled.operations, {
     round,
@@ -147,7 +158,7 @@ export async function distillStyleProfileIfReady({
     instruction: renderInstruction(applied.rules, previousProfile?.instruction),
     rules: applied.rules,
     examples: (previousProfile?.examples || []).slice(0, 12),
-    evidenceCount: scopeTotal,
+    evidenceCount: projectTotal,
     evidenceIds: evidence.slice(0, 200).map((item) => item.id),
     generatedBy: getProviderConfig().model,
     sourceBatchId,
@@ -183,18 +194,20 @@ export async function runEvolutionReview({
   threshold = DISTILL_THRESHOLD, growthWindow = DISTILL_GROWTH_WINDOW,
   positiveLimit = 50, negativeLimit = 15, staleRounds = DEFAULT_STALE_ROUNDS
 }) {
-  const [evidence, qaRunsRaw, previousProfile, scopeTotals] = await Promise.all([
-    getStyleEvidence(locale, { projectId, contentType, domain, exactScope: true, limit: 1_000 }),
+  // 风格侧全部按项目口径：证据、上一版规范、池子大小都不再按作用域切；
+  // QA 反例仍按本批的语体与领域取（那是质量控制资产，不属于本次项目级化范围）。
+  const [evidence, qaRunsRaw, previousProfile, projectTotals] = await Promise.all([
+    getStyleEvidence(locale, { projectId, limit: 1_000 }),
     getQaRuns(locale, { projectId, contentType, domain, limit: 60 }),
-    getStyleProfile(locale, contentType, domain, { projectId }),
-    countStyleEvidenceByScope(locale, { projectId }).catch(() => new Map())
+    getProjectStyleProfile(locale, { projectId }),
+    countStyleEvidence(locale, { projectId }).catch(() => null)
   ]);
   const qaRuns = dedupeQaRuns(qaRunsRaw);
   // 报告里也写真实池子大小，跟判定口径一致。
-  const scopeTotal = Number(scopeTotals.get(scopeTotalKey(contentType, domain))?.total) || evidence.length;
+  const evidenceTotal = Number(projectTotals?.total) || evidence.length;
   const result = {
     locale, contentType, domain, batchId, projectId,
-    evidenceCount: scopeTotal,
+    evidenceCount: evidenceTotal,
     qaRunsReviewed: qaRuns.length,
     distilled: null,
     profile: null,
@@ -211,7 +224,7 @@ export async function runEvolutionReview({
   // 等于把刚攒起来的规则一次性抹平。
   try {
     const { distilled, ...pending } = await distillStyleProfileIfReady({
-      locale, contentType, domain, projectId, threshold, growthWindow, positiveLimit, negativeLimit, staleRounds
+      locale, projectId, threshold, growthWindow, positiveLimit, negativeLimit, staleRounds
     });
     if (distilled) result.distilled = distilled;
     else result.distillPending = pending;

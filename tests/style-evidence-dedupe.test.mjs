@@ -51,7 +51,7 @@ const baseInput = {
   embedding: [0.5, 0.5]
 };
 
-test("没有条目 ID 的风格证据按原文+译文+作用域去重，命中就覆盖", async () => {
+test("没有条目 ID 的风格证据按原文+译文+项目去重，命中就覆盖", async () => {
   calls.length = 0;
   const saved = await saveDirectusStyleEvidence({ ...baseInput });
   assert.equal(saved.id, "ev-1");
@@ -59,10 +59,12 @@ test("没有条目 ID 的风格证据按原文+译文+作用域去重，命中�
   assert.equal(calls.some((call) => call.method === "POST"), false);
   const fallback = calls.find((call) => call.method === "GET" && call.emptyEntryKey);
   assert.ok(fallback, "没有条目 ID 时要退回原文比对");
-  // 去重必须限定在同一作用域内，否则会把别的语体/领域的句子当成同一条覆盖掉。
-  for (const filter of ["filter%5Btarget_locale%5D%5B_eq%5D=zh-CN", "filter%5Bcontent_type%5D%5B_eq%5D=dialogue", "filter%5Bdomain%5D%5B_eq%5D=game", "filter%5Bproject_id%5D%5B_eq%5D=project-a"]) {
-    assert.ok(fallback.query.includes(filter), `去重查询缺少作用域过滤 ${filter}：${fallback.query}`);
+  // 去重按项目 + 语言：风格资产是项目级的，语体与领域不再参与判重。
+  for (const filter of ["filter%5Btarget_locale%5D%5B_eq%5D=zh-CN", "filter%5Bproject_id%5D%5B_eq%5D=project-a"]) {
+    assert.ok(fallback.query.includes(filter), `去重查询缺少项目过滤 ${filter}：${fallback.query}`);
   }
+  assert.equal(fallback.query.includes("content_type"), false, "去重不再按语体切开");
+  assert.equal(fallback.query.includes("domain"), false, "去重不再按领域切开");
 });
 
 test("原文相同但译文不同时不覆盖，按新证据写入", async () => {
@@ -73,10 +75,12 @@ test("原文相同但译文不同时不覆盖，按新证据写入", async () =>
   assert.equal(calls.some((call) => call.method === "PATCH"), false);
 });
 
-test("有条目 ID 时只按 ID + 作用域对齐，不再退回原文比对", async () => {
+test("有条目 ID 时按 ID + 项目对齐，不再退回原文比对", async () => {
   calls.length = 0;
   await saveDirectusStyleEvidence({ ...baseInput, entryKey: "ID-9" });
   const lookup = calls.find((call) => call.method === "GET");
   assert.equal(lookup.entryKey, "ID-9");
   assert.equal(lookup.emptyEntryKey, false);
+  assert.equal(lookup.query.includes("content_type"), false, "条目 ID 判重不再按语体切开");
+  assert.equal(lookup.query.includes("domain"), false, "条目 ID 判重不再按领域切开");
 });

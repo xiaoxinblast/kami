@@ -76,8 +76,8 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
         return route.fulfill({
           status: 200, contentType: "application/json",
           body: JSON.stringify({
-            locale: "zh-CN", projectId: "project-1", distilled: 1, skipped: 0,
-            results: [{ contentType: "general", domain: "general", evidenceCount: 8134, distilled: true, profile: { id: "sp-v2", name: "简体中文 general 风格", version: 2, rules: 9 }, skipped: "", reason: "" }]
+            locale: "zh-CN", projectId: "project-1", evidenceCount: 8134, distilled: true, skipped: "", reason: "",
+            profile: { id: "sp-v2", name: "简体中文 general 风格", version: 2, rules: 9 }
           })
         });
       }
@@ -96,8 +96,11 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
       else if (url.pathname === "/api/style-profiles") payload = {
         userProfiles: [], styleProfiles: [], learningRuns: [],
         evidencePools: [
-          { contentType: "general", domain: "general", evidenceCount: 8134, threshold: 8, sources: { tableImport: 8134, humanAccept: 0, qaReview: 0 } },
-          { contentType: "general", domain: "game", evidenceCount: 0, threshold: 8, sources: { tableImport: 0, humanAccept: 0, qaReview: 67 } }
+          { contentType: "general", domain: "general", scopeLabel: "全项目", evidenceCount: 8134, threshold: 8, sampled: 1000, sources: { tableImport: 8134, humanAccept: 0, qaReview: 0, revised: 0, negative: 0, other: 0 }, byContentType: [{ contentType: "general", count: 8134 }] }
+        ],
+        evidenceByScope: [
+          { contentType: "general", count: 8100 },
+          { contentType: "dialogue", count: 34 }
         ]
       };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
@@ -120,7 +123,7 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     await page.waitForFunction(() => /本次参考：/.test(document.querySelector("#classificationPreview")?.textContent || ""), null, { timeout: 15_000 });
     const previewText = await page.locator("#classificationPreview").textContent();
     assert.match(previewText, /语体/u);
-    assert.match(previewText, /本次参考：规范（待分类文本 × 通用，通用兜底） · 译例 5 条（同作用域 2 \/ 通用 3）/u, `结果要写清作用域：${previewText}`);
+    assert.match(previewText, /本次参考：项目规范「通用规范」 v1 · 译例 5 条（同作用域 2 \/ 通用 3）/u, `结果要写清用的是哪一版项目规范：${previewText}`);
     const qaPanel = await page.locator("#qaList").textContent();
     assert.match(qaPanel, /本段用途与质量档/u, "结果要写清本段用途与质量档");
     assert.match(qaPanel, /标准档/u);
@@ -133,14 +136,16 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     assert.equal(await page.locator("#view-autoqa #autoQaContentType").count(), 0);
     assert.equal(await page.locator("#view-autoqa #autoQaDomain").count(), 0);
 
-    // ④ 证据池：默认只看总进度，细分折起来
+    // ④ 证据池：项目级只有一个池子，语体分布折起来
     await page.locator('.nav-item[data-view="styles"]').click();
     await page.waitForSelector(".style-pool.is-total");
     const poolText = await page.locator("#styleEvidencePools").textContent();
-    assert.match(poolText, /全部证据/u);
+    assert.match(poolText, /全部证据（项目级）/u);
     assert.match(poolText, /8134 \/ 8/u, `总进度要合并显示：${poolText}`);
-    assert.match(poolText, /按作用域查看（2 个）/u);
-    assert.equal(await page.locator("#styleEvidencePools details.advanced-scope").evaluate((node) => node.open), false, "细分默认收起");
+    assert.match(poolText, /项目规范证据池/u);
+    assert.equal(await page.locator("#styleEvidencePools > .style-pool").count(), 2, "只有一个项目池 + 一个总进度，不再有按作用域拆开的池子");
+    assert.match(poolText, /按语体查看证据分布（2 类）/u);
+    assert.equal(await page.locator("#styleEvidencePools details.advanced-scope").evaluate((node) => node.open), false, "语体分布默认收起");
 
     // ⑤ 立即重新蒸馏：不用等下一次批次，点了就打蒸馏接口并刷新
     const distillButton = page.locator("#styleDistillNow");
@@ -154,10 +159,20 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     assert.equal(distillCalls.length, 1);
     assert.equal(distillCalls[0].locale, "zh-CN");
     assert.equal(distillCalls[0].projectId, "project-1");
-    assert.match(await page.locator("#toast").textContent(), /待分类文本×general v2（9 条规则）/u, "结果要说清蒸馏出了哪个作用域的哪一版");
+    assert.match(await page.locator("#toast").textContent(), /已重新蒸馏项目规范 v2（9 条规则/u, "结果要说清蒸馏出的项目规范版本");
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
-      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/scope-pool-merged.png`, fullPage: true, animations: "disabled" });
+      // 风格页：项目级单池 + 语体分布折叠。
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-pool-project-level.png`, fullPage: true, animations: "disabled" });
+    }
+    // ⑥ 学习中心：作用域栏只服务翻译技能，不再声称管风格
+    await page.locator('.nav-item[data-view="learning"]').click();
+    const scopeBar = await page.locator(".learning-scope-bar").textContent();
+    assert.match(scopeBar, /翻译技能作用域/u);
+    assert.match(scopeBar, /风格规范已经改成项目级/u);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/learning-skill-scope-bar.png`, animations: "disabled" });
     }
     assert.deepEqual(errors, []);
   } finally {

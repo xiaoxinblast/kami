@@ -661,13 +661,22 @@ export async function analyzeTermTableStructureWithModel(snapshot, requestedLoca
   return payload;
 }
 
-export async function distillStyleProfileWithModel({ locale, contentType, domain, examples, counterExamples = [], previousProfile = null, existingRules = [] }) {
+export async function distillStyleProfileWithModel({ locale, contentType, domain, projectLevel = false, examples, counterExamples = [], previousProfile = null, existingRules = [] }) {
   const language = LOCALE_NAMES[locale] || locale;
   const active = (existingRules || []).filter((rule) => rule.status !== "retired");
+  // 项目级规范要覆盖对白、公告、UI 等混排内容：不注明适用场景的规则会被当成全局要求，
+  // 于是"对白该口语"会污染公告，反之亦然。这里强制每条规则自带适用条件。
+  const scopeInstruction = projectLevel
+    ? `证据来自同一项目的混合内容（对白、公告、UI、道具、活动规则等混在一起）。项目级规范必须能同时服务这些场景，因此：\n`
+      + `· 新规则与改写的规则都要在句首写明适用场景，例如"对白中：…""公告与活动规则：…""UI 与系统提示：…""全场景：…"；\n`
+      + `· 只在某一种场景成立的现象，绝不能写成不带场景的全局规则；\n`
+      + `· 确实跨场景成立的（术语一致、标点、格式、翻译腔、称谓统一）才写"全场景：…"。\n`
+    : "";
   const content = await chat([
     {
       role: "system",
       content: `你是${language}游戏本地化风格资产编辑。你的产出不是重写整份规范，而是对**已有规则集**提出增量操作——规则是跨轮累积的，历史规则不会因为你这轮没提到就被删掉。\n`
+        + scopeInstruction
         + `对每条已有规则，如果本批证据仍然支持它就 keep，措辞需要修正就 update，本批证据明确与它冲突才 retire（必须写明冲突在哪）。本批出现了已有规则未覆盖的稳定现象，才 add。\n`
         + `不要为了凑数而 add：只在同一现象至少出现两次时才立规则。也不要把一次性的偶然译法写成通用规则。\n\n`
         + `证据分三类，信息量不同：\n`
@@ -682,6 +691,7 @@ export async function distillStyleProfileWithModel({ locale, contentType, domain
       role: "user",
       content: JSON.stringify({
         locale, contentType, domain,
+        scope: projectLevel ? "project" : "content-type",
         existingRules: active.map((rule) => ({ id: rule.id, category: rule.category, rule: rule.rule, evidenceCount: rule.evidenceCount, rounds: rule.rounds })),
         // 尚未结构化的历史规范：首次按规则蒸馏时让模型把它转成 add 操作。
         legacyInstruction: active.length ? undefined : (previousProfile?.instruction || undefined),

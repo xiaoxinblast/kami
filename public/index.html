@@ -389,7 +389,7 @@
             </section>
             <div class="style-explainer">
               <div><span>01</span><strong>收集同类双语句段</strong><small>表格导入的完整译例、人工采纳译文和 AIQA 复盘分别记账；短术语不会冒充风格。</small></div>
-              <div><span>02</span><strong>按语体 × 领域精炼</strong><small>同一分类累计 8 条日中风格证据后生成草稿。</small></div>
+              <div><span>02</span><strong>项目级精炼</strong><small>证据按项目累计，达阈值后蒸馏出<b>一份</b>项目规范；语体只用于分层取样与规则适用场景，不再各存一份。</small></div>
               <div><span>03</span><strong>人工指南优先，其余需启用</strong><small>人工导入的风格指南导入即生效并优先于其他风格规则；从语料蒸馏出的草稿仍是候选，人工启用后才进入翻译提示。</small></div>
             </div>
             <div class="style-filter-row"><label><span>状态</span><select id="styleStatus"><option value="">全部</option><option value="active">已启用</option><option value="inactive">已关闭</option><option value="draft">待启用</option></select></label><button class="button secondary" id="refreshStyles">刷新风格</button></div>
@@ -402,7 +402,7 @@
               <div class="batch-learning-list style-learning-list" id="styleLearningRuns"><div class="empty-list">还没有可展示的批次学习记录</div></div>
             </section>
             <section class="style-library-section evidence-section">
-              <div class="style-section-head"><div><span class="card-kicker">03 · RAW EVIDENCE</span><h3>原始证据池</h3></div><small>用于判断每个语言、语体与领域是否已经积累到足够样本</small></div>
+              <div class="style-section-head"><div><span class="card-kicker">03 · RAW EVIDENCE</span><h3>原始证据池</h3></div><small>项目级证据池：够阈值就蒸馏出一份项目规范，语体分布只用于分层取样</small></div>
               <div class="style-evidence-pools" id="styleEvidencePools"><div class="empty-list">正在统计风格证据来源……</div></div>
             </section>
           </article>
@@ -415,7 +415,7 @@
         <section class="view" id="view-learning">
           <div class="locale-strip" id="learningLocales" aria-label="学习资产语言"></div>
           <div class="learning-scope-bar">
-            <div><span class="card-kicker">SKILL SCOPE</span><strong>查看作用域（可选）</strong><small>固定为日语→简体中文；这里只决定"看哪个作用域的学习资产"，不参与翻译时的取用（翻译始终按降级链自动找）。</small></div>
+            <div><span class="card-kicker">SKILL SCOPE</span><strong>翻译技能作用域</strong><small>固定为日语→简体中文。这里只决定"看哪个作用域的翻译技能与评测"；风格规范已经改成项目级（每项目一份），不受这里影响。</small></div>
             <label><span>内容语体</span><select id="learningContentType"><option value="general">通用内容</option></select></label>
             <label><span>业务领域</span><select id="learningDomain"><option value="general">通用</option><option value="game">游戏</option><option value="marketing">市场营销</option><option value="community">社区运营</option></select></label>
           </div>

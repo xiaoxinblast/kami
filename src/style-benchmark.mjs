@@ -133,7 +133,15 @@ export function validateStylePromotionState({ draft, activeProfile, evaluation =
  * the abstract preference already baked into the instruction text, which is
  * exactly why the source-level exclusion has to happen here.
  */
-export function selectStyleHoldout(trajectories, { scope, distilledFromSources = [], limit = 40 } = {}) {
+/**
+ * 风格评测的留出集。
+ *
+ * `projectLevel: true` 时只按「项目 + 语言」匹配，不再要求语体与领域逐字相同：
+ * 规范本身已经是项目级的，留出集也必须覆盖整个项目，否则对话/公告这些主力语体的
+ * 轨迹会被整批排除，评测只能对着 general 轨迹做结论（甚至直接因样本不足被拒）。
+ * 技能评测仍走原有的按作用域匹配。
+ */
+export function selectStyleHoldout(trajectories, { scope, distilledFromSources = [], limit = 40, projectLevel = false } = {}) {
   const sources = (Array.isArray(distilledFromSources) ? distilledFromSources : [])
     .map((value) => String(value || "").trim())
     .filter(Boolean);
@@ -144,5 +152,13 @@ export function selectStyleHoldout(trajectories, { scope, distilledFromSources =
     if (skeletons.has(sourceSkeleton(source))) return false;
     return !sources.some((evidenceSource) => isSelfDerived(evidenceSource, source));
   });
-  return selectSkillHoldout(unseen, { scope, limit });
+  if (!projectLevel) return selectSkillHoldout(unseen, { scope, limit });
+  const maximum = Math.max(1, Math.trunc(Number(limit)) || 40);
+  return unseen.filter((item) => item
+    && (!scope?.locale || String(item.locale || item.targetLocale || "") === String(scope.locale))
+    && (!scope?.project || String(item.project || "") === String(scope.project))
+    && String(item.status || "") === "completed"
+    && item.humanDecision?.accepted === true
+    && String(item.humanDecision?.finalTranslation || item.finalTranslation || "").trim())
+    .slice(0, maximum);
 }

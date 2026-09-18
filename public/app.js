@@ -1189,21 +1189,17 @@ function resolutionSummary(classification, domainResolution) {
 }
 
 /**
- * 作用域透明化：这次翻译到底吃到了哪一档规范、译例分别来自哪一档。
- * 降级链是「同语体同领域 → 同语体通用 → 通用同领域 → 通用×通用」，这里把命中结果说清楚，
- * 用户不必再去猜"我配的语体到底起没起作用"。
+ * 本次参考透明化：风格规范是项目级的（每项目一份），记忆仍按作用域排序，
+ * 这里把"用的是哪一版规范、译例来自哪一档"说清楚。
  */
 function scopeUsageText(scopeUsage) {
   if (!scopeUsage) return "";
   const parts = [];
   const profile = scopeUsage.styleProfile;
   if (profile) {
-    const typeLabel = state.bootstrap?.contentTypes?.[profile.contentType]?.label || profile.contentType;
-    const domainLabel = DOMAIN_LABELS[profile.domain] || profile.domain;
-    const fallbackNote = Number(profile.rank) > 0 ? "，通用兜底" : "";
-    parts.push(`规范（${typeLabel} × ${domainLabel}${fallbackNote}）`);
+    parts.push(`项目规范${profile.name ? `「${profile.name}」` : ""} v${profile.version || 1}`);
   } else {
-    parts.push("无匹配规范");
+    parts.push("无启用中的项目规范");
   }
   const counts = scopeUsage.memoryScopes || {};
   const total = (counts.exact || 0) + (counts.partial || 0) + (counts.general || 0);
@@ -4046,12 +4042,11 @@ async function distillStyleNow(button) {
       method: "POST",
       body: JSON.stringify({ ...projectPayload(), locale: state.styleLocale })
     });
-    const distilled = (result.results || []).filter((item) => item.distilled);
-    if (distilled.length) {
-      toast(`已重新蒸馏：${distilled.map((item) => `${contentTypeLabel(item.contentType)}×${item.domain} v${item.profile.version}（${item.profile.rules} 条规则）`).join("、")}`);
+    // 项目级蒸馏一次只出一份：成功就说版本与规则数，跳过就把门禁原因原样说明。
+    if (result.distilled) {
+      toast(`已重新蒸馏项目规范 v${result.profile.version}（${result.profile.rules} 条规则，证据 ${result.evidenceCount} 条）`);
     } else {
-      const first = (result.results || [])[0];
-      toast(first ? `暂未蒸馏：${first.reason || "未达条件"}` : "当前还没有风格证据可蒸馏");
+      toast(result.reason ? `暂未蒸馏：${result.reason}` : "当前还没有风格证据可蒸馏");
     }
     await loadStyleGuidance(state.styleLocale);
   } catch (error) {
@@ -4115,23 +4110,28 @@ function renderStyleGuidance() {
   // 渲染完要挂事件：这一块的卡片里有"重跑模型浓缩"这类按记录操作的按钮。
   bindStyleLearningLinks($("#styleLearningRuns"));
   const pools = profiles.evidencePools || [];
-  // 默认只显示"全部证据"的总进度（用户不需要理解作用域就能判断够不够），
-  // 细分作用域折起来，需要区分时再展开。
+  // 风格资产是项目级的：只有一个池子。语体分布折起来，需要判断"证据里有没有对白/公告"
+  // 时再展开（蒸馏会按语体分层取样）。
   const poolTotal = pools.reduce((sum, pool) => sum + (Number(pool.evidenceCount) || 0), 0);
   const poolThreshold = Number(pools[0]?.threshold) || 8;
   const poolPercent = Math.min(100, Math.round((poolTotal / Math.max(1, poolThreshold)) * 100));
+  const scopeBreakdown = (profiles.evidenceByScope || pools[0]?.byContentType || []);
+  const scopeDetail = scopeBreakdown.length
+    ? scopeBreakdown.map((bucket) => `<div class="style-pool"><div><strong>${escapeHtml(contentTypeLabel(bucket.contentType))}</strong><small>该语体的证据条数（蒸馏按语体分层取样，保证每类都有代表）</small></div><div class="style-pool-progress"><i style="width:${Math.min(100, Math.round(((Number(bucket.count) || 0) / Math.max(1, poolTotal)) * 100))}%"></i></div><span>${bucket.count} 条</span></div>`).join("")
+    : '<div class="empty-list compact">还没有证据。</div>';
   const poolDetail = pools.map((pool) => {
     const percent = Math.min(100, Math.round((pool.evidenceCount / Math.max(1, pool.threshold)) * 100));
     const sources = pool.sources || {};
     const sampledNote = Number(pool.sampled) && Number(pool.sampled) < Number(pool.evidenceCount)
       ? `<small>分析取样：${pool.sampled} 条（改写 / 负例按取样统计）</small>`
       : "";
-    return `<div class="style-pool"><div><strong>${escapeHtml(contentTypeLabel(pool.contentType))} · ${escapeHtml(pool.domain)}</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 8 条直接证据）</small>${sampledNote}</div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
+    return `<div class="style-pool is-project"><div><strong>项目规范证据池</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}${sources.revised ? ` · 含改写 ${sources.revised}` : ""}${sources.negative ? ` · 反例 ${sources.negative}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 ${pool.threshold} 条直接证据）</small>${sampledNote}</div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
   }).join("");
   $("#styleEvidencePools").innerHTML = pools.length
-    ? `<div class="style-pool-heading"><div><strong>正在积累的证据池</strong><small>同一作用域累计达到 ${poolThreshold} 条才生成专用风格草稿；通用规范对所有语体生效</small></div><button class="button secondary small" type="button" id="styleDistillNow">立即重新蒸馏</button></div>
-      <div class="style-pool is-total"><div><strong>全部证据</strong><small>覆盖 ${pools.length} 个作用域 · 翻译时按"同语体同领域 → 通用"自动取用</small></div><div class="style-pool-progress"><i style="width:${poolPercent}%"></i></div><span>${poolTotal} / ${poolThreshold}</span></div>
-      <details class="advanced-scope"><summary>按作用域查看（${pools.length} 个）</summary>${poolDetail}</details>`
+    ? `<div class="style-pool-heading"><div><strong>正在积累的项目证据池</strong><small>累计达到 ${poolThreshold} 条才会蒸馏；蒸馏时按语体分层取样，规则会写明适用场景</small></div><button class="button secondary small" type="button" id="styleDistillNow">立即重新蒸馏</button></div>
+      <div class="style-pool is-total"><div><strong>全部证据（项目级）</strong><small>翻译时只用这一份项目规范，不再按语体×领域各取一份</small></div><div class="style-pool-progress"><i style="width:${poolPercent}%"></i></div><span>${poolTotal} / ${poolThreshold}</span></div>
+      ${poolDetail}
+      <details class="advanced-scope"><summary>按语体查看证据分布（${scopeBreakdown.length} 类）</summary>${scopeDetail}</details>`
     : '<div class="empty-list compact">还没有完整双语句段进入风格证据池；导入短术语不会产生风格。</div>';
   // 池子每次重画，按钮要重新挂：不用等下一次批次跑完就能手动触发蒸馏。
   $("#styleDistillNow")?.addEventListener("click", (event) => distillStyleNow(event.currentTarget));

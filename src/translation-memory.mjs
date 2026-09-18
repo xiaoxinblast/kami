@@ -44,19 +44,21 @@ export function memoryMatchAttempts({ source = "", target = "", entryKey = "" } 
 }
 
 /**
- * 风格证据的身份：同一条目 ID + 同一作用域（语种 + 语体 + 领域 + 项目）只保留最新一条，
- * 改稿重导时更新那一条，而不是让同一句在同一作用域里反复堆积、把蒸馏样本撑成重复项。
- * 没有条目 ID（表格导入、QA 采纳、同事反馈）时返回 null，保持追加语义——那些证据本身就是语料累积。
+ * 风格证据的身份：同一条目 ID + 同项目 + 同语言只保留最新一条，改稿重导时更新那一条。
+ *
+ * 这里**不再带语体与领域**：风格资产已经改成项目级，同一句在两次导入里被判成不同用途
+ * 时应该更新同一条，而不是在两个池子里各留一份（那会让同一句被重复加权，也可能双向
+ * 蒸馏出互相矛盾的规则）。语体与领域仍然写在证据行上，只作标签。
+ *
+ * 没有条目 ID（普通双语表格、同事反馈）时返回 null，保持追加语义——那些证据本身就是语料累积。
  */
-export function styleEvidenceMatch({ entryKey = "", locale = "", contentType = "general", domain = "general", projectId = "" } = {}) {
+export function styleEvidenceMatch({ entryKey = "", locale = "", projectId = "" } = {}) {
   const key = String(entryKey || "").trim();
   const targetLocale = String(locale || "").trim();
   if (!key || !targetLocale) return null;
   return {
     entryKey: key,
     locale: targetLocale,
-    contentType: String(contentType || "general"),
-    domain: String(domain || "general"),
     projectId: String(projectId || "").trim()
   };
 }

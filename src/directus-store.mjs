@@ -490,6 +490,34 @@ export async function deleteDirectusMemory(locale, id) {
   }
 }
 
+function mapStyleProfileRow(profile) {
+  if (!profile) return null;
+  return {
+    id: profile.id,
+    projectId: profile.project_id || "",
+    name: profile.name,
+    source: "style-library",
+    locale: profile.target_locale,
+    contentType: profile.content_type,
+    contentTags: arrayValue(profile.content_tags),
+    domain: profile.domain || "general",
+    instruction: profile.instructions,
+    reviewRubric: profile.review_rubric || null,
+    rules: arrayValue(profile.rules),
+    examples: arrayValue(profile.examples),
+    version: Number(profile.version) || 1,
+    parentId: profile.parent_id || null,
+    evidenceCount: Number(profile.evidence_count) || 0,
+    evidenceIds: arrayValue(profile.evidence_ids),
+    generatedBy: profile.generated_by || "",
+    sourceBatchId: profile.source_batch_id || "",
+    learningRunId: profile.learning_run_id || "",
+    status: profile.status,
+    scopeRank: Number.isInteger(profile.scopeRank) ? profile.scopeRank : 0,
+    updatedAt: profile.date_updated || null
+  };
+}
+
 export async function getDirectusStyleProfile(locale, contentType, domain = "general", { projectId = "", scopeFallback = false } = {}) {
   assertLocale(locale);
   const params = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,project_id,name,target_locale,content_type,content_tags,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,evidence_ids,generated_by,source_batch_id,learning_run_id,status,date_updated" });
@@ -508,27 +536,7 @@ export async function getDirectusStyleProfile(locale, contentType, domain = "gen
   params.set("filter[status][_eq]", "active");
   const items = await request(`/items/style_profiles?${params}`);
   const profile = scopeFallback ? pickProfileByScope(items, { contentType, domain }) : (items.find((item) => item.domain === domain) || items.find((item) => item.domain === "general") || items[0]);
-  if (!profile) return null;
-  return {
-    id: profile.id,
-    projectId: profile.project_id || "",
-    name: profile.name,
-    source: "style-library",
-    locale: profile.target_locale,
-    contentType: profile.content_type,
-    contentTags: arrayValue(profile.content_tags),
-    domain: profile.domain || "general",
-    instruction: profile.instructions,
-    reviewRubric: profile.review_rubric || null,
-    rules: arrayValue(profile.rules),
-    examples: arrayValue(profile.examples),
-    version: Number(profile.version) || 1,
-    evidenceCount: Number(profile.evidence_count) || 0,
-    sourceBatchId: profile.source_batch_id || "",
-    learningRunId: profile.learning_run_id || "",
-    scopeRank: Number.isInteger(profile.scopeRank) ? profile.scopeRank : 0,
-    updatedAt: profile.date_updated
-  };
+  return mapStyleProfileRow(profile);
 }
 
 export async function saveDirectusStyleEvidence(input) {
@@ -553,15 +561,14 @@ export async function saveDirectusStyleEvidence(input) {
     note: String(input.note || "").trim(),
     ...(embedding ? { embedding } : {})
   };
-  // 同条目 ID + 同作用域只留最新：命中就 PATCH 那一条，避免同一句在证据池里重复铺开。
-  const match = styleEvidenceMatch({ entryKey: input.entryKey, locale, contentType: body.content_type, domain: body.domain, projectId: body.project_id });
+  // 同条目 ID + 同项目 + 同语言只留最新：命中就 PATCH 那一条。
+  // 语体与领域不再参与判重（风格资产是项目级的），改判用途只会更新标签，不会新增一条。
+  const match = styleEvidenceMatch({ entryKey: input.entryKey, locale, projectId: body.project_id });
   let existingId = "";
   if (match) {
     const params = new URLSearchParams({ limit: "1", sort: "-date_created", fields: "id" });
     params.set("filter[target_locale][_eq]", match.locale);
     params.set("filter[entry_key][_eq]", match.entryKey);
-    params.set("filter[content_type][_eq]", match.contentType);
-    params.set("filter[domain][_eq]", match.domain);
     if (match.projectId) params.set("filter[project_id][_eq]", match.projectId);
     else params.set("filter[project_id][_empty]", "true");
     const found = await request(`/items/style_evidence?${params}`);
@@ -569,11 +576,9 @@ export async function saveDirectusStyleEvidence(input) {
   }
   if (!existingId && !match) {
     // 没有条目 ID 的来源（普通双语表格）过去只能纯新增：同一份文件导两次就多一份证据，
-    // 学习时等于同一句被加权两次。这里退回"原文 + 译文 + 同作用域"去重，只留最新一条。
+    // 学习时等于同一句被加权两次。这里退回"原文 + 译文 + 同项目"去重，只留最新一条。
     const params = new URLSearchParams({ limit: "-1", sort: "-date_created", fields: "id,source,target" });
     params.set("filter[target_locale][_eq]", locale);
-    params.set("filter[content_type][_eq]", body.content_type);
-    params.set("filter[domain][_eq]", body.domain);
     params.set("filter[entry_key][_empty]", "true");
     if (body.project_id) params.set("filter[project_id][_eq]", body.project_id);
     else params.set("filter[project_id][_empty]", "true");
@@ -681,8 +686,8 @@ export async function saveDirectusStyleProfile(input) {
   const projectId = String(input.projectId || input.project || "");
   const params = new URLSearchParams({ limit: "1", sort: "-version,-date_updated", fields: "id,version,status" });
   params.set("filter[target_locale][_eq]", locale);
-  params.set("filter[content_type][_eq]", input.contentType || "general");
-  params.set("filter[domain][_eq]", input.domain || "general");
+  // 版本号按「项目 + 语言」递增：风格资产是项目级的，语体与领域只是标签，
+  // 按标签分别计数会让同项目的两份规范共用版本号，"最新 active"就没了确定含义。
   if (projectId) params.set("filter[project_id][_eq]", projectId);
   else params.set("filter[project_id][_empty]", "true");
   const existing = await request(`/items/style_profiles?${params}`);
@@ -831,6 +836,53 @@ export async function countDirectusStyleEvidenceByScope(locale, { projectId = ""
     stats.set(key, bucket);
   }
   return stats;
+}
+
+/** 项目级证据计数：闸门与风格页面板共用，不再按语体×领域分池。 */
+export async function countDirectusStyleEvidence(locale, { projectId = "" } = {}) {
+  const params = new URLSearchParams({ "aggregate[count]": "*" });
+  params.append("groupBy[]", "content_type");
+  params.append("groupBy[]", "provenance");
+  params.set("filter[target_locale][_eq]", assertLocale(locale));
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  const rows = await request(`/items/style_evidence?${params}`, { timeoutMs: 60_000 });
+  const byProvenance = {};
+  const byContentType = new Map();
+  let total = 0;
+  for (const row of rows || []) {
+    const count = Number(row.count) || 0;
+    total += count;
+    const provenance = row.provenance || "other";
+    byProvenance[provenance] = (byProvenance[provenance] || 0) + count;
+    const contentType = row.content_type || "general";
+    byContentType.set(contentType, (byContentType.get(contentType) || 0) + count);
+  }
+  return {
+    total,
+    byProvenance,
+    byContentType: [...byContentType.entries()].map(([contentType, count]) => ({ contentType, count })).sort((a, b) => b.count - a.count)
+  };
+}
+
+/**
+ * 项目级规范：同项目 + 同语言最新 active 的那一份。
+ *
+ * 不再按作用域挑：风格资产已经改成"每项目 + 语言一份"，历史作用域规范（如果有）
+ * 只会在被激活时自动退役同项目其它 active，取值永远只看最新那一条。
+ */
+export async function getDirectusProjectStyleProfile(locale, { projectId = "" } = {}) {
+  assertLocale(locale);
+  const params = new URLSearchParams({
+    limit: "1",
+    sort: "-version,-date_updated",
+    fields: "id,project_id,name,target_locale,content_type,content_tags,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,evidence_ids,generated_by,source_batch_id,learning_run_id,status,date_updated"
+  });
+  params.set("filter[target_locale][_eq]", locale);
+  params.set("filter[status][_eq]", "active");
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  else params.set("filter[project_id][_empty]", "true");
+  const items = await request(`/items/style_profiles?${params}`);
+  return mapStyleProfileRow(items?.[0]);
 }
 
 export async function saveDirectusQaRun(input) {
@@ -1884,11 +1936,11 @@ export async function activateDirectusStyleProfile(id) {
   }
   const params = new URLSearchParams({ limit: "-1", fields: "id,status,domain" });
   params.set("filter[target_locale][_eq]", target.target_locale);
-  params.set("filter[content_type][_eq]", target.content_type);
-  params.set("filter[domain][_eq]", target.domain || "general");
   if (target.project_id) params.set("filter[project_id][_eq]", target.project_id);
   else params.set("filter[project_id][_empty]", "true");
   params.set("filter[status][_eq]", "active");
+  // 风格资产是项目级的：激活一个版本时，同项目 + 同语言的其它 active 一律退役。
+  // 仍然按 content_type/domain 过滤会让历史作用域规范继续 active，等于同时存在两份"当前规范"。
   const activeOthers = await request(`/items/style_profiles?${params}`);
   const updates = activeOthers.filter((item) => item.id !== id).map((item) => ({ id: item.id, status: "inactive" }));
   if (updates.length) await request("/items/style_profiles", { method: "PATCH", body: updates });
