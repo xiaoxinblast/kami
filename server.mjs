@@ -14,7 +14,7 @@ import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfRead
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
 import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
-import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs } from "./src/table-term-extractor.mjs";
+import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
@@ -869,17 +869,6 @@ async function reviewCandidateGroup(locale, candidates) {
   };
 }
 
-function markExistingTermCandidates(candidates, assetsByLocale) {
-  return candidates.map((candidate) => {
-    if (candidate.assetType !== "term") return candidate;
-    const sameSource = (assetsByLocale[candidate.locale] || []).filter((term) => term.source.trim().toLocaleLowerCase() === candidate.source.toLocaleLowerCase());
-    const exact = sameSource.find((term) => term.target.trim().toLocaleLowerCase() === candidate.target.toLocaleLowerCase());
-    if (exact) return { ...candidate, existing: true, existingId: exact.id, decision: "excluded", reasons: [...(candidate.reasons || []), "当前语言库已存在相同对照"] };
-    if (sameSource.length) return { ...candidate, conflict: true, existingTarget: sameSource[0].target, decision: "review", score: Math.min(candidate.score, 0.67), reasons: [...(candidate.reasons || []), `当前语言库已有译法：${sameSource[0].target}`] };
-    return candidate;
-  });
-}
-
 /**
  * AI 逐条清洗候选：判定 keep / rowKind / 句内术语，并就地回写候选。
  * 术语库页面的导入预览与双语资产导入的后台清洗共用这一段，避免两条路径漂移。
@@ -1173,10 +1162,11 @@ async function previewTermImport(body, onProgress = () => {}) {
 async function previewBilingualAssets(body = {}) {
   const projectId = String(body.projectId || "").trim();
   if (!projectId || !(await getProject(projectId))) throw Object.assign(new Error("项目不存在"), { statusCode: 404 });
+  const purpose = body.purpose === "tm" ? "tm" : "term";
   const files = Array.isArray(body.files) ? body.files.slice(0, 50) : [];
   if (!files.length) throw Object.assign(new Error("没有待预检的双语资产文件"), { statusCode: 400 });
   const previews = [];
-  const candidates = [];
+  let candidates = [];
   for (const file of files) {
     const filename = String(file?.filename || "").trim();
     const encoded = String(file?.base64 || "").replace(/^data:[^;]+;base64,/u, "");
@@ -1238,11 +1228,34 @@ async function previewBilingualAssets(body = {}) {
       previews.push({ filename, type: "invalid", entries: 0, anomalies: [error.message], defaultPurpose: "tm" });
     }
   }
+  // 选"术语表"时预检就比对库内术语：弹窗上先讲清楚有多少条已存在、多少条与库内译法冲突，
+  // 不必等导入完再在任务里发现被跳过。人工 TM 侧不做库内比对（主 TM 几千条带向量，
+  // 预检阶段拉全库代价太高），它的重复在写入主 TM 时按条目身份 / 原文+译文处理。
+  let duplicates = { existing: 0, conflict: 0 };
+  if (purpose === "term") {
+    const assets = (await getProjectAssets("zh-CN", projectId)).assets;
+    // 按"选了术语表之后的本地分流结果"比对：混合表里的短词条同样会写进术语库，
+    // 不能因为文件自己更像 TM 就漏报重复。
+    candidates = markExistingTermCandidates(
+      candidates.map((candidate) => (classifyImportRowKind(candidate) === "term" ? { ...candidate, assetType: "term" } : candidate)),
+      { "zh-CN": assets.terms }
+    );
+    duplicates = {
+      existing: candidates.filter((candidate) => candidate.existing).length,
+      conflict: candidates.filter((candidate) => candidate.conflict).length
+    };
+    for (const file of previews) {
+      const own = candidates.filter((candidate) => candidate.sourceFile === file.filename);
+      const counts = { existing: own.filter((candidate) => candidate.existing).length, conflict: own.filter((candidate) => candidate.conflict).length };
+      if (counts.existing || counts.conflict) file.duplicates = counts;
+    }
+  }
   return {
     batchId: randomUUID(),
     projectId,
     files: previews,
     candidates,
+    duplicates,
     statistics: { files: previews.length, entries: candidates.length, anomalies: previews.filter((file) => file.anomalies?.length).length },
     write: { modelCalled: false, databaseWritten: false }
   };
@@ -1308,14 +1321,19 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null) {
     if (index) return index;
     const terms = projectId ? (await getProjectAssets(locale, projectId)).assets.terms : [];
     index = { pairs: new Set(), sourcesWithTargets: new Map() };
-    for (const term of terms) {
-      const key = String(term.source || "").toLocaleLowerCase();
-      const target = String(term.target || "");
-      if (!key) continue;
-      index.pairs.add(`${key}\u0000${target.toLocaleLowerCase()}`);
+    // 别名也进索引：库内条目的别名被当成新术语再导一次，同样是重复。
+    const addTerm = (sourceText, target) => {
+      const key = termMatchKey(sourceText);
+      if (!key) return;
+      const targetKey = termMatchKey(target);
+      index.pairs.add(`${key}\u0000${targetKey}`);
       const targets = index.sourcesWithTargets.get(key) || [];
-      targets.push(target);
+      if (!targets.some((item) => termMatchKey(item) === targetKey)) targets.push(target);
       index.sourcesWithTargets.set(key, targets);
+    };
+    for (const term of terms) {
+      addTerm(term.source, term.target);
+      for (const alias of term.aliases || []) addTerm(alias, term.target);
     }
     termIndexByLocale.set(locale, index);
     return index;
@@ -1415,8 +1433,8 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null) {
       } else {
         if (projectId && !termLibrary) throw new Error("当前项目没有启用术语库，无法写入术语");
         const index = await loadTermIndex(locale);
-        const sourceKey = source.toLocaleLowerCase();
-        const pairKey = `${sourceKey}\u0000${target.toLocaleLowerCase()}`;
+        const sourceKey = termMatchKey(source);
+        const pairKey = `${sourceKey}\u0000${termMatchKey(target)}`;
         if (index.pairs.has(pairKey)) {
           recordSkip({ source, locale, reason: "已存在相同对照" });
           decisions.push(decision);

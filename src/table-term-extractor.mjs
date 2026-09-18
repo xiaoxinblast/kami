@@ -663,3 +663,56 @@ export function expandNestedTermCandidates(candidates = []) {
     };
   });
 }
+
+/**
+ * 术语比对键。全角/半角、连续空白、首尾空格和大小写都不应该让同一条术语变成两条：
+ * Excel 里「ＡＢ」「AB」「AB 」「AB」是同一个词，过去只有 trim + 小写，前三个都会
+ * 被当成新条目重复写进术语库。
+ *
+ * 空白是"并成一个空格"而不是全部删掉：日语/中文术语里的空格基本是排版差异，
+ * 但英文多词术语仍然要靠空格区分（Final Fantasy 与 FinalFantasy 不合并）。
+ */
+export function termMatchKey(value = "") {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLocaleLowerCase();
+}
+
+/**
+ * 按库内已有术语标记候选，术语库页面导入与双语资产导入预检共用，避免两处口径漂移。
+ *   - 原文（或库内条目的别名）命中且译法一致 → existing：已存在相同对照，入库时跳过；
+ *   - 只是原文命中、译法不同 → conflict：库内已有译法，入库时同样跳过，不会覆盖。
+ * 比对按 termMatchKey 归一化，并先建索引：5859 条候选 × 5855 条库内术语的逐条过滤
+ * 是之前导入慢的主因之一。
+ */
+export function markExistingTermCandidates(candidates = [], assetsByLocale = {}) {
+  const indexByLocale = new Map();
+  const indexFor = (locale) => {
+    let index = indexByLocale.get(locale);
+    if (index) return index;
+    index = new Map();
+    for (const term of assetsByLocale[locale] || []) {
+      // 别名也算命中：库内那条的别名被当成新术语再导一次，同样是重复。
+      for (const key of [term.source, ...(term.aliases || [])].map(termMatchKey)) {
+        if (!key) continue;
+        const list = index.get(key) || [];
+        list.push(term);
+        index.set(key, list);
+      }
+    }
+    indexByLocale.set(locale, index);
+    return index;
+  };
+  return candidates.map((candidate) => {
+    if (candidate.assetType !== "term") return candidate;
+    const key = termMatchKey(candidate.source);
+    const sameSource = key ? indexFor(candidate.locale).get(key) || [] : [];
+    if (!sameSource.length) return candidate;
+    const targetKey = termMatchKey(candidate.target);
+    const exact = sameSource.find((term) => termMatchKey(term.target) === targetKey);
+    if (exact) return { ...candidate, existing: true, existingId: exact.id, decision: "excluded", reasons: [...(candidate.reasons || []), "当前语言库已存在相同对照"] };
+    return { ...candidate, conflict: true, existingTarget: sameSource[0].target, decision: "review", score: Math.min(candidate.score, 0.67), reasons: [...(candidate.reasons || []), `当前语言库已有译法：${sameSource[0].target}`] };
+  });
+}

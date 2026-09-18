@@ -426,7 +426,14 @@ async function saveJsonStyleEvidence(input) {
       && String(item.contentType || "general") === match.contentType
       && String(item.domain || "general") === match.domain
       && String(item.projectId || "").trim() === match.projectId)
-    : null;
+    // 没有条目 ID 时退回"原文 + 译文 + 同作用域"去重，避免同一份表格重复导入堆出重复证据。
+    : items.find((item) => !String(item.entryKey || "").trim()
+      && String(item.locale || "") === String(input.locale || "")
+      && String(item.contentType || "general") === String(input.contentType || "general")
+      && String(item.domain || "general") === String(input.domain || "general")
+      && String(item.projectId || "").trim() === String(input.projectId || "").trim()
+      && normalizeMemoryText(item.source) === normalizeMemoryText(source)
+      && normalizeMemoryText(item.target) === normalizeMemoryText(input.target));
   const item = {
     id: existing?.id || randomUUID(),
     ...input,

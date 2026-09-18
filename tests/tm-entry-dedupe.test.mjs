@@ -200,12 +200,15 @@ test("风格证据：同条目 ID 但换了作用域各自留一条", async () =
   assert.deepEqual(rows.map((item) => item.contentType).sort(), ["dialogue", "ui"]);
 });
 
-test("风格证据：没有条目 ID 时保持追加语义", async () => {
+test("风格证据：没有条目 ID 时按原文+译文+作用域去重，不重复累积", async () => {
   await evidence({ source: "プレミアムパス", target: "高级通行证" });
   await evidence({ source: "プレミアムパス", target: "高级通行证" });
+  // 同一份表格重复导入不该让同一句证据加权两次；换了译法才算新证据。
+  await evidence({ source: "プレミアムパス", target: "高级通行证（改）" });
 
   const rows = (await getStyleEvidence("zh-CN", { projectId: "project-1" })).filter((item) => item.source === "プレミアムパス");
-  assert.equal(rows.length, 2, "表格导入等没有条目 ID 的证据仍逐条累积");
+  assert.equal(rows.length, 2, "没有条目 ID 时同一对照只留一条，换译法才是新证据");
+  assert.deepEqual(rows.map((item) => item.target).sort(), ["高级通行证", "高级通行证（改）"].sort());
   assert.equal(styleEvidenceMatch({ entryKey: "" }), null);
   assert.deepEqual(styleEvidenceMatch({ entryKey: "k", locale: "zh-CN", contentType: "dialogue", domain: "game", projectId: "p" }), {
     entryKey: "k", locale: "zh-CN", contentType: "dialogue", domain: "game", projectId: "p"

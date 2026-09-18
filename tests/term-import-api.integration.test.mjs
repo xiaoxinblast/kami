@@ -114,3 +114,75 @@ test("Directus 候选审核队列接受超过 255 字符的日中句段", { skip
     await request(`${directusUrl}/items/term_import_batches/${preview.batchId}`, { method: "DELETE", headers: adminHeaders });
   }
 });
+
+test("双语资产导入预检就比对库内术语：已存在与冲突分开计数", { skip: !enabled }, async () => {
+  const project = await request(`${appUrl}/api/projects`, {
+    method: "POST",
+    body: JSON.stringify({ name: `双语预检查重测试 ${randomUUID().slice(0, 8)}` })
+  });
+  const projectId = project.project.id;
+  try {
+    const suffix = randomUUID().slice(0, 4);
+    const knownSource = `本体${suffix}`;
+    const knownAlias = `別名${suffix}`;
+    await request(`${appUrl}/api/assets`, {
+      method: "POST",
+      body: JSON.stringify({
+        locale: "zh-CN",
+        projectId,
+        term: {
+          source: knownSource, target: "巴尔预检", aliases: [knownAlias],
+          contentTypes: ["item_name"], domains: ["game"], enforcement: "preferred"
+        }
+      })
+    });
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("术语表");
+    sheet.addRows([
+      ["日语", "简体中文"],
+      [knownSource, "巴尔预检"],
+      [knownSource, "巴尔预检改"],
+      [knownAlias, "巴尔别名改"],
+      [`新規${suffix}`, "巴尔新规"]
+    ]);
+    const preview = await request(`${appUrl}/api/assets-import/preview`, {
+      method: "POST",
+      body: JSON.stringify({
+        projectId,
+        locale: "zh-CN",
+        purpose: "term",
+        files: [{ filename: "预检查重.xlsx", base64: Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64") }]
+      })
+    });
+    assert.equal(preview.statistics.entries, 4);
+    assert.deepEqual(preview.duplicates, { existing: 1, conflict: 2 }, "预检要分别报出已存在与冲突的条数");
+    const byTarget = new Map(preview.candidates.map((candidate) => [candidate.target, candidate]));
+    assert.equal(byTarget.get("巴尔预检").existing, true);
+    assert.equal(byTarget.get("巴尔预检改").conflict, true);
+    assert.equal(byTarget.get("巴尔预检改").existingTarget, "巴尔预检");
+    assert.equal(byTarget.get("巴尔别名改").conflict, true, "库内条目的别名命中同样算重复");
+    assert.equal(byTarget.get("巴尔新规").existing, undefined);
+    // 入库阶段的口径必须和预检一致：重复跳过、只有新条目写进术语库。
+    const started = await request(`${appUrl}/api/assets-import/commit`, {
+      method: "POST",
+      body: JSON.stringify({
+        projectId, batchId: preview.batchId, filename: "预检查重.xlsx",
+        candidates: preview.candidates, purpose: "term", aiCleaning: false, styleEvidence: false
+      })
+    });
+    assert.ok(started.taskId, "双语资产导入要转成后台任务");
+    const deadline = Date.now() + 90_000;
+    let task = null;
+    while (Date.now() < deadline) {
+      task = await request(`${appUrl}/api/background-tasks/${encodeURIComponent(started.taskId)}`);
+      if (["completed", "failed", "needs_attention"].includes(task.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    assert.equal(task?.status, "completed", `后台导入应跑完：${JSON.stringify(task?.progress || {})}`);
+    assert.equal(task.payload?.summary?.terms, 1);
+    assert.equal(task.payload?.summary?.skippedByReason?.["已存在"], 1);
+    assert.equal(task.payload?.summary?.skippedByReason?.["库内已有译法：巴尔预检"], 2, "冲突行要按「库内已有译法」跳过，而不是覆盖或新增");
+  } finally {
+    await request(`${appUrl}/api/projects/${encodeURIComponent(projectId)}?purge=1`, { method: "DELETE" });
+  }
+});

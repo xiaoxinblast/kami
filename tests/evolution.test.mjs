@@ -17,9 +17,13 @@ await initializeStore();
 await import("./fixtures/mock-openai-server.mjs");
 await new Promise((resolve) => setTimeout(resolve, 400));
 
+// 证据现在按"原文 + 译文 + 作用域"去重，夹具必须保证每一条都是新的对照，
+// 否则同一次种两遍会被去重掉，测的就不是"池子增长"了。
+let evidenceSequence = 0;
 async function seedEvidence(locale, contentType, domain, count, provenance = "table-import") {
   for (let index = 0; index < count; index += 1) {
-    await saveStyleEvidence({ locale, source: `${provenance}证据句${index + 1}`, target: `ターゲット${index + 1}`, contentType, domain, status: "accepted", provenance });
+    evidenceSequence += 1;
+    await saveStyleEvidence({ locale, source: `${provenance}证据句${evidenceSequence}`, target: `ターゲット${evidenceSequence}`, contentType, domain, status: "accepted", provenance });
   }
 }
 

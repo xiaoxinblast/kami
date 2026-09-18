@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
-import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, inferSheetMode, validateNestedTerms } from "../src/table-term-extractor.mjs";
+import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, inferSheetMode, markExistingTermCandidates, termMatchKey, validateNestedTerms } from "../src/table-term-extractor.mjs";
 
 async function workbookBase64(rows) {
   const workbook = new ExcelJS.Workbook();
@@ -252,4 +252,38 @@ test("句内术语展开为独立候选，跨父句去重并保留全部证据",
   assert.equal(term.parentEvidence.length, 2);
   assert.equal(term.decision, "ready");
   assert.equal(parents[0].assetType, "memory");
+});
+
+test("术语比对键把全角/半角与多余空白归一，但不合并多词术语", () => {
+  assert.equal(termMatchKey("ＡＢ　Ｃ"), termMatchKey("AB C"));
+  assert.equal(termMatchKey("  Final   Fantasy  "), "final fantasy");
+  assert.notEqual(termMatchKey("Final Fantasy"), termMatchKey("FinalFantasy"));
+});
+
+test("库内已有术语按归一化键标记：同对照=已存在，译法不同=冲突，别名也算命中", () => {
+  const assetsByLocale = {
+    "zh-CN": [
+      { id: "t1", source: "ガード", target: "防御", aliases: [] },
+      { id: "t2", source: "用語", target: "术语", aliases: ["Term"] }
+    ]
+  };
+  const marked = markExistingTermCandidates([
+    { assetType: "term", locale: "zh-CN", source: "ガード", target: "防御" },
+    { assetType: "term", locale: "zh-CN", source: "ガード", target: "格挡" },
+    { assetType: "term", locale: "zh-CN", source: "Ｔｅｒｍ", target: "术语" },
+    { assetType: "term", locale: "zh-CN", source: "用語", target: "术语" },
+    { assetType: "term", locale: "zh-CN", source: "新規", target: "新增" },
+    { assetType: "memory", locale: "zh-CN", source: "ガード", target: "防御" }
+  ], assetsByLocale);
+  assert.equal(marked[0].existing, true);
+  assert.equal(marked[0].existingId, "t1");
+  assert.equal(marked[0].decision, "excluded");
+  assert.equal(marked[1].conflict, true);
+  assert.equal(marked[1].existingTarget, "防御");
+  assert.equal(marked[1].decision, "review");
+  assert.equal(marked[2].existing, true, "库内条目的别名命中同样是已存在");
+  assert.equal(marked[3].existing, true);
+  assert.equal(marked[4].existing, undefined);
+  assert.equal(marked[4].conflict, undefined);
+  assert.equal(marked[5].existing, undefined, "memory 候选不参与术语库比对");
 });

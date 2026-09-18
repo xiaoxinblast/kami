@@ -481,6 +481,22 @@ export async function saveDirectusStyleEvidence(input) {
     const found = await request(`/items/style_evidence?${params}`);
     existingId = found[0]?.id || "";
   }
+  if (!existingId && !match) {
+    // 没有条目 ID 的来源（普通双语表格）过去只能纯新增：同一份文件导两次就多一份证据，
+    // 学习时等于同一句被加权两次。这里退回"原文 + 译文 + 同作用域"去重，只留最新一条。
+    const params = new URLSearchParams({ limit: "-1", sort: "-date_created", fields: "id,source,target" });
+    params.set("filter[target_locale][_eq]", locale);
+    params.set("filter[content_type][_eq]", body.content_type);
+    params.set("filter[domain][_eq]", body.domain);
+    params.set("filter[entry_key][_empty]", "true");
+    if (body.project_id) params.set("filter[project_id][_eq]", body.project_id);
+    else params.set("filter[project_id][_empty]", "true");
+    const sourceKey = normalizeMemoryText(body.source);
+    const targetKey = normalizeMemoryText(body.target);
+    const rows = await request(`/items/style_evidence?${params}`);
+    const hit = rows.find((item) => normalizeMemoryText(item.source) === sourceKey && normalizeMemoryText(item.target) === targetKey);
+    existingId = hit?.id || "";
+  }
   const saved = existingId
     ? await request(`/items/style_evidence/${existingId}`, { method: "PATCH", body })
     : await request("/items/style_evidence", { method: "POST", body });

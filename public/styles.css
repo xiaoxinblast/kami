@@ -296,6 +296,7 @@ select { min-width: 150px; }
 .import-file-list li.failed em { color: #b4453c; }
 .asset-preflight-options { display: grid; gap: 9px; margin: 0 0 13px; }
 .asset-preflight-options .import-toggle { padding: 9px 11px; border: 1px solid #e3e9df; border-radius: 9px; background: #fbfdf9; }
+.preflight-duplicate-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .import-progress-note { margin: 9px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 /* 待译表格上传后的"列含义"确认弹窗 */
 /*

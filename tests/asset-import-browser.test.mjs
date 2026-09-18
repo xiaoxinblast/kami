@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { CONTENT_TYPES, CONTENT_TAGS, LOCALES } from "../src/config.mjs";
 import { createDefaultProjectSettings } from "../src/project-config.mjs";
@@ -40,11 +40,12 @@ test("双语资产预检显示文件清单与逐文件进度", { skip: !process.
           status: 200, contentType: "application/json",
           body: JSON.stringify({
             batchId: "batch-1",
-            files: [{ filename: file, type: "xlsx", entries: 2, anomalies: [], defaultPurpose: "term_cleaning" }],
+            files: [{ filename: file, type: "xlsx", entries: 2, anomalies: [], defaultPurpose: "term_cleaning", duplicates: { existing: 1, conflict: 1 } }],
             candidates: [
               { sourceFile: file, source: "用語", target: "术语", note: "原表注释", sheetMode: "glossary", locale: "zh-CN", selected: true },
               { sourceFile: file, source: "用語集", target: "术语表", note: "", sheetMode: "glossary", locale: "zh-CN", selected: true }
             ],
+            duplicates: { existing: 1, conflict: 1 },
             statistics: { files: 1, entries: 2, anomalies: 0 }
           })
         });
@@ -81,6 +82,17 @@ test("双语资产预检显示文件清单与逐文件进度", { skip: !process.
     assert.match(await page.locator(".import-file-head span").textContent(), /已预检 3 \/ 3/u);
     assert.match(await page.locator("#fileMeta").textContent(), /预检完成：3 \/ 3 个文件，共 6 条双语条目 · 已用时/u);
     assert.match(await page.locator("#assetPreflightSummary").textContent(), /已识别 3 个文件、6 条双语条目/u);
+    // 预检就要讲清库里已有什么：同对照会跳过、冲突不覆盖，别等导入完才发现被跳过。
+    assert.equal(previewBodies[0].purpose, "term", "预检请求要带上本批类型");
+    assert.match(await page.locator("#assetPreflightSummary").textContent(), /库内已存在相同对照 3 条/u);
+    assert.match(await page.locator("#assetPreflightSummary").textContent(), /与库内译法冲突 3 条/u);
+    const firstRow = page.locator("#assetPreflightBody tr").first();
+    assert.match(await firstRow.textContent(), /库内已存在 1/u);
+    assert.match(await firstRow.textContent(), /与库内译法冲突 1/u);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/asset-preflight-duplicates.png`, animations: "disabled" });
+    }
     assert.deepEqual(errors, []);
   } finally {
     await browser.close();

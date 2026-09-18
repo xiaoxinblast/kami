@@ -3919,7 +3919,7 @@ async function setImportFiles(files = [], {
   };
   try {
     // 一个文件一个请求：进度是真实的 N/M，而且某个文件坏了不会把整批带崩。
-    const merged = { batchId: "", files: [], candidates: [], statistics: { files: 0, entries: 0, anomalies: 0 } };
+    const merged = { batchId: "", files: [], candidates: [], duplicates: { existing: 0, conflict: 0 }, statistics: { files: 0, entries: 0, anomalies: 0 } };
     const failures = [];
     for (const [index, file] of selected.entries()) {
       fileStates.get(file.name).status = "running";
@@ -3928,11 +3928,15 @@ async function setImportFiles(files = [], {
       try {
         const result = await api("/api/assets-import/preview", { method: "POST", body: JSON.stringify({
           ...projectPayload(),
+          // 类型决定要不要在预检里比对库内术语：选"人工 TM"时服务端不做这项开销。
+          purpose: state.assetImportPurpose,
           files: [{ filename: file.name, base64: await fileToBase64(file) }]
         }) });
         if (!merged.batchId) merged.batchId = result.batchId;
         merged.files.push(...(result.files || []));
         merged.candidates.push(...(result.candidates || []));
+        merged.duplicates.existing += result.duplicates?.existing || 0;
+        merged.duplicates.conflict += result.duplicates?.conflict || 0;
         merged.statistics.files += result.files?.length || 0;
         merged.statistics.entries += result.statistics?.entries || 0;
         merged.statistics.anomalies += result.statistics?.anomalies || 0;
@@ -4058,12 +4062,22 @@ function renderAssetPreflight() {
   if ($("#assetPreflightStyleEvidence")) $("#assetPreflightStyleEvidence").checked = state.assetImportStyleEvidence;
   const purposeLabel = state.assetImportPurpose === "tm" ? "写入人工主 TM" : state.assetImportAiCleaning ? "AI 清洗后分库写入" : "按表直接导入（本地规则分流）";
   $("#assetPreflightBody").innerHTML = (preview.files || []).map((file) => {
-    return `<tr><td>${escapeHtml(file.filename)}</td><td>${escapeHtml(file.type || "未知")}</td><td>${Number(file.entries) || 0}</td><td>${escapeHtml(purposeLabel)}</td><td><small>${escapeHtml((file.anomalies || []).join("；") || "未发现异常")}${state.assetImportStyleEvidence ? " · 写入风格证据" : ""}</small></td></tr>`;
+    const duplicates = file.duplicates || {};
+    const duplicateBadges = [
+      duplicates.existing ? `<span class="badge neutral">库内已存在 ${Number(duplicates.existing)}</span>` : "",
+      duplicates.conflict ? `<span class="badge warning">与库内译法冲突 ${Number(duplicates.conflict)}</span>` : ""
+    ].filter(Boolean).join("");
+    return `<tr><td>${escapeHtml(file.filename)}</td><td>${escapeHtml(file.type || "未知")}</td><td>${Number(file.entries) || 0}</td><td>${escapeHtml(purposeLabel)}</td><td><small>${escapeHtml((file.anomalies || []).join("；") || "未发现异常")}${state.assetImportStyleEvidence ? " · 写入风格证据" : ""}</small>${duplicateBadges ? `<div class="preflight-duplicate-flags">${duplicateBadges}</div>` : ""}</td></tr>`;
   }).join("") || '<tr><td colspan="5" class="table-empty">没有可预检的文件</td></tr>';
   const cleaningText = state.assetImportPurpose === "tm"
     ? "不调用模型"
     : state.assetImportAiCleaning ? "AI 清洗（较慢）" : "不调用模型，按本地规则分流";
-  $("#assetPreflightSummary").textContent = `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。去向：${purposeLabel}；${cleaningText}。确认后进入后台导入。`;
+  const duplicates = preview.duplicates || {};
+  // 预检就讲清楚库里已经有什么：同对照会跳过，冲突不覆盖，两者都要用户先知道。
+  const duplicateText = duplicates.existing || duplicates.conflict
+    ? ` 其中库内已存在相同对照 ${duplicates.existing || 0} 条（入库时跳过）、与库内译法冲突 ${duplicates.conflict || 0} 条（不会覆盖库内条目，要改用术语库页面手动改）。`
+    : "";
+  $("#assetPreflightSummary").textContent = `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。去向：${purposeLabel}；${cleaningText}。${duplicateText}确认后进入后台导入。`;
 }
 
 async function confirmAssetPreflight() {
