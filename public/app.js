@@ -2671,7 +2671,9 @@ async function exportTaskRow(batchId, button) {
       title: "导出方式",
       summary: `${run.filename} · ${run.format?.toUpperCase?.() || ""}${hasOriginal ? " · 原文件已随批次存档" : " · 没有原文件存档"}${batchWriteBackLabelFor(run)}`,
       options: [
-        ...(hasOriginal ? [{ id: "in-place", label: "写回原文件", hint: "译文写回原文件里它该在的位置（MQXLIFF 写 target、表格写译文列）" }] : []),
+        ...(hasOriginal
+          ? [{ id: "in-place", label: "写回原文件", hint: "译文写回原文件里它该在的位置（MQXLIFF 写 target、表格写译文列）" }]
+          : [{ id: "pick-source", label: "选择原文件并写回", hint: "这个批次没有原文件存档（改动前导入的）；选中同一个原文件后译文写回原位，并自动存档，下次不用再选" }]),
         { id: "translation-only", label: "仅导出译文", hint: "只给译文（每段一行），不带原文与排版" },
         { id: "task-xlsx", label: "任务 Excel（后台生成）", hint: "序号 / 原文 / 译文 / 状态 / AIQA 分数 / QA 意见 / 人工决定；生成后在这里下载" }
       ]
@@ -2683,6 +2685,11 @@ async function exportTaskRow(batchId, button) {
       const payload = await api(`/api/tasks/${encodeURIComponent(batchId)}/export`, { method: "POST", body: JSON.stringify(projectPayload()) });
       toast(payload.message || "导出已进入任务中心后台处理");
       setTimeout(() => loadTasks().catch(() => {}), 600);
+      return;
+    }
+    // 老批次没存档时让用户选一次原文件，之后服务端会把它存档起来（下次自动）。
+    if (choice === "pick-source" && !(await pickBatchSourceFile())) {
+      button.textContent = "导出";
       return;
     }
     button.disabled = true;
@@ -2716,6 +2723,7 @@ async function exportTaskRow(batchId, button) {
       locale: run.locale,
       format: run.format,
       mode: choice,
+      base64: state.batchBase64 || undefined,
       structure: run.structure,
       segments: run.segments
     }) });

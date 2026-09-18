@@ -241,6 +241,14 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     assert.equal(exportBody?.base64, undefined, "有存档时不用前端再传原文件");
     await page.locator('#exportDialog .icon-button[data-close="exportDialog"]').click();
 
+    // 没有存档的老批次：任务中心也要给「选择原文件并写回」，与翻译界面一致
+    await page.locator('#taskList .task-row[data-task-id="batch-2"] [data-action="export-task"]').click();
+    await page.waitForSelector("#exportOptionsDialog[open]");
+    assert.match(await page.locator("#exportOptionsSummary").textContent(), /没有原文件存档/u);
+    assert.equal(await page.locator('[data-export-option="pick-source"]').count(), 1, "老批次要能补选原文件");
+    assert.equal(await page.locator('[data-export-option="in-place"]').count(), 0);
+    await page.locator('#exportOptionsDialog .icon-button[data-close="exportOptionsDialog"]').click();
+
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/task-center-actions.png`, fullPage: true, animations: "disabled" });

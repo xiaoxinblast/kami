@@ -3557,6 +3557,24 @@ async function apiHandler(req, res, url) {
         body.filename = body.filename || run.filename;
       }
     }
+    // 老批次（改动前导入、没有存档）用户这次补选了原文件：顺手存下来，下次就不用再选。
+    if (body.mode !== "translation-only" && body.base64 && body.batchId) {
+      const run = await getBatchRun(String(body.batchId)).catch(() => null);
+      if (run && !run.runnerOptions?.originalFile) {
+        try {
+          const saved = await saveBatchOriginal({
+            dataRoot: DATA_ROOT,
+            batchId: run.batchId,
+            filename: run.filename,
+            buffer: Buffer.from(String(body.base64).replace(/^data:[^;]+;base64,/u, ""), "base64")
+          });
+          await saveBatchRun({ ...run, runnerOptions: { ...(run.runnerOptions || {}), originalFile: saved.relative, originalBytes: saved.bytes } });
+          logInfo("已把用户补选的原文件存档到批次", { batchId: run.batchId, file: saved.relative });
+        } catch (error) {
+          console.error(`[Kami] 补存原文件失败（批次 ${body.batchId}）：${error.message}`);
+        }
+      }
+    }
     return json(res, 200, await exportBatchDocument({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") }));
   }
   if (req.method === "POST" && url.pathname === "/api/qa/resolve") {

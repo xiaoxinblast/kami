@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ORIGINAL_UPLOAD_DIRECTORY, deleteBatchOriginal, originalRelativePath, readBatchOriginal, saveBatchOriginal } from "../src/batch-originals.mjs";
@@ -29,4 +29,18 @@ test("只接受已知扩展名，拒绝路径穿越与超大文件", async () =>
   await assert.rejects(() => saveBatchOriginal({ dataRoot, batchId: "b", filename: "a.xlsx", buffer: Buffer.alloc(21 * 1024 * 1024) }), /超过/u);
   await assert.rejects(() => saveBatchOriginal({ dataRoot, batchId: "", filename: "a.xlsx", buffer: Buffer.from("x") }), /缺少批次 ID/u);
   await assert.rejects(() => saveBatchOriginal({ dataRoot, batchId: "b", filename: "a.xlsx", buffer: Buffer.alloc(0) }), /内容为空/u);
+});
+
+test("导入时存档、导出时补存档：服务端两条路径都接上了", async () => {
+  const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  // 导入（/api/batch/prepare）时按批次存档
+  assert.match(server, /const saved = await saveBatchOriginal\(\{ dataRoot: DATA_ROOT, batchId, filename: prepared\.filename \|\| body\.filename, buffer: originalBuffer \}\);/u);
+  // 导出时优先用存档（用户不用再选）
+  assert.match(server, /const stored = await readBatchOriginal\(\{ dataRoot: DATA_ROOT, relativePath: run\?\.runnerOptions\?\.originalFile \}\);/u);
+  // 老批次用户补选时顺手存档，下次免选
+  assert.match(server, /已把用户补选的原文件存档到批次/u);
+  assert.match(server, /if \(run && !run\.runnerOptions\?\.originalFile\) \{/u);
+  // 前端：任务中心与翻译界面用同一套选择（缺存档时都给"选择原文件并写回"）
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.equal((app.match(/id: "pick-source"/gu) || []).length, 2, "翻译界面与任务中心都要有这个兜底选项");
 });
