@@ -337,7 +337,8 @@ async function saveJsonMemory(locale, input) {
   let existing = null;
   for (const attempt of memoryMatchAttempts({ ...input, source, target })) {
     existing = attempt.kind === "entry"
-      ? scoped.find((item) => String(item.entryKey || "").trim() === attempt.entryKey)
+      // 同 ID 还要同原文：memoQ 的 context ID 会在多个文件之间重复。
+      ? scoped.find((item) => String(item.entryKey || "").trim() === attempt.entryKey && String(item.source || "").trim() === attempt.source)
       : scoped.find((item) => item.source === attempt.source && item.target === attempt.target);
     if (existing) break;
   }

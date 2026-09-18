@@ -6,9 +6,10 @@ const QUALITY_RANK = Object.freeze({ human_approved: 2, machine_verified: 1, pro
 
 /**
  * TM 行的定位顺序（Directus 与 JSON 两个存储共用同一份规则）：
- *   1) 同项目 + 同条目 ID：memoQ 把条目身份写在 `context[context-type=x-mmq-context]` 里，
+ *   1) 同项目 + 同条目 ID + 同原文：memoQ 把条目身份写在 `context[context-type=x-mmq-context]` 里，
  *      同一个文档的交付版/工作版、改稿重导都共享它，因此应该**覆盖原来那一行**，
- *      而不是再堆一条新译文；
+ *      而不是再堆一条新译文。原文必须一致：同一个 ID 会在多个文件之间重复出现
+ *      （同一批素材被拆到几个导出里），只看 ID 会把别的文件的段落覆盖掉。
  *   2) 同项目 + 原文 + 译文：没有条目 ID（表格导入）时的兜底去重。
  *
  * 注意：trans-unit 的 `id` 只是文件内序号（每个文件都从 1 开始），不能当条目身份，
@@ -17,9 +18,9 @@ const QUALITY_RANK = Object.freeze({ human_approved: 2, machine_verified: 1, pro
 export function memoryMatchAttempts({ source = "", target = "", entryKey = "" } = {}) {
   const attempts = [];
   const key = String(entryKey || "").trim();
-  if (key) attempts.push({ kind: "entry", entryKey: key });
   const trimmedSource = String(source || "").trim();
   const trimmedTarget = String(target || "").trim();
+  if (key && trimmedSource) attempts.push({ kind: "entry", entryKey: key, source: trimmedSource });
   if (trimmedSource && trimmedTarget) attempts.push({ kind: "pair", source: trimmedSource, target: trimmedTarget });
   return attempts;
 }

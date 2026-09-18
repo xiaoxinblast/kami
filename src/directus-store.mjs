@@ -305,10 +305,13 @@ export async function saveDirectusMemory(locale, input) {
   // 原文用哈希查：整句塞进查询串会撞 Directus 的 431。
   let existing = [];
   for (const attempt of memoryMatchAttempts({ source, target, entryKey: input.entryKey })) {
-    const params = scope(new URLSearchParams({ limit: "1", fields: "id,quality_status,qa_score" }));
     if (attempt.kind === "entry") {
-      params.set("filter[entry_key][_eq]", attempt.entryKey);
-      existing = await request(`/items/${collection}?${params}`);
+      // 同 ID 还要同原文：memoQ 的 context ID 会在多个文件之间重复，只看 ID 会覆盖错别的文件。
+      const entryParams = scope(new URLSearchParams({ limit: "50", fields: "id,quality_status,qa_score,source" }));
+      entryParams.set("filter[entry_key][_eq]", attempt.entryKey);
+      const rows = await request(`/items/${collection}?${entryParams}`);
+      const matched = rows.find((item) => item.source === attempt.source);
+      existing = matched ? [matched] : [];
     } else {
       const pairParams = scope(new URLSearchParams({ limit: "50", fields: "id,quality_status,qa_score,source,target" }));
       pairParams.set("filter[source_hash][_eq]", memorySourceHash(attempt.source));

@@ -102,10 +102,32 @@ test("发给模型的参考译例带上条目 ID 与文件名", () => {
 
 test("定位顺序：先按条目 ID，再退回原文+译文", () => {
   assert.deepEqual(memoryMatchAttempts({ source: "s", target: "t", entryKey: "k" }), [
-    { kind: "entry", entryKey: "k" },
+    { kind: "entry", entryKey: "k", source: "s" },
     { kind: "pair", source: "s", target: "t" }
   ]);
   assert.deepEqual(memoryMatchAttempts({ source: "s", target: "t" }), [{ kind: "pair", source: "s", target: "t" }]);
+  // 只有 ID 没有原文时不按 ID 匹配：无法确认是哪一条。
+  assert.deepEqual(memoryMatchAttempts({ target: "t", entryKey: "k" }), []);
+});
+
+test("同一 ID 但原文不同（跨文件撞 ID）不覆盖，各自成行", async () => {
+  const sharedKey = "SHARED_CONTEXT_ID";
+  await save({ source: "同一 ID 的第一句", target: "第一句译文", entryKey: sharedKey, sourceFile: "a.mqxliff" });
+  await save({ source: "同一 ID 的第二句", target: "第二句译文", entryKey: sharedKey, sourceFile: "b.mqxliff" });
+
+  const rows = (await getMemories("zh-CN", { projectId: "project-1" })).filter((row) => row.entryKey === sharedKey);
+  assert.equal(rows.length, 2, "ID 相同但原文不同，说明是另一个文件里的段落，不能互相覆盖");
+  assert.deepEqual(rows.map((row) => row.source).sort(), ["同一 ID 的第一句", "同一 ID 的第二句"]);
+});
+
+test("同一 ID 且原文一致时仍然原地覆盖", async () => {
+  const key = "SAME_CONTEXT_ID";
+  await save({ source: "同一条原文", target: "旧译文", entryKey: key, sourceFile: "x.mqxliff" });
+  await save({ source: "同一条原文", target: "新译文", entryKey: key, sourceFile: "x_updated.mqxliff" });
+
+  const rows = (await getMemories("zh-CN", { projectId: "project-1" })).filter((row) => row.entryKey === key);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].target, "新译文");
 });
 
 const evidence = (input) => saveStyleEvidence({ locale: "zh-CN", projectId: "project-1", contentType: "dialogue", domain: "game", ...input });
