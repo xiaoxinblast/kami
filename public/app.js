@@ -79,6 +79,7 @@ const state = {
   logSearch: "",
   logErrorCount: 0,
   reviewImportBatchId: "",
+  batchHasStoredOriginal: false,
   batchClassification: null,
   batchStyleProfile: null,
   projectSettings: null
@@ -2139,7 +2140,7 @@ function renderTasks() {
     const id = button.closest(".task-row").dataset.taskId;
     const action = button.dataset.action;
     if (action === "open-task") openTask(id);
-    else if (action === "export-task") exportTaskExcel(id, button);
+    else if (action === "export-task") exportTaskRow(id, button);
     else if (action === "share-task") createBatchShare(id, button);
     else if (action === "share-qa-task") createQaTaskShare(id, button);
     else if (action === "feedback-task") openShareFeedbackDialog({ batchId: id });
@@ -2445,7 +2446,7 @@ function renderBatchTaskRow(task) {
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.filename)}</strong><span class="task-status ${escapeHtml(task.status)}">${cancelled ? "已中断" : taskStatusLabel(task.status)}</span><span class="task-type-chip">批次</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${progress}%"></i></div><span>${task.completedSegments} / ${task.totalSegments}</span></div>
     <div class="task-qa"><strong>${task.qaPending ? `${task.qaPending} 条待处理` : "QA 已清"}</strong>${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
-    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">后台导出</button></div>
+    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">导出</button></div>
   </article>`;
 }
 
@@ -2656,23 +2657,98 @@ async function resolveFeedbackOnPage(token, feedbackId, action, button) {
   }
 }
 
-async function exportTaskExcel(batchId, button) {
+/**
+ * 任务中心导出：和翻译界面的导出是同一个选择——写回原文件 / 仅译文 / 任务 Excel。
+ * 写回原文件靠"导入时随批次存档的原文件"，所以这里也不用再让用户选文件。
+ */
+async function exportTaskRow(batchId, button) {
   button.disabled = true;
-  button.textContent = "提交中…";
+  button.textContent = "读取中…";
   try {
-    const payload = await api(`/api/tasks/${encodeURIComponent(batchId)}/export`, { method: "POST", body: JSON.stringify(projectPayload()) });
-    toast(payload.message || "导出已进入任务中心后台处理");
-    setTimeout(() => loadTasks().catch(() => {}), 600);
-  } catch (error) { toast(error.message); }
-  finally {
+    const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}?projectId=${encodeURIComponent(state.activeProjectId || "")}`);
+    const hasOriginal = Boolean(run.runnerOptions?.originalFile);
+    const choice = await openExportOptionsDialog({
+      title: "导出方式",
+      summary: `${run.filename} · ${run.format?.toUpperCase?.() || ""}${hasOriginal ? " · 原文件已随批次存档" : " · 没有原文件存档"}${batchWriteBackLabelFor(run)}`,
+      options: [
+        ...(hasOriginal ? [{ id: "in-place", label: "写回原文件", hint: "译文写回原文件里它该在的位置（MQXLIFF 写 target、表格写译文列）" }] : []),
+        { id: "translation-only", label: "仅导出译文", hint: "只给译文（每段一行），不带原文与排版" },
+        { id: "task-xlsx", label: "任务 Excel（后台生成）", hint: "序号 / 原文 / 译文 / 状态 / AIQA 分数 / QA 意见 / 人工决定；生成后在这里下载" }
+      ]
+    });
     button.disabled = false;
-    button.textContent = "后台导出";
+    button.textContent = "导出";
+    if (!choice) return;
+    if (choice === "task-xlsx") {
+      const payload = await api(`/api/tasks/${encodeURIComponent(batchId)}/export`, { method: "POST", body: JSON.stringify(projectPayload()) });
+      toast(payload.message || "导出已进入任务中心后台处理");
+      setTimeout(() => loadTasks().catch(() => {}), 600);
+      return;
+    }
+    button.disabled = true;
+    button.textContent = choice === "in-place" ? "写回中…" : "生成中…";
+    // 与翻译界面同一道门禁：有阻断项先列出来，让用户决定是否强行导出。
+    const gateSegments = (run.segments || []).map(({ id, source, selected, translation }) => ({ id, source, selected, translation }));
+    const gate = await api("/api/batch/export/preflight", { method: "POST", signal: AbortSignal.timeout(EXPORT_PREFLIGHT_TIMEOUT_MS), body: JSON.stringify({
+      ...projectPayload(), locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general", segments: gateSegments
+    }) }).catch(() => null);
+    if (gate && !gate.ok) {
+      const proceed = await openExportDialog({
+        title: `导出被 QA 门禁挡住（${gate.blocking.length} 项）`,
+        summary: "这些是规则层的硬问题（占位符、术语、数字、未翻译等）。修好再导出最稳，也可以强制导出。",
+        items: gate.blocking.slice(0, 20),
+        forceLabel: "仍然导出（跳过门禁）"
+      });
+      if (!proceed) { button.disabled = false; button.textContent = "导出"; return; }
+    } else if (gate?.warnings?.length) {
+      const proceed = await openExportDialog({
+        title: `导出前有 ${gate.warnings.length} 条提醒`,
+        summary: "只是提醒，不影响导出。可以看一眼再决定。",
+        items: gate.warnings.slice(0, 20),
+        forceLabel: "继续导出"
+      });
+      if (!proceed) { button.disabled = false; button.textContent = "导出"; return; }
+    }
+    const exported = await api("/api/batch/export", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
+      batchId,
+      filename: run.filename,
+      locale: run.locale,
+      format: run.format,
+      mode: choice,
+      structure: run.structure,
+      segments: run.segments
+    }) });
+    const saved = await saveExportedFile(exported);
+    // 与翻译界面同一套反馈：弹窗写清文件名、方式与保存位置。
+    await openExportDialog({
+      title: "导出完成",
+      summary: `${exported.filename}（${choice === "in-place" ? "写回原文件" : "仅译文"}）。${saved.message || ""}`,
+      items: []
+    });
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "导出";
   }
+}
+
+/** 任务中心那条批次记录的写回列提示（结构里存着列角色）。 */
+function batchWriteBackLabelFor(run) {
+  const sheets = run?.structure?.spreadsheetAnalysis?.sheets || run?.spreadsheetAnalysis?.sheets || [];
+  for (const sheet of sheets) {
+    const output = (sheet.columns || []).find((column) => column.role === "translation_output");
+    if (output) return ` · 写回列：${output.label || `${output.letter} 列`}`;
+  }
+  return "";
 }
 
 function applyStoredBatchRun(run) {
   state.batchBase64 = "";
   state.batchFile = null;
+  // 导入时上传的原文件由服务端随批次存档；有它就不需要用户再选一次。
+  state.batchHasStoredOriginal = Boolean(run.runnerOptions?.originalFile);
   state.batchPreview = {
     batchId: run.batchId, filename: run.filename, format: run.format,
     segmentationMode: run.segmentationMode, structure: run.structure, subBatches: run.subBatches || [], runState: run.runState || "ready",
@@ -2798,7 +2874,8 @@ async function exportBatch() {
   const exportSegments = state.batchPreview.segments.map(({ id, source, selected, translation }) => ({ id, source, selected, translation }));
   const format = state.batchPreview.format;
   const needsSource = ["docx", "xlsx", "csv", "xliff", "mqxliff"].includes(format);
-  const hasSource = Boolean(state.batchBase64);
+  // 原文件可能还在内存里，也可能已经由服务端随批次存档：两种都能直接写回。
+  const hasSource = Boolean(state.batchBase64) || state.batchHasStoredOriginal;
   const writeBack = batchWriteBackLabel();
   let mode = "in-place";
   let exportFormat = format;
@@ -2824,7 +2901,7 @@ async function exportBatch() {
   } else {
     const choice = await openExportOptionsDialog({
       title: "导出方式",
-      summary: `原文件：${state.batchFile?.name || state.batchPreview.filename}${writeBack ? ` · ${writeBack}` : ""}`,
+      summary: `原文件：${state.batchFile?.name || (state.batchHasStoredOriginal ? `${state.batchPreview.filename}（已随批次存档）` : state.batchPreview.filename)}${writeBack ? ` · ${writeBack}` : ""}`,
       options: [
         { id: "in-place", label: "写回原文件", hint: needsSource ? "译文写回原文件里它该在的位置（表格写译文列，XLIFF 写 target）" : "在原文件结构里替换对应段落，保留其它内容" },
         { id: "translation-only", label: "仅导出译文", hint: "只给译文（每段一行）；DOCX 会生成一份只有译文的新文档" }
@@ -2882,6 +2959,7 @@ async function exportBatch() {
       locale: state.workbenchLocale,
       format: exportFormat,
       mode,
+      batchId: state.batchPreview.batchId || "",
       structure: state.batchPreview.structure,
       base64: state.batchBase64 || undefined,
       segments: exportSegments
@@ -3124,6 +3202,7 @@ async function restoreBatchProgress() {
     };
     state.batchClassification = { contentType: run.contentType || "general", source: "restored" };
     state.batchStyleProfile = null;
+    state.batchHasStoredOriginal = Boolean(run.runnerOptions?.originalFile);
     state.workbenchLocale = run.locale || state.workbenchLocale;
     setTranslationMode("batch");
     renderLocaleStrip($("#workbenchLocales"), state.workbenchLocale, updateWorkbenchLocale);

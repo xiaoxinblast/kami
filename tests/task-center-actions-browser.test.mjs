@@ -30,7 +30,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
   const batch = (overrides) => ({
     id: "batch-1", type: "batch", batchId: "batch-1", filename: "dialogue.xlsx", projectId: "project-1",
     locale: "zh-CN", contentType: "general", domain: "game", format: "xlsx", status: "in_progress", runState: "running",
-    runnerOptions: { route: "auto", reflect: true }, totalSegments: 5, completedSegments: 2, failedSegments: 0, qaPending: 0,
+    runnerOptions: { route: "auto", reflect: true, originalFile: "uploads/batch-1.xlsx" }, totalSegments: 5, completedSegments: 2, failedSegments: 0, qaPending: 0,
     updatedAt: "2026-09-18T12:00:00Z", ...overrides
   });
   try {
@@ -74,6 +74,17 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
             unmatched: 1, ambiguous: 0, memoriesWritten: 4, trajectoriesLinked: 3,
             trajectoryUnmatched: 1, trajectoryAmbiguous: 0, failures: [],
             details: { unmatched: [{ pairIndex: 4, source: "新材料です。", reason: "该原文不在这个批次里" }], ambiguous: [] }
+          })
+        });
+      }
+      if (url.pathname === "/api/batch/run/batch-1" && request.method() === "GET") {
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            batchId: "batch-1", filename: "dialogue.xlsx", format: "xlsx", locale: "zh-CN", contentType: "general", domain: "game",
+            runState: "running", runnerOptions: { route: "auto", reflect: true, originalFile: "uploads/batch-1.xlsx" },
+            structure: { cells: [{ sheet: "S", address: "B2", row: 2, column: 2, segmentIds: ["seg-1"] }] },
+            segments: [{ id: "seg-1", source: "メンテナンスは明日開始します。", translation: "维护明天开始。", selected: true, status: "done", locator: { type: "xlsx-cell", sheet: "S", address: "B2", row: 2, column: 2 } }]
           })
         });
       }
@@ -198,10 +209,36 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/export-gate-dialog.png`, animations: "disabled" });
     }
     await page.locator("#exportDialogForce").click();
-    await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 15000 });
+    try {
+      await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 15_000 });
+    } catch (error) {
+      throw new Error(`${error.message}；toast：${await page.locator("#toast").textContent()}；页面异常：${errors.join(" | ") || "无"}`);
+    }
     assert.ok(actions.some((item) => item.includes("/api/batch/export")), `强制导出要打到导出接口：${actions.join(" | ")}`);
     assert.equal(exportBody?.mode, "translation-only", "选择的导出方式要带到接口");
     assert.match(await page.locator("#exportDialogSummary").textContent(), /仅译文/u);
+    await page.locator('#exportDialog .icon-button[data-close="exportDialog"]').click();
+
+    // 任务中心的「导出」和翻译界面是同一套选择；批次里存过原文件时直接写回，不再问用户
+    await page.locator('.nav-item[data-view="tasks"]').click();
+    await page.waitForSelector('#taskList .task-row[data-task-id="batch-1"]');
+    await page.locator('#taskList .task-row[data-task-id="batch-1"] [data-action="export-task"]').click();
+    await page.waitForSelector("#exportOptionsDialog[open]");
+    assert.match(await page.locator("#exportOptionsSummary").textContent(), /原文件已随批次存档/u);
+    assert.equal(await page.locator('[data-export-option="in-place"]').count(), 1, "有存档就直接给「写回原文件」");
+    assert.equal(await page.locator('[data-export-option="pick-source"]').count(), 0, "不该再要求用户重新选原文件");
+    await page.locator('[data-export-option="in-place"]').click();
+    await page.waitForSelector("#exportDialog[open]");
+    assert.match(await page.locator("#exportDialogTitle").textContent(), /导出被 QA 门禁挡住/u);
+    await page.locator("#exportDialogForce").click();
+    try {
+      await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 15_000 });
+    } catch (error) {
+      throw new Error(`${error.message}；toast：${await page.locator("#toast").textContent()}；页面异常：${errors.join(" | ") || "无"}`);
+    }
+    assert.equal(exportBody?.mode, "in-place", "写回模式要传到接口");
+    assert.equal(exportBody?.batchId, "batch-1", "带上批次号，服务端才能用它存档的原文件写回");
+    assert.equal(exportBody?.base64, undefined, "有存档时不用前端再传原文件");
     await page.locator('#exportDialog .icon-button[data-close="exportDialog"]').click();
 
     if (process.env.KAMI_UI_SCREENSHOTS) {

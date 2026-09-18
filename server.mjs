@@ -21,6 +21,7 @@ import { embedSource } from "./src/embedding.mjs";
 import { countMemories, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
+import { readBatchOriginal, saveBatchOriginal } from "./src/batch-originals.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
 import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories, matchReviewPairsToSegments } from "./src/external-review.mjs";
@@ -3207,7 +3208,22 @@ async function apiHandler(req, res, url) {
     if (body.projectId && !project) return json(res, 404, { error: "项目不存在" });
     const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet, batch: project?.settings?.batch || {}, columnMapping: body.columnMapping || null });
     const { batchId } = await saveBatchRun({ ...prepared, projectId: body.projectId || "", locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments, subBatches: prepared.subBatches, runState: "ready" });
-    return json(res, 200, { ...prepared, batchId });
+    // 原文件按批次存档：以后导出写回不用再让用户重新选一遍（刷新页面也还在）。
+    let originalFile = "";
+    const originalBuffer = body.base64
+      ? Buffer.from(String(body.base64).replace(/^data:[^;]+;base64,/u, ""), "base64")
+      : (body.text !== undefined ? Buffer.from(String(body.text), "utf8") : null);
+    if (originalBuffer?.length) {
+      try {
+        const saved = await saveBatchOriginal({ dataRoot: DATA_ROOT, batchId, filename: prepared.filename || body.filename, buffer: originalBuffer });
+        originalFile = saved.relative;
+        const run = await getBatchRun(batchId);
+        if (run) await saveBatchRun({ ...run, runnerOptions: { ...(run.runnerOptions || {}), originalFile, originalBytes: saved.bytes } });
+      } catch (error) {
+        console.error(`[Kami] 原文件存档失败（批次 ${batchId}）：${error.message}`);
+      }
+    }
+    return json(res, 200, { ...prepared, batchId, originalFile });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
     const body = await readJsonBody(req);
@@ -3248,7 +3264,8 @@ async function apiHandler(req, res, url) {
     if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
     if (batchWorkers.has(batchId)) return json(res, 200, { batchId, runState: "running", alreadyRunning: true });
     const segments = run.segments.map((segment) => segment.status === "error" || segment.status === "running" ? { ...segment, status: "pending", error: "" } : segment);
-    await saveBatchRun({ ...run, segments, runnerOptions: { route: body.route || run.runnerOptions?.route || "auto", reflect: body.reflect !== false }, runState: "queued" });
+    // 保留 runnerOptions 里的原文件存档路径：写回原文件靠它。
+    await saveBatchRun({ ...run, segments, runnerOptions: { ...(run.runnerOptions || {}), route: body.route || run.runnerOptions?.route || "auto", reflect: body.reflect !== false }, runState: "queued" });
     const task = await createBackgroundTask({
       type: "batch_translation",
       title: `批次翻译 · ${run.filename}`,
@@ -3531,6 +3548,15 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/batch/export") {
     const body = await readJsonBody(req);
+    // 写回原文件时优先用批次存档里的原文件：用户在导入时已经上传过，不该再问一次。
+    if (body.mode !== "translation-only" && !body.base64 && body.batchId) {
+      const run = await getBatchRun(String(body.batchId)).catch(() => null);
+      const stored = await readBatchOriginal({ dataRoot: DATA_ROOT, relativePath: run?.runnerOptions?.originalFile });
+      if (stored) {
+        body.base64 = stored.toString("base64");
+        body.filename = body.filename || run.filename;
+      }
+    }
     return json(res, 200, await exportBatchDocument({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") }));
   }
   if (req.method === "POST" && url.pathname === "/api/qa/resolve") {
