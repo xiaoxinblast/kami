@@ -8,7 +8,7 @@ process.env.KAMI_DATA_DIR = mkdtempSync(join(tmpdir(), "kami-tm-entry-"));
 delete process.env.KAMI_STORE;
 
 const { getMemories, getStyleEvidence, initializeStore, saveMemory, saveStyleEvidence } = await import("../src/store.mjs");
-const { memoryMatchAttempts, styleEvidenceMatch } = await import("../src/translation-memory.mjs");
+const { memoryMatchAttempts, normalizeMemoryText, styleEvidenceMatch } = await import("../src/translation-memory.mjs");
 const { extractXliffPairs } = await import("../src/xliff-document.mjs");
 const { buildContextPack } = await import("../src/context-pack.mjs");
 const { classifyContent } = await import("../src/classifier.mjs");
@@ -113,11 +113,33 @@ test("定位顺序：先按条目 ID，再退回原文+译文", () => {
 test("同一 ID 但原文不同（跨文件撞 ID）不覆盖，各自成行", async () => {
   const sharedKey = "SHARED_CONTEXT_ID";
   await save({ source: "同一 ID 的第一句", target: "第一句译文", entryKey: sharedKey, sourceFile: "a.mqxliff" });
-  await save({ source: "同一 ID 的第二句", target: "第二句译文", entryKey: sharedKey, sourceFile: "b.mqxliff" });
+  await save({ source: "完全不同的另一句", target: "第二句译文", entryKey: sharedKey, sourceFile: "b.mqxliff" });
 
   const rows = (await getMemories("zh-CN", { projectId: "project-1" })).filter((row) => row.entryKey === sharedKey);
-  assert.equal(rows.length, 2, "ID 相同但原文不同，说明是另一个文件里的段落，不能互相覆盖");
-  assert.deepEqual(rows.map((row) => row.source).sort(), ["同一 ID 的第一句", "同一 ID 的第二句"]);
+  assert.equal(rows.length, 2, "ID 相同但内容毫不相干，说明是另一个段落，不能互相覆盖");
+  assert.deepEqual(rows.map((row) => row.source).sort(), ["同一 ID 的第一句", "完全不同的另一句"]);
+});
+
+test("同一 ID、内联标签位置变了仍视为同一条目（改稿覆盖）", async () => {
+  const key = "TAG_MOVED_KEY";
+  const withLeadingTag = "<tag id='tag-1' type='inline' desc='ph'/>ミグ……『ミグルミ』だろ？<tag id='tag-2' type='inline' desc='ph'/>";
+  const withTrailingTag = "ミグ……『ミグルミ』だろ？<tag id='tag-1' type='inline' desc='ph'/><tag id='tag-2' type='inline' desc='ph'/>";
+  await save({ source: withLeadingTag, target: "比如“打劫”呀", entryKey: key, sourceFile: "a.mqxliff" });
+  await save({ source: withTrailingTag, target: "比如……比如“打劫”呀", entryKey: key, sourceFile: "b.mqxliff" });
+
+  const rows = (await getMemories("zh-CN", { projectId: "project-1" })).filter((row) => row.entryKey === key);
+  assert.equal(rows.length, 1, "只是标签挪了位置，是同一段落的新修订");
+  assert.equal(rows[0].target, "比如……比如“打劫”呀");
+  assert.equal(normalizeMemoryText(withLeadingTag), normalizeMemoryText(withTrailingTag));
+});
+
+test("没有条目 ID 时，内联标签差异同样按原文+译文去重", async () => {
+  const a = "カード<tag id='tag-1' type='inline' desc='ph'/>：ハーデス";
+  const b = "カード：ハーデス<tag id='tag-1' type='inline' desc='ph'/>";
+  await save({ source: a, target: "卡片：哈迪斯" });
+  await save({ source: b, target: "卡片：哈迪斯" });
+  const rows = (await getMemories("zh-CN", { projectId: "project-1" })).filter((row) => normalizeMemoryText(row.source) === "カード：ハーデス");
+  assert.equal(rows.length, 1);
 });
 
 test("同一 ID 且原文一致时仍然原地覆盖", async () => {

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { assertLocale, LOCALES } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { createDefaultProjectSettings, sanitizeProjectSettings } from "./project-config.mjs";
-import { memoryMatchAttempts, styleEvidenceMatch } from "./translation-memory.mjs";
+import { memoryMatchAttempts, normalizeMemoryText, styleEvidenceMatch } from "./translation-memory.mjs";
 import {
   deleteDirectusAsset,
   getDirectusAssets,
@@ -337,9 +337,11 @@ async function saveJsonMemory(locale, input) {
   let existing = null;
   for (const attempt of memoryMatchAttempts({ ...input, source, target })) {
     existing = attempt.kind === "entry"
-      // 同 ID 还要同原文：memoQ 的 context ID 会在多个文件之间重复。
-      ? scoped.find((item) => String(item.entryKey || "").trim() === attempt.entryKey && String(item.source || "").trim() === attempt.source)
-      : scoped.find((item) => item.source === attempt.source && item.target === attempt.target);
+      // 同 ID 还要同原文（按归一化判等）：memoQ 的 context ID 会在多个文件之间重复。
+      ? scoped.find((item) => String(item.entryKey || "").trim() === attempt.entryKey
+        && normalizeMemoryText(item.source) === normalizeMemoryText(attempt.source))
+      : scoped.find((item) => normalizeMemoryText(item.source) === normalizeMemoryText(attempt.source)
+        && normalizeMemoryText(item.target) === normalizeMemoryText(attempt.target));
     if (existing) break;
   }
   const item = { id: existing?.id || randomUUID(), ...existing, ...input, locale, source, target, ...(embedding ? { embedding } : {}), updatedAt: new Date().toISOString(), createdAt: existing?.createdAt || new Date().toISOString() };

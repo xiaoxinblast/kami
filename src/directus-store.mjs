@@ -3,7 +3,7 @@ import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { fetchWithTimeout } from "./provider.mjs";
 import { sanitizeProjectSettings } from "./project-config.mjs";
-import { memoryMatchAttempts, memorySourceHash, styleEvidenceMatch } from "./translation-memory.mjs";
+import { memoryMatchAttempts, memorySourceHash, normalizeMemoryText, styleEvidenceMatch } from "./translation-memory.mjs";
 
 export const LOCALE_COLLECTIONS = Object.freeze({
   "zh-CN": "terms_zh_cn",
@@ -310,13 +310,14 @@ export async function saveDirectusMemory(locale, input) {
       const entryParams = scope(new URLSearchParams({ limit: "50", fields: "id,quality_status,qa_score,source" }));
       entryParams.set("filter[entry_key][_eq]", attempt.entryKey);
       const rows = await request(`/items/${collection}?${entryParams}`);
-      const matched = rows.find((item) => item.source === attempt.source);
+      const matched = rows.find((item) => normalizeMemoryText(item.source) === normalizeMemoryText(attempt.source));
       existing = matched ? [matched] : [];
     } else {
       const pairParams = scope(new URLSearchParams({ limit: "50", fields: "id,quality_status,qa_score,source,target" }));
       pairParams.set("filter[source_hash][_eq]", memorySourceHash(attempt.source));
       const candidates = await request(`/items/${collection}?${pairParams}`);
-      const matched = candidates.find((item) => item.source === attempt.source && item.target === attempt.target);
+      const matched = candidates.find((item) => normalizeMemoryText(item.source) === normalizeMemoryText(attempt.source)
+        && normalizeMemoryText(item.target) === normalizeMemoryText(attempt.target));
       existing = matched ? [matched] : [];
     }
     if (existing[0]) break;

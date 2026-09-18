@@ -5,8 +5,22 @@ import { MEMORY_PURPOSES, partitionTranslationMemories } from "./asset-governanc
 const QUALITY_RANK = Object.freeze({ human_approved: 2, machine_verified: 1, provisional: 0, rejected: -1 });
 
 /**
+ * 比较用归一化：去掉 MQXLIFF 的内联标签占位符（`<tag id='tag-1' type='inline' desc='ph'/>`），
+ * 折叠空白。同一段落在不同修订里常常只是标签位置变了（开头 ↔ 中间），原文严格比较会把
+ * 它当成新段落而堆出新行；归一化之后才是"同一条目"。
+ *
+ * 注意归一化只用于**判等**，写库时仍然保存原始文本（含标签），因为导出回写需要它们。
+ */
+export function normalizeMemoryText(value = "") {
+  return String(value || "")
+    .replace(/<tag\b[^<>]*\/>/giu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+/**
  * TM 行的定位顺序（Directus 与 JSON 两个存储共用同一份规则）：
- *   1) 同项目 + 同条目 ID + 同原文：memoQ 把条目身份写在 `context[context-type=x-mmq-context]` 里，
+ *   1) 同项目 + 同条目 ID + 同原文（按 normalizeMemoryText 判等）：memoQ 把条目身份写在 `context[context-type=x-mmq-context]` 里，
  *      同一个文档的交付版/工作版、改稿重导都共享它，因此应该**覆盖原来那一行**，
  *      而不是再堆一条新译文。原文必须一致：同一个 ID 会在多个文件之间重复出现
  *      （同一批素材被拆到几个导出里），只看 ID 会把别的文件的段落覆盖掉。
@@ -51,7 +65,7 @@ export function styleEvidenceMatch({ entryKey = "", locale = "", contentType = "
  * 查询长度恒定：先按哈希取出同一原文的行，再在内存里精确比对目标译文。
  */
 export function memorySourceHash(source = "") {
-  const text = String(source || "").trim();
+  const text = normalizeMemoryText(source);
   if (!text) return "";
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32);
 }

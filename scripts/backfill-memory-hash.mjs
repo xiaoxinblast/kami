@@ -21,8 +21,12 @@ if (!token) {
 const COLLECTIONS = ["translation_memory_zh_cn", "translation_memory_ja_jp", "translation_memory_ko_kr", "translation_memory_zh_hant_tw", "translation_memory_fr_fr", "translation_memory_th_th"];
 const CHUNK = 200;
 
+function normalizeMemoryText(value) {
+  return String(value || "").replace(/<tag\b[^<>]*\/>/giu, "").replace(/\s+/gu, " ").trim();
+}
+
 function memorySourceHash(source) {
-  const text = String(source || "").trim();
+  const text = normalizeMemoryText(source);
   if (!text) return "";
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32);
 }
@@ -51,7 +55,8 @@ for (const collection of COLLECTIONS) {
     console.log(`skip ${collection}: ${error.message}`);
     continue;
   }
-  const pending = items.filter((item) => !String(item.source_hash || "").trim() && String(item.source || "").trim());
+  // 归一化规则改过（早先按原始文本哈希），哈希对不上的行也要重算。
+  const pending = items.filter((item) => String(item.source || "").trim() && memorySourceHash(item.source) !== String(item.source_hash || "").trim());
   for (let offset = 0; offset < pending.length; offset += CHUNK) {
     const chunk = pending.slice(offset, offset + CHUNK).map((item) => ({ id: item.id, source_hash: memorySourceHash(item.source) }));
     await api(`/items/${collection}`, { method: "PATCH", body: chunk });
@@ -60,3 +65,4 @@ for (const collection of COLLECTIONS) {
   console.log(`${collection}: ${items.length} 行，补写 ${pending.length} 行`);
 }
 console.log(`source_hash 回填完成：共 ${updated} 行`);
+
