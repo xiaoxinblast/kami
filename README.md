@@ -206,6 +206,14 @@ $env:KAMI_API_E2E='1'; node --env-file=directus/.env --test tests/term-import-ap
 
 第二条命令会额外运行真实 Directus 读写测试。第三条需要 Kami 已在 4173 端口运行，会执行日中表格预览、写入、读取校验和自动清理的完整 API 闭环。
 
+前端交互（设置面板草稿、导入预检、向导步骤）另有真实浏览器测试，默认跳过，需要时指定 Playwright 与浏览器可执行文件：
+
+```powershell
+$env:KAMI_BROWSER_TEST_MODULE = 'C:\path\to\node_modules\playwright-core'
+$env:KAMI_BROWSER_EXECUTABLE = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+npm test
+```
+
 ## 当前原型边界
 
 - 旧版 `.xls` 需先另存为 `.xlsx`；JSON、YAML、PO 和游戏资源包尚未接入结构化回写。XLIFF 仅支持 1.2 格式及 `.xliff` / `.mqxliff` 扩展名。

@@ -4102,7 +4102,9 @@ async function serveStatic(req, res, url) {
     const body = await readFile(path);
     res.writeHead(200, {
       "content-type": MIME_TYPES[extname(path)] || "application/octet-stream",
-      "content-length": body.length
+      "content-length": body.length,
+      // 本机工作台随时会被更新；让浏览器一直用磁盘上的最新前端，别拿旧 JS 猜行为。
+      "cache-control": "no-store"
     });
     res.end(body);
     return true;
