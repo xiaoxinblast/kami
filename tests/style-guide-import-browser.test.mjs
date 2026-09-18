@@ -75,6 +75,8 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
     assert.equal(await page.locator("#styleGuideImportButton").textContent(), "导入并立即启用");
     assert.equal(await page.locator("#styleGuideImportButton").isDisabled(), true);
     assert.equal(await page.locator("#styleGuideFileName").textContent(), "支持 TXT / Markdown / DOCX，最大 5MB");
+    // 风格数据是异步拉的，等模块渲染完再断言，否则会读到"正在读取"的占位文案
+    await page.waitForSelector("#manualGuideStatus .manual-guide-empty");
     assert.match(await page.locator("#manualGuideStatus").textContent(), /还没有人工风格指南/u, "没有指南时要有明确空状态");
 
     await page.locator("#styleGuideFile").setInputFiles({ name: "品牌语气.md", mimeType: "text/markdown", buffer: Buffer.from("# 语气\n1. 克制。\n") });
@@ -92,6 +94,7 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
     assert.match(await page.locator("#styleGuidanceList .style-guidance-card").first().textContent(), /已启用/u);
 
     // 人工风格指南模块：哪一份、是否启用、多少字、什么时候更新，一眼可见
+    await page.waitForSelector("#manualGuideStatus .manual-guide-card.active");
     const guideText = await page.locator("#manualGuideStatus").textContent();
     assert.match(guideText, /品牌语气/u);
     assert.match(guideText, /正在作为最高优先级风格规则参与翻译/u);
