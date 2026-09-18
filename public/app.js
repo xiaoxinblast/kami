@@ -1423,6 +1423,7 @@ async function setBatchFile(file) {
 const BATCH_COLUMN_ROLES = [
   { value: "source_text", label: "日文原文（要翻译）" },
   { value: "existing_translation", label: "已有译文（参考）" },
+  { value: "translation_output", label: "写回译文的列" },
   { value: "entry_id", label: "条目 ID" },
   { value: "context", label: "上下文 / 说明" },
   { value: "constraint", label: "约束（字数、语言…）" },
@@ -1485,10 +1486,15 @@ async function confirmBatchColumns(file) {
   const updateBatchColumnState = () => {
     const mapping = collectMapping();
     const sourceCount = mapping.sheets.reduce((sum, sheet) => sum + sheet.columns.filter((column) => column.role === "source_text").length, 0);
+    // 直接用当前选择（用户可能刚把某列改成写回列），标签从原始结构里取。
+    const outputColumns = mapping.sheets.flatMap((sheet, sheetIndex) => sheet.columns
+      .filter((column) => column.role === "translation_output")
+      .map((column) => (structure.sheets[sheetIndex]?.columns || []).find((item) => item.column === column.column) || { letter: String(column.column) }));
+    const outputCount = outputColumns.length;
     $("#batchColumnConfirm").disabled = sourceCount === 0;
     $("#batchColumnHint").classList.toggle("is-error", sourceCount === 0);
     $("#batchColumnHint").textContent = sourceCount
-      ? `将翻译 ${sourceCount} 列日文原文；「已有译文」作为参考、「条目 ID」用于把译文写回记忆库时的身份匹配。`
+      ? `将翻译 ${sourceCount} 列日文原文；${outputCount ? `译文导出时写到「${outputColumns.map((column) => column.label || column.letter).join("」「")}」` : "没有指定写回列 → 导出时原位覆盖原文列"}；「已有译文」只作参考、「条目 ID」用于写回记忆库时的身份匹配。`
       : "至少要指定一列「日文原文」，否则没有可翻译的内容。";
     $$("#batchColumnBody select").forEach((select) => { select.dataset.role = select.value; });
   };
@@ -2724,10 +2730,109 @@ function invalidateBatchTranslations(message) {
   if (hadTranslations) toast(message);
 }
 
+/**
+ * 导出方式选择弹窗：写回原文件 / 仅译文 / 任务 Excel。
+ * 以前缺原文件时会静默导成自定义"任务 Excel"，用户以为导出坏了——现在必须自己选。
+ */
+function openExportOptionsDialog({ title, summary, options }) {
+  const dialog = $("#exportOptionsDialog");
+  $("#exportOptionsTitle").textContent = title;
+  $("#exportOptionsSummary").textContent = summary;
+  $("#exportOptionsBody").innerHTML = options
+    .map((option) => `<button class="export-option" type="button" data-export-option="${escapeHtml(option.id)}"><strong>${escapeHtml(option.label)}</strong><small>${escapeHtml(option.hint || "")}</small></button>`)
+    .join("");
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      dialog.removeEventListener("click", onClick);
+      dialog.removeEventListener("close", onClose);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onClick = (event) => {
+      const option = event.target.closest("[data-export-option]");
+      if (option) return finish(option.dataset.exportOption);
+      if (event.target.closest("[data-close='exportOptionsDialog']")) finish("");
+    };
+    const onClose = () => finish("");
+    dialog.addEventListener("click", onClick);
+    dialog.addEventListener("close", onClose);
+    if (!dialog.open) dialog.showModal();
+  });
+}
+
+/** 让用户补选原文件（历史任务没保存原文件时，写回需要它）。 */
+function pickBatchSourceFile() {
+  return new Promise((resolve) => {
+    const input = $("#batchSourceFile");
+    input.value = "";
+    const onChange = async (event) => {
+      input.removeEventListener("change", onChange);
+      const file = event.target.files?.[0];
+      if (!file) return resolve(false);
+      state.batchFile = file;
+      state.batchBase64 = await fileToBase64(file);
+      $("#batchFilePrompt").textContent = file.name;
+      resolve(true);
+    };
+    input.addEventListener("change", onChange);
+    input.click();
+  });
+}
+
+/** 当前表格的写回列（没有写回列就是原位覆盖原文）。 */
+function batchWriteBackLabel() {
+  const sheets = state.batchPreview?.spreadsheetAnalysis?.sheets || [];
+  for (const sheet of sheets) {
+    const output = (sheet.columns || []).find((column) => column.role === "translation_output");
+    if (output) return `${sheet.sheet} · ${output.label || `${output.letter} 列`}（译文列）`;
+  }
+  const hasTable = ["xlsx", "csv"].includes(state.batchPreview?.format);
+  return hasTable ? "没有指定译文列 → 原位覆盖日文原文列" : "";
+}
+
 async function exportBatch() {
   if (!state.batchPreview) return;
-  const restoredWithoutSource = !state.batchBase64 && ["docx", "xlsx", "xliff", "mqxliff"].includes(state.batchPreview.format);
   const exportSegments = state.batchPreview.segments.map(({ id, source, selected, translation }) => ({ id, source, selected, translation }));
+  const format = state.batchPreview.format;
+  const needsSource = ["docx", "xlsx", "csv", "xliff", "mqxliff"].includes(format);
+  const hasSource = Boolean(state.batchBase64);
+  const writeBack = batchWriteBackLabel();
+  let mode = "in-place";
+  let exportFormat = format;
+  // 先确认导出方式：写回原文件 / 仅译文 / 任务 Excel。缺原文件时不再静默换格式。
+  if (needsSource && !hasSource) {
+    const choice = await openExportOptionsDialog({
+      title: "没有原文件，无法写回",
+      summary: `${format.toUpperCase()} 的译文要写回原文件才能保留原有结构与译文位置，但历史任务没有保存原始文件。选一种方式继续：`,
+      options: [
+        { id: "pick-source", label: "选择原文件并写回", hint: "重新选中同名原文件后，译文写回它原本的位置（MQXLIFF 写 target、表格写译文列）" },
+        { id: "translation-only", label: "仅导出译文", hint: "只给译文（每段一行），不带原文与排版" },
+        { id: "task-xlsx", label: "导出任务 Excel（含 QA 信息）", hint: "序号 / 原文 / 译文 / 状态 / AIQA 分数 / QA 意见 / 人工决定" }
+      ]
+    });
+    if (!choice) return;
+    if (choice === "pick-source") {
+      if (!(await pickBatchSourceFile())) return;
+    } else if (choice === "translation-only") {
+      mode = "translation-only";
+    } else {
+      exportFormat = "task-xlsx";
+    }
+  } else {
+    const choice = await openExportOptionsDialog({
+      title: "导出方式",
+      summary: `原文件：${state.batchFile?.name || state.batchPreview.filename}${writeBack ? ` · ${writeBack}` : ""}`,
+      options: [
+        { id: "in-place", label: "写回原文件", hint: needsSource ? "译文写回原文件里它该在的位置（表格写译文列，XLIFF 写 target）" : "在原文件结构里替换对应段落，保留其它内容" },
+        { id: "translation-only", label: "仅导出译文", hint: "只给译文（每段一行）；DOCX 会生成一份只有译文的新文档" }
+      ]
+    });
+    if (!choice) return;
+    mode = choice;
+  }
   setBusy(true, "正在检查导出条件…");
   try {
     let gate = null;
@@ -2775,7 +2880,8 @@ async function exportBatch() {
       ...projectPayload(),
       filename: state.batchPreview.filename,
       locale: state.workbenchLocale,
-      format: restoredWithoutSource ? "task-xlsx" : state.batchPreview.format,
+      format: exportFormat,
+      mode,
       structure: state.batchPreview.structure,
       base64: state.batchBase64 || undefined,
       segments: exportSegments
@@ -2783,9 +2889,7 @@ async function exportBatch() {
     const saved = await saveExportedFile(payload);
     await openExportDialog({
       title: "导出完成",
-      summary: restoredWithoutSource
-        ? `原文件未随历史任务保存，已导出可继续编辑的任务 Excel：${payload.filename}。${saved.message}`
-        : `${payload.filename}。${saved.message}`,
+      summary: `${payload.filename}（${mode === "translation-only" ? "仅译文" : "写回原文件"}${exportFormat === "task-xlsx" ? " · 任务 Excel" : ""}）。${saved.message}`,
       items: []
     });
   } catch (error) {

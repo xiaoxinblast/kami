@@ -167,6 +167,9 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
     if (!sheetAnalysis) return;
     const roles = new Map(sheetAnalysis.columns.map((column) => [column.column, column]));
     const sourceColumns = sheetAnalysis.columns.filter((column) => column.role === "source_text").map((column) => column.column);
+    // 写回列：优先用"译文列"（translation_output，memoQ 的 target 语义）；
+    // 没有这样的列就写回原文列本身（原位覆盖），与旧行为一致。
+    const outputColumns = sheetAnalysis.columns.filter((column) => column.role === "translation_output").map((column) => column.column);
     worksheet.eachRow((row) => {
       if (sheetAnalysis.headerRow && row.number === sheetAnalysis.headerRow) return;
       const metadata = [];
@@ -196,7 +199,11 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
         };
         const locator = { type: `${format}-cell`, sheet: worksheet.name, address: cell.address, row: row.number, column: columnNumber, entryId };
         const segmentIds = collector.add(source, locator, context);
-        cells.push({ sheet: worksheet.name, address: cell.address, row: row.number, column: columnNumber, segmentIds });
+        const targetColumn = outputColumns[0] || columnNumber;
+        const targetAddress = row.getCell(targetColumn).address;
+        locator.targetColumn = targetColumn;
+        locator.targetAddress = targetAddress;
+        cells.push({ sheet: worksheet.name, address: cell.address, row: row.number, column: columnNumber, targetAddress, targetColumn, segmentIds });
       }
     });
   });
@@ -350,15 +357,73 @@ function outputName(filename, locale, extension = extname(filename)) {
   return `${stem}.${String(locale || "translated").replace(/[^a-zA-Z0-9-]/g, "-")}${extension}`;
 }
 
+/** 生成"仅译文"的 DOCX：一段一行译文，不带原文、不带原排版。 */
+async function buildTranslationOnlyDocx(paragraphs = []) {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    + '</Types>');
+  zip.folder("_rels").file(".rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+    + '</Relationships>');
+  const body = paragraphs.map((text) => `<w:p><w:r><w:t xml:space="preserve">${encodeXml(text)}</w:t></w:r></w:p>`).join("");
+  zip.folder("word").file("document.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    + `<w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`);
+  return zip.generateAsync({ type: "nodebuffer" });
+}
+
 export async function exportBatchDocument(input = {}) {
   const format = String(input.format || "");
+  // mode: in-place（写回原文件，默认）| translation-only（仅译文）
+  const mode = input.mode === "translation-only" ? "translation-only" : "in-place";
   const translations = translationMap(input.segments);
   if (!translations.size) fail("没有可导出的分段");
+  if (mode === "in-place" && ["docx", "xlsx", "xliff", "mqxliff"].includes(format) && !input.base64) {
+    fail("写回原文件需要原始文件，请重新选择该文件；只想拿译文可以选「仅译文」导出");
+  }
+  if (mode === "in-place" && format === "csv" && input.text === undefined && !input.base64) {
+    fail("写回原文件需要原始文件，请重新选择该文件；只想拿译文可以选「仅译文」导出");
+  }
+  const orderedSegments = (input.segments || []).filter((segment) => segment.selected !== false && String(segment.translation || "").trim());
+  const translationLines = orderedSegments.map((segment) => String(segment.translation || "").trim());
   let buffer;
   let mimeType;
   let extension;
 
-  if (format === "task-xlsx") {
+  if (mode === "translation-only" && format !== "task-xlsx") {
+    // 仅译文：适合交给下游直接使用的纯译文文件（docx/txt/md/xlsx/csv 都支持）。
+    if (format === "docx") {
+      buffer = await buildTranslationOnlyDocx(translationLines);
+      mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      extension = ".docx";
+    } else if (format === "xlsx") {
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("译文");
+      worksheet.columns = [{ header: "译文", key: "translation", width: 80 }];
+      translationLines.forEach((line) => worksheet.addRow({ translation: line }));
+      worksheet.getRow(1).font = { bold: true };
+      worksheet.views = [{ state: "frozen", ySplit: 1 }];
+      buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+      mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      extension = ".xlsx";
+    } else if (format === "csv") {
+      const escapeCell = (value) => `"${String(value ?? "").replace(/"/gu, '""')}"`;
+      buffer = Buffer.from([["译文"], ...translationLines.map((line) => [line])].map((row) => row.map(escapeCell).join(",")).join("\r\n"), "utf8");
+      mimeType = "text/csv; charset=utf-8";
+      extension = ".csv";
+    } else if (format === "markdown" || format === "text") {
+      buffer = Buffer.from(translationLines.join("\n"), "utf8");
+      mimeType = format === "markdown" ? "text/markdown; charset=utf-8" : "text/plain; charset=utf-8";
+      extension = format === "markdown" ? ".md" : ".txt";
+    } else {
+      fail("这个格式不支持仅译文导出");
+    }
+  } else if (format === "task-xlsx") {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet("翻译任务");
     worksheet.columns = [
@@ -426,7 +491,8 @@ export async function exportBatchDocument(input = {}) {
     await workbook.xlsx.load(decodeBase64(input.base64));
     for (const item of input.structure?.cells || []) {
       const worksheet = workbook.getWorksheet(item.sheet);
-      if (worksheet) worksheet.getCell(item.address).value = translatedGroup(item.segmentIds, translations);
+      // 有写回列就写进那一列（原文保留），没有就原位覆盖原文单元格。
+      if (worksheet) worksheet.getCell(item.targetAddress || item.address).value = translatedGroup(item.segmentIds, translations);
     }
     buffer = Buffer.from(await workbook.xlsx.writeBuffer());
     mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -436,7 +502,7 @@ export async function exportBatchDocument(input = {}) {
     const document = parseCsvDocument(original, { delimiter: input.structure?.csv?.delimiter });
     const replacements = (input.structure?.cells || []).map((item) => ({
       row: Number(item.row),
-      column: Number(item.column),
+      column: Number(item.targetColumn || item.column),
       value: translatedGroup(item.segmentIds, translations)
     })).filter((item) => Number.isInteger(item.row) && item.row > 0 && Number.isInteger(item.column) && item.column > 0);
     buffer = Buffer.from(replaceCsvCells(document, replacements), "utf8");

@@ -26,6 +26,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   const actions = [];
+  let exportBody = null;
   const batch = (overrides) => ({
     id: "batch-1", type: "batch", batchId: "batch-1", filename: "dialogue.xlsx", projectId: "project-1",
     locale: "zh-CN", contentType: "general", domain: "game", format: "xlsx", status: "in_progress", runState: "running",
@@ -105,6 +106,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
       }
       if (url.pathname === "/api/batch/export") {
         actions.push(`${request.method()} ${url.pathname}`);
+        exportBody = JSON.parse(request.postData() || "{}");
         return route.fulfill({
           status: 200, contentType: "application/json",
           body: JSON.stringify({ filename: "interrupted.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", base64: Buffer.from("test").toString("base64") })
@@ -173,11 +175,19 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     assert.ok(actions.includes("POST /api/batch/run/batch-2/import-review"), `回填要打到 import-review 接口：${actions.join(" | ")}`);
     await page.locator('#reviewImportDialog .icon-button[data-close="reviewImportDialog"]').click();
 
-    // 导出：门禁阻断要弹窗逐条列出，并且给出"仍然导出"的出口（以前只有 3 秒 toast，像"点了没反应"）
+    // 导出：先选导出方式（历史任务没有原文件时不能静默换成自定义格式），再走 QA 门禁
     await page.locator('#taskList .task-row[data-task-id="batch-2"] [data-action="open-task"]').click();
     await page.waitForFunction(() => document.querySelector("#batchPreviewMeta") !== null || true);
     await page.waitForSelector("#tertiaryAction:not([hidden])");
     await page.locator("#tertiaryAction").click();
+    await page.waitForSelector("#exportOptionsDialog[open]");
+    assert.match(await page.locator("#exportOptionsTitle").textContent(), /没有原文件/u, "缺原文件时要明确告知，而不是悄悄导成任务 Excel");
+    assert.equal(await page.locator('[data-export-option="pick-source"]').count(), 1);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/export-options-dialog.png`, animations: "disabled" });
+    }
+    await page.locator('[data-export-option="translation-only"]').click();
     await page.waitForSelector("#exportDialog[open]");
     assert.match(await page.locator("#exportDialogTitle").textContent(), /导出被 QA 门禁挡住/u);
     assert.match(await page.locator("#exportDialogSummary").textContent(), /规则层的硬问题/u);
@@ -190,6 +200,8 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.locator("#exportDialogForce").click();
     await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 15000 });
     assert.ok(actions.some((item) => item.includes("/api/batch/export")), `强制导出要打到导出接口：${actions.join(" | ")}`);
+    assert.equal(exportBody?.mode, "translation-only", "选择的导出方式要带到接口");
+    assert.match(await page.locator("#exportDialogSummary").textContent(), /仅译文/u);
     await page.locator('#exportDialog .icon-button[data-close="exportDialog"]').click();
 
     if (process.env.KAMI_UI_SCREENSHOTS) {

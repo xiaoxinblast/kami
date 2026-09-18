@@ -298,7 +298,11 @@ select { min-width: 150px; }
 .asset-preflight-options .import-toggle { padding: 9px 11px; border: 1px solid #e3e9df; border-radius: 9px; background: #fbfdf9; }
 .import-progress-note { margin: 9px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 /* 待译表格上传后的"列含义"确认弹窗 */
-.batch-column-card { width: min(760px, 94vw); }
+/*
+ * 宽弹窗要把宽度加在 <dialog> 上（dialog 自身默认 min(640px,100vw-32px)）。
+ * 之前把宽度加在内部 .dialog-card 上，卡片比 dialog 还宽就溢出，标题会被裁掉。
+ */
+#batchColumnDialog, #exportDialog, #exportOptionsDialog, #reviewImportDialog, #assetPreflightDialog { width: min(760px, calc(100vw - 32px)); }
 .batch-column-body { display: grid; gap: 12px; max-height: 52vh; overflow-y: auto; margin: 4px 0 12px; }
 .batch-column-sheet { border: 1px solid #e3e9df; border-radius: 11px; background: #fff; overflow: hidden; }
 .batch-column-sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; background: #f7faf6; border-bottom: 1px solid #e9efe6; }
@@ -346,7 +350,12 @@ select { min-width: 150px; }
 .review-import-details small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .review-import-details p { display: flex; justify-content: space-between; gap: 10px; margin: 6px 0 0; color: #46584c; font-size: 11px; line-height: 1.6; }
 .review-import-details em { flex: 0 0 auto; color: #8a7b52; font-style: normal; }
-.export-dialog-card { width: min(720px, 94vw); }
+.export-dialog-card { width: auto; }
+.export-options { display: grid; gap: 8px; margin: 4px 0 12px; }
+.export-option { display: grid; gap: 3px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfa; text-align: left; cursor: pointer; }
+.export-option:hover { border-color: var(--lime-deep); background: #f6fbef; }
+.export-option strong { color: #345244; font-size: 13px; }
+.export-option small { color: var(--muted); font-size: 11px; line-height: 1.6; }
 .batch-segment.is-highlighted { box-shadow: 0 0 0 2px var(--lime-deep), 0 6px 18px rgba(10,35,27,.12); }
 /* 译文质检：来源切换 + 统一段列表（筛选 / 跳到下一条） */
 .qa-source-panel { margin-bottom: 16px; }

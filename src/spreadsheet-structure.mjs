@@ -1,4 +1,4 @@
-const COLUMN_ROLES = new Set(["source_text", "context", "constraint", "existing_translation", "entry_id", "ignore"]);
+const COLUMN_ROLES = new Set(["source_text", "context", "constraint", "existing_translation", "translation_output", "entry_id", "ignore"]);
 const ID_HEADERS = ["id", "entry id", "entry_id", "条目id", "条目 ID", "句段id", "segment id", "key", "键"];
 const SOURCE_HEADERS = ["日语", "日语原文", "日文", "日文原文", "日本语", "日本語", "japanese", "ja-jp", "ja_jp", "source", "source text", "原文", "待翻译"];
 const CONTEXT_HEADERS = ["位置", "渠道", "平台", "用途", "投放位置", "发布位置", "场景", "备注", "说明", "注释", "注釈", "注記", "コメント", "メモ", "类型", "content type", "note", "notes", "comment", "comments", "remark", "remarks", "memo"];
@@ -155,9 +155,16 @@ export function inferSpreadsheetStructure(snapshot, options = {}) {
     const columns = sheet.columns.map((column) => {
       const label = header.get(column.column) || `${column.letter}列`;
       const explicit = headerRole(label);
-      if (explicit) return { column: column.column, letter: column.letter, label, role: explicit, confidence: 0.98, reason: "表头语义明确" };
       const score = ruleScores.find((item) => item.column === column.column)?.score || 0;
       const body = column.samples.filter((sample) => !headerRow || sample.row !== headerRow);
+      if (explicit) {
+        // 表头写着"译文/中文/Translation"但整列是空的 → 这是等着写回译文的空列（memoQ 的 target 列语义）；
+        // 已经有内容才算"已有参考译文"。
+        if (explicit === "existing_translation" && !body.length) {
+          return { column: column.column, letter: column.letter, label, role: "translation_output", confidence: 0.9, reason: "表头是译文列且整列为空，作为写回译文的列" };
+        }
+        return { column: column.column, letter: column.letter, label, role: explicit, confidence: 0.98, reason: "表头语义明确" };
+      }
       const constraintRatio = body.filter((sample) => looksLikeConstraint(sample.text)).length / Math.max(1, body.length);
       const japaneseRatio = body.filter((sample) => containsJapanese(sample.text)).length / Math.max(1, body.length);
       const chineseRatio = body.filter((sample) => /[\p{Script=Han}]/u.test(sample.text) && !containsJapanese(sample.text)).length / Math.max(1, body.length);

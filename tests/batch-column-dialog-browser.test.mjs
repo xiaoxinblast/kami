@@ -88,6 +88,8 @@ test("待译表格上传弹出列含义确认弹窗，并带映射解析", { ski
     assert.match(rows[1], /表头为空/u);
     assert.match(rows[1], /CARD-0001/u);
     assert.equal(await page.locator('select[data-column="2"]').inputValue(), "context");
+    // 表格常见"译文列"：弹窗里必须能把它指定成写回列
+    assert.equal(await page.locator('select[data-column="2"] option[value="translation_output"]').count(), 1, "要有「写回译文的列」这个选项");
 
     // 把"表头为空"的那一列改成日文原文，确认后应该带着映射去解析
     await page.locator('select[data-column="2"]').selectOption("source_text");

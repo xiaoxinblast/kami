@@ -545,7 +545,7 @@
         <div class="dialog-head"><div><span class="card-kicker">COLUMN MAPPING</span><h2>确认表格的列含义</h2></div><button class="icon-button" type="button" data-close="batchColumnDialog" aria-label="关闭">×</button></div>
         <p class="panel-caption" id="batchColumnSummary">正在识别表格结构……</p>
         <div class="batch-column-body" id="batchColumnBody"></div>
-        <p class="batch-column-hint" id="batchColumnHint">只有标记为「日文原文」的列会送去翻译；「已有译文」会作为参考、「条目 ID」用于把译文写回记忆库时的身份匹配。</p>
+        <p class="batch-column-hint" id="batchColumnHint">只有标记为「日文原文」的列会送去翻译；「写回译文的列」决定导出时译文写到哪一列（不选就在原文列原位覆盖）；「已有译文」只作参考，「条目 ID」用于把译文写回记忆库时的身份匹配。</p>
         <div class="dialog-actions">
           <button class="button ghost" type="button" id="batchColumnReset">恢复自动识别</button>
           <button class="button ghost" type="button" data-close="batchColumnDialog">取消</button>
@@ -554,6 +554,15 @@
       </div>
     </dialog>
     <input type="file" id="reviewImportFile" accept=".mqxliff,.xliff,.xlsx,.csv" hidden />
+    <input type="file" id="batchSourceFile" accept=".docx,.xlsx,.csv,.xliff,.mqxliff" hidden />
+    <dialog id="exportOptionsDialog">
+      <div class="dialog-card export-dialog-card">
+        <div class="dialog-head"><div><span class="card-kicker">EXPORT OPTIONS</span><h2 id="exportOptionsTitle">导出方式</h2></div><button class="icon-button" type="button" data-close="exportOptionsDialog" aria-label="关闭">×</button></div>
+        <p class="panel-caption" id="exportOptionsSummary"></p>
+        <div class="export-options" id="exportOptionsBody"></div>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="exportOptionsDialog">取消</button></div>
+      </div>
+    </dialog>
     <dialog id="exportDialog">
       <div class="dialog-card export-dialog-card">
         <div class="dialog-head"><div><span class="card-kicker">EXPORT</span><h2 id="exportDialogTitle">导出</h2></div><button class="icon-button" type="button" data-close="exportDialog" aria-label="关闭">×</button></div>

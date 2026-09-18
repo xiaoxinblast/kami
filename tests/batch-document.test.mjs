@@ -174,6 +174,77 @@ test("DOCX 翻译导出保留文档容器并替换段落", async () => {
   assert.match(xml, /번역2/);
 });
 
+test("表格有空的译文列时写回那一列，原文保留", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("剧情");
+  sheet.addRow(["日语原文", "简体中文译文", "备注"]);
+  sheet.addRow(["おかえりなさい！", "", "系统提示"]);
+  sheet.addRow(["メンテナンスは明日開始します。", "", "公告"]);
+  const original = Buffer.from(await workbook.xlsx.writeBuffer());
+  const prepared = await prepareBatchDocument({ filename: "lines.xlsx", base64: original.toString("base64") });
+  const analysis = prepared.spreadsheetAnalysis.sheets[0];
+  const byLetter = new Map(analysis.columns.map((column) => [column.letter, column]));
+  assert.equal(byLetter.get("A").role, "source_text");
+  assert.equal(byLetter.get("B").role, "translation_output", "整列为空的译文列要当成写回列");
+  assert.equal(byLetter.get("C").role, "context");
+
+  const exported = await exportBatchDocument({
+    filename: prepared.filename,
+    locale: "zh-CN",
+    format: prepared.format,
+    structure: prepared.structure,
+    base64: original.toString("base64"),
+    segments: prepared.segments.map((segment, index) => ({ ...segment, translation: index === 0 ? "欢迎回来！" : "维护明天开始。" }))
+  });
+  const result = new ExcelJS.Workbook();
+  await result.xlsx.load(Buffer.from(exported.base64, "base64"));
+  const sheetResult = result.getWorksheet("剧情");
+  assert.equal(sheetResult.getCell("A2").value, "おかえりなさい！", "原文列不能被覆盖");
+  assert.equal(sheetResult.getCell("B2").value, "欢迎回来！", "译文写进译文列");
+  assert.equal(sheetResult.getCell("B3").value, "维护明天开始。");
+  assert.equal(sheetResult.getCell("C2").value, "系统提示");
+});
+
+test("仅译文导出：txt / csv / xlsx / docx 都只给译文", async () => {
+  const segments = [
+    { id: "s1", source: "おかえりなさい！", selected: true, translation: "欢迎回来！" },
+    { id: "s2", source: "メンテナンスは明日開始します。", selected: true, translation: "维护明天开始。" },
+    { id: "s3", source: "（未翻译）", selected: true, translation: "" }
+  ];
+  const txt = await exportBatchDocument({ filename: "a.txt", locale: "zh-CN", format: "text", mode: "translation-only", segments });
+  assert.equal(Buffer.from(txt.base64, "base64").toString("utf8"), "欢迎回来！\n维护明天开始。");
+  assert.equal(txt.filename, "a.zh-CN.txt");
+
+  const csv = await exportBatchDocument({ filename: "a.csv", locale: "zh-CN", format: "csv", mode: "translation-only", segments });
+  assert.equal(Buffer.from(csv.base64, "base64").toString("utf8"), '"译文"\r\n"欢迎回来！"\r\n"维护明天开始。"');
+
+  const xlsx = await exportBatchDocument({ filename: "a.xlsx", locale: "zh-CN", format: "xlsx", mode: "translation-only", segments });
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(Buffer.from(xlsx.base64, "base64"));
+  assert.equal(workbook.getWorksheet("译文").getCell("A2").value, "欢迎回来！");
+  assert.equal(workbook.getWorksheet("译文").getCell("A3").value, "维护明天开始。");
+
+  const docx = await exportBatchDocument({ filename: "a.docx", locale: "zh-CN", format: "docx", mode: "translation-only", segments });
+  const zip = await JSZip.loadAsync(Buffer.from(docx.base64, "base64"));
+  const documentXml = await zip.file("word/document.xml").async("string");
+  assert.match(documentXml, /欢迎回来！/u);
+  assert.match(documentXml, /维护明天开始。/u);
+  assert.doesNotMatch(documentXml, /おかえりなさい/u, "仅译文不该带原文");
+  const paragraphs = documentXml.match(/<w:p>/gu) || [];
+  assert.equal(paragraphs.length, 2, "每段译文一个段落，未翻译的段落不导出");
+});
+
+test("写回原文件缺原文件时明确报错，不静默换格式", async () => {
+  await assert.rejects(
+    () => exportBatchDocument({ filename: "a.mqxliff", locale: "zh-CN", format: "mqxliff", segments: [{ id: "s1", selected: true, translation: "欢迎回来！" }] }),
+    /写回原文件需要原始文件/u
+  );
+  await assert.rejects(
+    () => exportBatchDocument({ filename: "a.xlsx", locale: "zh-CN", format: "xlsx", segments: [{ id: "s1", selected: true, translation: "欢迎回来！" }] }),
+    /写回原文件需要原始文件/u
+  );
+});
+
 test("XLSX 只抽取日语单元格并在原位置写回简体中文译文", async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("剧情");
