@@ -26,12 +26,21 @@ const PROPER_NAME_CATEGORIES = new Set(["proper_name", "character_name", "place_
 
 const SOURCE_HEADERS = ["日语", "日语原文", "日文", "日文原文", "日本语", "日本語", "ja", "ja-jp", "ja_jp", "japanese", "源文", "原文", "source", "source text"];
 const ID_HEADERS = ["id", "entry id", "entry_id", "条目id", "条目 ID", "句段id", "segment id", "key", "键"];
+/** 原表注释列。术语导入时原表注释优先于工作台自己生成的信息。 */
+const NOTE_HEADERS = ["注释", "备注", "说明", "解釋", "解释", "注記", "備考", "备考", "コメント", "メモ", "note", "notes", "comment", "comments", "remark", "remarks", "memo", "description"];
+const NOTE_MAX_LENGTH = 500;
 const TARGET_HEADERS = Object.freeze({
   "zh-CN": ["中文", "简中", "简体中文", "简体", "zh-cn", "zh_cn", "chinese", "chinese simp", "chinese simplified"]
 });
 
 function compact(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ");
+}
+
+/** 注释只用于给人看和给模型消歧，不需要保留超长说明。 */
+function normalizeNote(value) {
+  const text = compact(value);
+  return text.length > NOTE_MAX_LENGTH ? `${text.slice(0, NOTE_MAX_LENGTH - 1)}…` : text;
 }
 
 function stableKey(value) {
@@ -97,13 +106,24 @@ function findHeader(worksheet, requestedLocale) {
     const values = rowValues(worksheet, rowNumber);
     const sourceColumn = values.findIndex((value) => headerMatches(value, SOURCE_HEADERS));
     const idColumn = values.findIndex((value) => headerMatches(value, ID_HEADERS));
+    const noteColumn = values.findIndex((value) => headerMatches(value, NOTE_HEADERS));
     const targetColumns = {};
     for (const [locale, aliases] of Object.entries(TARGET_HEADERS)) {
       const index = values.findIndex((value) => headerMatches(value, aliases));
       if (index >= 0 && (!requestedLocale || requestedLocale === locale)) targetColumns[locale] = index + 1;
     }
     const score = (sourceColumn >= 0 ? 4 : 0) + Object.keys(targetColumns).length * 4 + values.filter(Boolean).length * 0.05;
-    if (!best || score > best.score) best = { rowNumber, sourceColumn: sourceColumn + 1, idColumn: idColumn >= 0 ? idColumn + 1 : null, targetColumns, score, values };
+    if (!best || score > best.score) {
+      best = {
+        rowNumber,
+        sourceColumn: sourceColumn + 1,
+        idColumn: idColumn >= 0 ? idColumn + 1 : null,
+        noteColumn: noteColumn >= 0 ? noteColumn + 1 : null,
+        targetColumns,
+        score,
+        values
+      };
+    }
   }
   return best;
 }
@@ -130,7 +150,7 @@ function inferColumns(worksheet, header, requestedLocale) {
     const fallback = columns.find((column) => column !== sourceColumn);
     if (fallback) targetColumns[requestedLocale] = fallback;
   }
-  return { startRow, sourceColumn, idColumn: header?.idColumn || null, targetColumns };
+  return { startRow, sourceColumn, idColumn: header?.idColumn || null, noteColumn: header?.noteColumn || null, targetColumns };
 }
 
 function averageColumnScore(worksheet, column, startRow, endRow, scorer) {
@@ -176,6 +196,21 @@ export function classifySourceRow(source, sheetMode = "mixed") {
   if (sheetMode === "dialogue") return "memory";
   if (sheetMode === "glossary") return sourceLooksSentence(text) ? "memory" : "term";
   return sourceLooksSentence(text) ? "memory" : "term";
+}
+
+/**
+ * 双语资产导入按"上传前选定的类型"决定去向时的行级判定。
+ *
+ * 用户明确选了"术语表"就意味着这张表是已确认的词条表：此时只有无效行会被挡下，
+ * 不能再因为条目里带个"："或长度偏长就改派到主 TM——日文卡片名、版本号这类条目
+ * 恰恰经常长这样。对话/混合表才继续按句子与词条分流。
+ */
+export function classifyImportRowKind(candidate = {}) {
+  const source = compact(candidate.source);
+  const sheetMode = String(candidate.sheetMode || "mixed");
+  const localKind = classifySourceRow(source, sheetMode);
+  if (localKind === "invalid") return "invalid";
+  return sheetMode === "glossary" ? "term" : localKind;
 }
 
 function quality(source, target, locale, sheetMode = "mixed") {
@@ -283,10 +318,12 @@ function analysisMapping(worksheet, analysis, requestedLocale) {
   if (!Object.keys(targetColumns).length) return null;
   const headerRow = Number(analysis.headerRow);
   const idColumn = Number(analysis.idColumn);
+  const noteColumn = Number(analysis.noteColumn);
   return {
     startRow: Number.isInteger(headerRow) && headerRow > 0 ? headerRow + 1 : 1,
     sourceColumn,
     idColumn: Number.isInteger(idColumn) && idColumn > 0 && idColumn <= worksheet.columnCount ? idColumn : null,
+    noteColumn: Number.isInteger(noteColumn) && noteColumn > 0 && noteColumn <= worksheet.columnCount ? noteColumn : null,
     targetColumns
   };
 }
@@ -319,11 +356,15 @@ function extractWorksheet(worksheet, requestedLocale, modelAnalysis, filename = 
       const entryId = mapping.idColumn && mapping.idColumn !== mapping.sourceColumn
         ? compact(cellText(worksheet.getRow(rowNumber).getCell(mapping.idColumn)))
         : "";
+      const note = mapping.noteColumn && mapping.noteColumn !== mapping.sourceColumn
+        ? normalizeNote(cellText(worksheet.getRow(rowNumber).getCell(mapping.noteColumn)))
+        : "";
       const candidateKey = `${stableKey(worksheet.name)}:${rowNumber}:${locale}:${stableKey(`${source}\u0000${target}`)}`;
       raw.push({
         locale,
         source,
         target,
+        note,
         sheet: worksheet.name,
         sheetMode: mode.mode,
         sheetModeConfidence: Number(mode.confidence.toFixed(2)),
@@ -365,6 +406,7 @@ function extractWorksheet(worksheet, requestedLocale, modelAnalysis, filename = 
     headerRow: mapping.startRow - 1 || null,
     sourceColumn: mapping.sourceColumn,
     targetColumns: mapping.targetColumns,
+    noteColumn: mapping.noteColumn || null,
     sheetMode: mode.mode,
     sheetModeConfidence: Number(mode.confidence.toFixed(2)),
     sheetModeSource: mode.source,

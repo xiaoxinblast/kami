@@ -189,6 +189,11 @@
           <div class="smart-import-entry">
             <article class="panel upload-panel smart-upload-panel">
               <span class="card-kicker">01 · DROP FILE</span><h2>上传日语与简体中文对照表</h2>
+              <div class="import-purpose" id="importPurposeOptions">
+                <div class="import-purpose-row"><span>本次导入</span><div class="import-purpose-choices" role="radiogroup" aria-label="本次导入类型"><label><input type="radio" name="importPurpose" value="term" checked /><span>术语表</span><small>写入术语库</small></label><label><input type="radio" name="importPurpose" value="tm" /><span>人工 TM</span><small>写入主记忆库</small></label></div></div>
+                <label class="import-purpose-toggle" id="importAiCleaningRow"><input type="checkbox" id="importAiCleaning" /><span><strong>导入前先做 AI 清洗</strong><small>默认按表直接导入；打开后让模型逐条判定术语 / 句段，几千行会明显变慢。</small></span></label>
+                <label class="import-purpose-toggle"><input type="checkbox" id="importStyleEvidence" /><span><strong>作为风格学习证据</strong><small>人工 TM 默认勾选；术语表默认不勾。</small></span></label>
+              </div>
               <label class="drop-zone" id="dropZone" for="termFile">
                 <input id="termFile" type="file" accept=".xlsx,.csv,.xliff,.mqxliff" multiple hidden />
                 <span class="upload-mark">↑</span><strong id="filePrompt">拖入或点击选择双语资产文件</strong><small id="fileMeta">支持多选 .xlsx / .csv / .xliff / .mqxliff；先本地预检，再确认导入</small>
@@ -198,7 +203,7 @@
                 <div><span>02</span><strong>逐条分流资产</strong><small>短术语进入术语库；完整句段进入翻译记忆和风格证据池。</small></div>
                 <div><span>03</span><strong>自动匹配资源</strong><small>正式术语精确命中后结合当前句义采用；保留原文和禁用译法执行硬检查。</small></div>
               </div>
-              <p class="smart-import-fallback">系统会自动清洗内容；模型暂时不可用时改用本地规则并明确标记，不会卡住导入。</p>
+              <p class="smart-import-fallback">确认后进入后台导入并显示进度；这个窗口可以直接关掉，清洗与入库会在后台跑完，结果在任务中心可查。</p>
             </article>
           </div>
           <article class="panel preview-panel">
@@ -257,7 +262,8 @@
           <div class="locale-strip" id="memoryLocales" aria-label="记忆库语言"></div>
           <article class="panel asset-list-panel">
             <div class="panel-head"><div><span class="card-kicker">PROJECT TM</span><h2>记忆库 TM</h2><p class="panel-caption">主 TM 接收人工确认译文，工作 TM 接收通过 QA 的机器译文，参考 TM 只读参与检索。</p></div><div class="asset-count" id="memoryCount">0 条</div></div>
-            <div class="task-toolbar"><label class="drop-zone compact"><input id="memoryFile" type="file" accept=".xliff,.mqxliff,.xlsx,.csv" hidden /><strong>导入人工 TM</strong><small>支持 XLSX / CSV / XLIFF / MQXLIFF</small></label><button class="button secondary" id="memoryImportButton" type="button" disabled>预检 TM</button></div>
+            <div class="task-toolbar"><label class="drop-zone compact"><input id="memoryFile" type="file" accept=".xliff,.mqxliff,.xlsx,.csv" multiple hidden /><strong>导入人工 TM</strong><small>支持 XLSX / CSV / XLIFF / MQXLIFF，可一次选择多个文件</small></label><button class="button secondary" id="memoryImportButton" type="button" disabled>预检 TM</button></div>
+            <label class="import-purpose-toggle memory-evidence-toggle"><input type="checkbox" id="memoryStyleEvidence" checked /><span><strong>作为风格学习证据</strong><small>勾选后这批人工 TM 同时进入风格证据池，攒够条数会参与风格蒸馏；取消勾选则只写主 TM。</small></span></label>
             <div class="mapping-note" id="memoryImportNote">选择文件后先预检；memoQ 等工具审校后的双语文件会写入主 TM，并自动接回当前项目中可唯一定位的原翻译轨迹。</div>
             <div class="candidate-table-wrap" id="memoryImportPreview" hidden>
               <table class="candidate-table"><thead><tr><th>写入</th><th>条目 ID</th><th>日语原文</th><th>简体中文译文</th><th>来源</th></tr></thead><tbody id="memoryImportPreviewBody"></tbody></table>
@@ -457,8 +463,17 @@
       <div class="dialog-card asset-preflight-dialog-card">
         <div class="dialog-head"><div><span class="card-kicker">ASSET PREFLIGHT</span><h2>确认双语资产去向</h2></div><button class="icon-button" type="button" data-close="assetPreflightDialog" aria-label="关闭">×</button></div>
         <p class="panel-caption" id="assetPreflightSummary">正在本地识别文件……</p>
-        <div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>文件</th><th>识别类型</th><th>条目数</th><th>导入去向</th><th>风格证据 / 异常</th></tr></thead><tbody id="assetPreflightBody"></tbody></table></div>
-        <div class="dialog-actions"><button class="button ghost" type="button" data-close="assetPreflightDialog">取消</button><button class="button primary" id="assetPreflightConfirm" type="button">确认并继续</button></div>
+        <div class="asset-preflight-options" id="assetPreflightOptions">
+          <label id="assetPreflightAiRow"><input type="checkbox" id="assetPreflightAiCleaning" /><span><strong>先做 AI 清洗</strong><small>默认按表直接导入（本地规则分流）；打开后模型逐条判定，几千行会明显变慢。</small></span></label>
+          <label><input type="checkbox" id="assetPreflightStyleEvidence" /><span><strong>作为风格学习证据</strong><small>人工 TM 默认写入证据池；术语表默认只写术语库与主 TM。</small></span></label>
+        </div>
+        <div class="candidate-table-wrap" id="assetPreflightTableWrap"><table class="candidate-table"><thead><tr><th>文件</th><th>识别类型</th><th>条目数</th><th>导入去向</th><th>风格证据 / 异常</th></tr></thead><tbody id="assetPreflightBody"></tbody></table></div>
+        <div class="import-progress" id="assetImportProgress" hidden>
+          <div class="import-progress-head"><strong id="assetImportProgressText">准备导入</strong><span id="assetImportProgressMeta">0%</span></div>
+          <div class="import-progress-track"><i id="assetImportProgressBar"></i></div>
+          <p class="import-progress-note">导入在后台执行：这个窗口可以直接关掉，关掉后向导会继续下一步，结果与进度都能在任务中心查到。</p>
+        </div>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="assetPreflightDialog">取消</button><button class="button primary" id="assetPreflightConfirm" type="button">确认并继续</button><button class="button primary" id="assetPreflightClose" type="button" hidden>关闭窗口，后台继续</button></div>
       </div>
     </dialog>
     <dialog id="providerDialog" class="settings-shell" aria-labelledby="settingsPanelTitle"></dialog>

@@ -79,3 +79,23 @@ test("Context Pack 携带批次排比模板与锚点译文", () => {
   assert.equal(anchored.batchVerse, null);
   assert.deepEqual(anchored.batchReferences, [{ source: POEM[0], target: "殺さず、恨みは永遠に止まぬ。" }]);
 });
+
+test("术语注释随 Context Pack 发给模型，空注释不占位", () => {
+  const withNote = buildContextPack({
+    source: "プレミアムパスを購入してください。",
+    locale: "ja-JP",
+    classification: classifyContent("プレミアムパスを購入してください。", "dialogue"),
+    matches: [{ term: { source: "プレミアムパス", target: "高级通行证", note: "正式名，不要译成会员卡", libraryName: "主术语库" }, mode: "exact", matchPhrase: "プレミアムパス", score: 0.96, preserveOriginal: true }],
+    domain: "game"
+  });
+  assert.equal(withNote.requiredTerms[0].note, "正式名，不要译成会员卡");
+
+  const withoutNote = buildContextPack({
+    source: "プレミアムパスを購入してください。",
+    locale: "ja-JP",
+    classification: classifyContent("プレミアムパスを購入してください。", "dialogue"),
+    matches: [{ term: { source: "プレミアムパス", target: "高级通行证", note: "", libraryName: "主术语库" }, mode: "exact", matchPhrase: "プレミアムパス", score: 0.96, preserveOriginal: true }],
+    domain: "game"
+  });
+  assert.equal(Object.hasOwn(withoutNote.requiredTerms[0], "note"), false);
+});

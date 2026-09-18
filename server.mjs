@@ -13,8 +13,8 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
-import { applyModelDecisions, classifyImportCandidate, expandNestedTermCandidates, extractTermPairs } from "./src/table-term-extractor.mjs";
+import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
+import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
@@ -57,14 +57,35 @@ const AUTO_QA_MODEL_ALIGNMENT_SEGMENT_LIMIT = 24;
 const MAX_BODY_BYTES = 15 * 1024 * 1024;
 const TERM_AI_CONCURRENCY = 5;
 const TERM_AI_BATCH_SIZE = 24;
+/** 术语批量写入的分块大小；导入 5000+ 条时逐条写会拖到分钟级。 */
+const TERM_WRITE_BATCH_SIZE = 200;
+/** 跳过明细只保留前若干条，其余按原因计数。 */
+const SKIPPED_DETAIL_LIMIT = 200;
 const TRANSLATION_PROMPT_VERSION = "kami-translation-v3";
 const importProgress = new Map();
 const AUTO_SHUTDOWN_ENABLED = process.env.KAMI_AUTO_SHUTDOWN === "1";
-const WORKBENCH_IDLE_SHUTDOWN_MS = 15_000;
+/** 显式关闭最后一个页面后的宽限期：够刷新或恢复标签页重新报到，又不至于让用户等。 */
+const WORKBENCH_CLOSE_GRACE_MS = readGraceMs("KAMI_AUTO_SHUTDOWN_CLOSE_GRACE_MS", 15_000);
+/**
+ * 心跳失联宽限期。页面被最小化挂机或切到后台标签后，浏览器会把定时器节流到
+ * 每分钟一次甚至冻结，5 秒心跳必然出现分钟级空档——那不是关闭页面。
+ */
+const WORKBENCH_HEARTBEAT_GRACE_MS = readGraceMs("KAMI_AUTO_SHUTDOWN_HEARTBEAT_GRACE_MS", 30 * 60_000);
+/** 启动后还没有任何页面报到的宽限：浏览器冷启动可能远慢于 15 秒。 */
+const WORKBENCH_STARTUP_GRACE_MS = readGraceMs("KAMI_AUTO_SHUTDOWN_STARTUP_GRACE_MS", 5 * 60_000);
 const WORKBENCH_SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
+/** 后台任务进入这些状态后不再挂住收尾判定。 */
+const BACKGROUND_TASK_TERMINAL_STATUSES = new Set(["completed", "failed", "review", "needs_attention", "abandoned"]);
 let workbenchSessionMonitor = null;
 let workbenchShutdownStarted = false;
 const batchWorkers = new Map();
+
+function readGraceMs(variable, fallback) {
+  const raw = process.env[variable];
+  if (raw === undefined || String(raw).trim() === "") return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -76,6 +97,8 @@ const MIME_TYPES = {
 };
 
 function json(res, status, payload) {
+  // 页面在长任务期间被关掉时连接已经断了：再写响应只会抛异常，没有意义。
+  if (res.destroyed || res.writableEnded) return;
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -140,9 +163,13 @@ function finalizeShareWithoutGloss(share) {
   };
 }
 
-/** 创建后台任务记录（术语导入 / Embedding 重建 / 批次导出）。 */
+/**
+ * 创建后台任务记录（术语导入 / 双语资产导入 / Embedding 重建 / 批次导出）。
+ *
+ * 任务执行期间同时挂住工作台收尾判定：长任务不能在页面关闭宽限期里被杀掉。
+ */
 async function createBackgroundTask({ type, title, locale = "", projectId = "", progress = {} }) {
-  return saveBackgroundTask({
+  const task = await saveBackgroundTask({
     type,
     projectId,
     title: String(title || "后台任务").slice(0, 160),
@@ -151,6 +178,8 @@ async function createBackgroundTask({ type, title, locale = "", projectId = "", 
     progress: { percent: 0, phase: "queued", message: "已进入后台队列", completed: 0, total: 0, ...progress },
     payload: {}
   });
+  workbenchSessionMonitor?.hold(backgroundTaskHoldId(task.id));
+  return task;
 }
 
 /**
@@ -173,7 +202,14 @@ async function updateBackgroundTaskProgress(id, update) {
   const task = await getBackgroundTask(id);
   if (!task) return false;
   await saveBackgroundTask({ ...task, ...update });
+  if (update.status && BACKGROUND_TASK_TERMINAL_STATUSES.has(String(update.status))) {
+    workbenchSessionMonitor?.release(backgroundTaskHoldId(id));
+  }
   return true;
+}
+
+function backgroundTaskHoldId(id) {
+  return `task:${id}`;
 }
 
 /**
@@ -775,6 +811,136 @@ function markExistingTermCandidates(candidates, assetsByLocale) {
   });
 }
 
+/**
+ * AI 逐条清洗候选：判定 keep / rowKind / 句内术语，并就地回写候选。
+ * 术语库页面的导入预览与双语资产导入的后台清洗共用这一段，避免两条路径漂移。
+ */
+async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, percentRange = [30, 86] } = {}) {
+  const [startPercent, endPercent] = percentRange;
+  const locales = [...new Set(candidates.map((candidate) => candidate.locale))];
+  const groups = locales.flatMap((locale) => {
+    const indexes = candidates.map((candidate, index) => ({ candidate, index })).filter(({ candidate }) => candidate.locale === locale && !candidate.existing);
+    const batches = [];
+    for (let offset = 0; offset < indexes.length; offset += TERM_AI_BATCH_SIZE) {
+      batches.push({ locale, indexes: indexes.slice(offset, offset + TERM_AI_BATCH_SIZE) });
+    }
+    return batches;
+  });
+  const ai = { requested: true, used: false, reviewed: 0, total: candidates.length, missing: candidates.length, retries: 0, fallbackReason: "", batches: groups.length };
+  if (!groups.length) return { candidates, ai };
+  let completed = 0;
+  onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：0 / ${groups.length} 批`, percent: startPercent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
+  const results = await runTaskPool(groups, async ({ locale, indexes }) => {
+    const result = await reviewCandidateGroup(locale, indexes.map(({ candidate }) => candidate));
+    indexes.forEach(({ index }, localIndex) => { candidates[index] = result.candidates[localIndex]; });
+    return { reviewed: result.reviewed, missing: result.missing, retries: result.retries, failures: result.failures };
+  }, {
+    concurrency: TERM_AI_CONCURRENCY,
+    onSettled: () => {
+      completed += 1;
+      const percent = startPercent + Math.round((completed / groups.length) * (endPercent - startPercent));
+      onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：${completed} / ${groups.length} 批`, percent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
+    }
+  });
+  const failures = [
+    ...results.filter((result) => result.status === "rejected").map((result) => result.reason?.message || String(result.reason)),
+    ...results.filter((result) => result.status === "fulfilled").flatMap((result) => result.value.failures || [])
+  ];
+  ai.reviewed = results.filter((result) => result.status === "fulfilled").reduce((sum, result) => sum + result.value.reviewed, 0);
+  ai.missing = candidates.length - ai.reviewed;
+  ai.retries = results.filter((result) => result.status === "fulfilled").reduce((sum, result) => sum + result.value.retries, 0);
+  ai.used = ai.reviewed > 0;
+  const incomplete = ai.missing ? `模型仅返回 ${ai.reviewed}/${candidates.length} 条有效判断，缺失项保留安全规则并标记未覆盖` : "";
+  ai.fallbackReason = [...new Set([...failures, incomplete].filter(Boolean))].join("；");
+  return { candidates, ai };
+}
+
+/**
+ * 双语资产导入的后台执行体。三种模式：
+ *   - 术语表 + 关闭 AI 清洗：用本地规则分流，短词条进术语库、完整句段进主 TM，不调模型；
+ *   - 术语表 + 打开 AI 清洗：先让模型逐条判定 keep / rowKind / 句内术语，再按判定分流；
+ *   - 人工 TM：整批作为人工确认译文写入主 TM。
+ *
+ * 进度同时写进内存进度表（弹窗轮询）与后台任务（任务中心），关掉页面也会继续跑完。
+ */
+async function runAssetImportInBackground({ taskId, projectId, batchId, filename, candidates, purpose, aiCleaning, styleEvidence }) {
+  let progressWrites = Promise.resolve();
+  const reportImmediate = (update) => {
+    reportImportProgress(taskId, { status: "running", ...update });
+    progressWrites = progressWrites
+      .then(() => updateBackgroundTaskProgress(taskId, { progress: update }))
+      .catch(() => {});
+  };
+  /** 把 commitTermImport 的 0~100 内部进度映射到指定的外层区间。 */
+  const scaleReport = (from, to) => (update) => {
+    const inner = Math.max(0, Math.min(100, Number(update?.percent) || 0));
+    reportImmediate({ ...update, percent: from + Math.round((inner / 100) * (to - from)) });
+  };
+  try {
+    let working = candidates.map((candidate) => ({ ...candidate }));
+    reportImmediate({ phase: "preparing", message: aiCleaning ? "准备 AI 清洗" : "准备按表导入", percent: 3, completed: 0, total: working.length });
+    let ai = { requested: aiCleaning, used: false, reviewed: 0, total: working.length };
+    if (aiCleaning) {
+      const cleaned = await cleanCandidatesWithModel(working, { onProgress: reportImmediate, percentRange: [5, 45] });
+      ai = cleaned.ai;
+      const nested = expandNestedTermCandidates(working);
+      if (nested.length) working = [...working, ...nested];
+      reportImmediate({ phase: "routing", message: `AI 清洗完成：保留 ${working.filter((candidate) => candidate.decision !== "excluded").length} / ${working.length} 条，开始分库`, percent: 46, completed: 0, total: working.length });
+    }
+    const routed = purpose === "tm"
+      ? working.map((candidate) => ({ ...candidate, assetType: "memory", styleEvidence }))
+      : working.map((candidate) => {
+        // AI 判定优先；没有判定时回落到本地规则。明确选了"术语表"的表按表导入，
+        // 只挡无效行，不因为条目偏长或带"："就改派到主 TM。
+        const modelKind = ["term", "memory"].includes(candidate.modelRowKind) ? candidate.modelRowKind : "";
+        const kind = modelKind || (candidate.assetType === "memory" ? "memory" : classifyImportRowKind(candidate));
+        if (kind === "invalid") {
+          return { ...candidate, assetType: "term", decision: "excluded", reasons: [...(candidate.reasons || []), "无效行：不是可入库的双语条目"] };
+        }
+        return { ...candidate, assetType: kind === "memory" ? "memory" : "term", styleEvidence };
+      });
+    const result = await commitTermImport(
+      { projectId, batchId, filename, candidates: routed, styleEvidence },
+      scaleReport(50, 92)
+    );
+    await progressWrites;
+    const summary = result.summary;
+    await updateBackgroundTaskProgress(taskId, {
+      status: "completed",
+      progress: {
+        phase: "completed",
+        message: `导入完成：术语 ${summary.terms} 条、主 TM ${summary.memories} 条、跳过 ${summary.skipped} 条`,
+        percent: 100,
+        completed: summary.imported,
+        total: routed.length
+      },
+      payload: {
+        batchId,
+        filename,
+        purpose,
+        aiCleaning,
+        styleEvidence,
+        summary,
+        ai: ai.used ? { used: true, reviewed: ai.reviewed, fallbackReason: ai.fallbackReason } : { used: false, requested: Boolean(aiCleaning) },
+        skippedDetails: summary.skippedDetails || []
+      }
+    });
+    reportImportProgress(taskId, { status: "completed", phase: "completed", message: "导入完成", percent: 100, completed: summary.imported, total: routed.length });
+    console.log(`[Kami] 双语资产导入完成：${filename} · 术语 ${summary.terms} 条 · 主 TM ${summary.memories} 条 · 跳过 ${summary.skipped} 条`);
+  } catch (error) {
+    await progressWrites.catch(() => {});
+    await updateBackgroundTaskProgress(taskId, {
+      status: "failed",
+      progress: { phase: "failed", message: error.message, percent: 100, completed: 0, total: candidates.length },
+      payload: { batchId, filename, purpose, aiCleaning, styleEvidence, error: error.message, resumable: true }
+    }).catch(() => {});
+    reportImportProgress(taskId, { status: "failed", phase: "failed", message: error.message, error: error.message, percent: 100 });
+    console.error(`[Kami] 双语资产导入失败：${filename} · ${error.message}`);
+  } finally {
+    scheduleImportProgressCleanup(taskId);
+  }
+}
+
 async function previewTermImport(body, onProgress = () => {}) {
   onProgress({ phase: "structure", message: "正在解析表格并识别日语列与简体中文列", percent: 5, completed: 0, total: 1 });
   const useModel = body.useModel !== false;
@@ -786,41 +952,9 @@ async function previewTermImport(body, onProgress = () => {}) {
   const locales = [...new Set(candidates.map((candidate) => candidate.locale))];
   await Promise.all(locales.map(async (locale) => { assetsByLocale[locale] = (await getProjectAssets(locale, body.projectId)).assets.terms; }));
 
-  const ai = { requested: useModel, used: false, reviewed: 0, total: candidates.length, missing: candidates.length, retries: 0, fallbackReason: "" };
-  if (useModel) {
-    const groups = locales.flatMap((locale) => {
-      const indexes = candidates.map((candidate, index) => ({ candidate, index })).filter(({ candidate }) => candidate.locale === locale && !candidate.existing);
-      const batches = [];
-      for (let offset = 0; offset < indexes.length; offset += TERM_AI_BATCH_SIZE) {
-        batches.push({ locale, indexes: indexes.slice(offset, offset + TERM_AI_BATCH_SIZE) });
-      }
-      return batches;
-    });
-    let completed = 0;
-    onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：0 / ${groups.length} 批`, percent: groups.length ? 30 : 86, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
-    const results = await runTaskPool(groups, async ({ locale, indexes }) => {
-      const result = await reviewCandidateGroup(locale, indexes.map(({ candidate }) => candidate));
-      indexes.forEach(({ index }, localIndex) => { candidates[index] = result.candidates[localIndex]; });
-      return { reviewed: result.reviewed, missing: result.missing, retries: result.retries, failures: result.failures };
-    }, {
-      concurrency: TERM_AI_CONCURRENCY,
-      onSettled: () => {
-        completed += 1;
-        const percent = groups.length ? 30 + Math.round((completed / groups.length) * 56) : 86;
-        onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：${completed} / ${groups.length} 批`, percent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
-      }
-    });
-    const failures = [
-      ...results.filter((result) => result.status === "rejected").map((result) => result.reason?.message || String(result.reason)),
-      ...results.filter((result) => result.status === "fulfilled").flatMap((result) => result.value.failures || [])
-    ];
-    ai.reviewed = results.filter((result) => result.status === "fulfilled").reduce((sum, result) => sum + result.value.reviewed, 0);
-    ai.missing = candidates.length - ai.reviewed;
-    ai.retries = results.filter((result) => result.status === "fulfilled").reduce((sum, result) => sum + result.value.retries, 0);
-    ai.used = ai.reviewed > 0;
-    const incomplete = ai.missing ? `模型仅返回 ${ai.reviewed}/${candidates.length} 条有效判断，缺失项保留安全规则并标记未覆盖` : "";
-    ai.fallbackReason = [...new Set([...failures, incomplete].filter(Boolean))].join("；");
-  }
+  const ai = useModel
+    ? (await cleanCandidatesWithModel(candidates, { onProgress })).ai
+    : { requested: false, used: false, reviewed: 0, total: candidates.length, missing: candidates.length, retries: 0, fallbackReason: "" };
   const nestedTerms = expandNestedTermCandidates(candidates);
   candidates = markExistingTermCandidates([...candidates, ...nestedTerms], assetsByLocale);
   ai.nestedTerms = nestedTerms.length;
@@ -868,6 +1002,8 @@ async function previewBilingualAssets(body = {}) {
           entryId: candidate.entryId || "",
           source: candidate.source,
           target: candidate.target,
+          note: candidate.note || "",
+          sheetMode: candidate.sheetMode || "mixed",
           sourceRow: candidate.rowNumber || null,
           sheet: candidate.sheet || "",
           context: candidate.sheetModeReason || candidate.sheet || ""
@@ -946,6 +1082,13 @@ async function commitTermImport(body, onProgress = null) {
   let done = 0;
   const imported = [];
   const skipped = [];
+  const skipCounts = new Map();
+  const recordSkip = (entry) => {
+    const reason = String(entry?.reason || "未知原因");
+    skipCounts.set(reason, (skipCounts.get(reason) || 0) + 1);
+    if (skipped.length < SKIPPED_DETAIL_LIMIT) skipped.push({ ...entry, reason });
+  };
+  const skippedTotal = () => [...skipCounts.values()].reduce((sum, count) => sum + count, 0);
   const decisions = [];
   const trajectoryLinks = [];
   const trajectoryLinkFailures = [];
@@ -957,10 +1100,50 @@ async function commitTermImport(body, onProgress = null) {
     : { links: [], unmatched: [], ambiguous: [], alreadyAccepted: [] };
   const trajectoryByCandidate = new Map(trajectoryMatch.links.map((link) => [link.candidateIndex, link]));
   const styleEvidenceByScope = new Map();
+  // 库内术语只读一次：写成"每条候选拉一次整库"会在几千条导入时变成 O(n²) 的
+  // 网络往返，正是上一版导入 5859 条要跑 8 分钟的原因。
+  const termIndexByLocale = new Map();
+  const loadTermIndex = async (locale) => {
+    let index = termIndexByLocale.get(locale);
+    if (index) return index;
+    const terms = projectId ? (await getProjectAssets(locale, projectId)).assets.terms : [];
+    index = { pairs: new Set(), sourcesWithTargets: new Map() };
+    for (const term of terms) {
+      const key = String(term.source || "").toLocaleLowerCase();
+      const target = String(term.target || "");
+      if (!key) continue;
+      index.pairs.add(`${key}\u0000${target.toLocaleLowerCase()}`);
+      const targets = index.sourcesWithTargets.get(key) || [];
+      targets.push(target);
+      index.sourcesWithTargets.set(key, targets);
+    }
+    termIndexByLocale.set(locale, index);
+    return index;
+  };
+  // 术语成批写入：逐条 POST 在几千条规模下同样拖慢整批。
+  const pendingTerms = [];
+  let termsWritten = 0;
+  const flushTerms = async () => {
+    if (!pendingTerms.length) return;
+    const batch = pendingTerms.splice(0, pendingTerms.length);
+    let saved = [];
+    try {
+      saved = await saveAssets(batch[0].locale, batch.map((item) => item.input));
+    } catch (error) {
+      const written = Number(error.createdItems?.length) || 0;
+      error.message = `术语写入中断（已写入 ${termsWritten + written} 条）：${error.message}`;
+      throw error;
+    }
+    saved.forEach((term, index) => {
+      const item = batch[index];
+      imported.push({ id: term.id, source: item.input.source, target: item.input.target, locale: item.input.locale || item.locale, assetType: "term", domain: item.input.domains?.[0] || "general", enforcement: "preferred" });
+    });
+    termsWritten += saved.length;
+  };
   for (const [candidateIndex, candidate] of body.candidates.entries()) {
     const decision = { candidateId: candidate.candidateId, status: "rejected", decision: candidate.decision };
     if (!candidate.selected || candidate.existing || candidate.decision === "excluded") {
-      skipped.push({ source: candidate.source, locale: candidate.locale, reason: candidate.existing ? "已存在" : "未选择" });
+      recordSkip({ source: candidate.source, locale: candidate.locale, reason: candidate.existing ? "已存在" : "未选择" });
       decisions.push(decision);
       continue;
     }
@@ -1024,38 +1207,51 @@ async function commitTermImport(body, onProgress = null) {
         imported.push({ id: memory.id, source, target, locale, assetType: "memory", contentType, domain });
       } else {
         if (projectId && !termLibrary) throw new Error("当前项目没有启用术语库，无法写入术语");
-        const current = (await getProjectAssets(locale, projectId)).assets.terms.filter((term) => term.source.toLocaleLowerCase() === source.toLocaleLowerCase());
-        if (current.some((term) => term.target.toLocaleLowerCase() === target.toLocaleLowerCase())) {
-          skipped.push({ source, locale, reason: "已存在相同对照" });
+        const index = await loadTermIndex(locale);
+        const sourceKey = source.toLocaleLowerCase();
+        const pairKey = `${sourceKey}\u0000${target.toLocaleLowerCase()}`;
+        if (index.pairs.has(pairKey)) {
+          recordSkip({ source, locale, reason: "已存在相同对照" });
           decisions.push(decision);
           continue;
         }
-        if (current.length) {
-          skipped.push({ source, locale, reason: `库内已有译法：${current[0].target}` });
+        const existingTargets = index.sourcesWithTargets.get(sourceKey) || [];
+        if (existingTargets.length) {
+          recordSkip({ source, locale, reason: `库内已有译法：${existingTargets[0]}` });
           decisions.push(decision);
           continue;
         }
-        const term = await saveAsset(locale, {
+        // 先记进索引，同一批里后面重复的原文就会按"库内已有译法"跳过，
+        // 不再依赖"写一条读一次库"。
+        index.pairs.add(pairKey);
+        index.sourcesWithTargets.set(sourceKey, [target]);
+        const sourceRow = Number(candidate.rowNumber) || null;
+        pendingTerms.push({
+          locale,
+          input: {
           source, target, aliases: [], forbidden: [], domains: [domain], contentTypes: [contentType || "general"], contentTags,
           enforcement, status: "approved",
-          provenance: `table-import:${String(sourceFile || "unknown").slice(0, 120)}`,
-          note: `批次 ${body.batchId} · 原表第 ${candidate.rowNumber || "?"} 行 · 清洗分 ${candidate.score ?? "-"}`,
+          // 记账信息进 provenance；note 只放原表注释，因为它会原样发给模型。
+          provenance: `table-import:${String(sourceFile || "unknown").slice(0, 120)}${sourceRow ? `#${sourceRow}` : ""}`,
+          note: String(candidate.note || "").trim().slice(0, 500),
           projectId, libraryId: termLibrary?.id || ""
+          }
         });
-        imported.push({ id: term.id, source, target, locale, assetType: "term", domain, enforcement });
+        if (pendingTerms.length >= TERM_WRITE_BATCH_SIZE) await flushTerms();
       }
       decision.status = "accepted";
       decision.decision = "ready";
       decisions.push(decision);
     } catch (error) {
-      skipped.push({ source: candidate.source, locale: candidate.locale, reason: error.message });
+      recordSkip({ source: candidate.source, locale: candidate.locale, reason: error.message });
       decisions.push(decision);
     }
     done += 1;
-    if (done % 10 === 0 || done === total) {
+    if (done % TERM_WRITE_BATCH_SIZE === 0 || done === total) {
       report({ phase: "importing", message: `正在入库：${done} / ${total}`, percent: 10 + Math.round((done / Math.max(total, 1)) * 70), completed: done, total });
     }
   }
+  await flushTerms();
   report({ phase: "distilling", message: "风格学习与蒸馏", percent: 88, completed: done, total });
   const styleProfiles = [];
   const batchLearning = [];
@@ -1116,7 +1312,10 @@ async function commitTermImport(body, onProgress = null) {
     trajectoryUnmatched: trajectoryMatch.unmatched.length,
     trajectoryAlreadyAccepted: trajectoryMatch.alreadyAccepted.length,
     trajectoryLinkFailures: trajectoryLinkFailures.length,
-    skipped: skipped.length,
+    skipped: skippedTotal(),
+    skippedByReason: Object.fromEntries(skipCounts),
+    // 明细只留前 200 条，计数不受影响。
+    skippedDetails: skipped,
     completedAt: new Date().toISOString()
   };
   await completeImport(body.batchId, decisions, summary);
@@ -1398,35 +1597,51 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
-    const filename = String(body.filename || "").trim();
-    if (!/\.(xlsx|csv|xliff|mqxliff)$/iu.test(filename)) return json(res, 400, { error: "人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff" });
-    const encoded = String(body.base64 || "").replace(/^data:[^;]+;base64,/u, "");
-    const pairs = /\.(xlsx|csv)$/iu.test(filename)
-      ? (await extractTermPairs({ filename, base64: encoded, locale: "zh-CN" })).candidates.map((candidate) => ({
-        entryId: candidate.entryId || "",
-        source: candidate.source,
-        target: candidate.target,
-        previousSource: "",
-        nextSource: "",
-        context: candidate.sheet || "",
-        sourceRow: candidate.rowNumber || null,
-        sheet: candidate.sheet || ""
-      }))
-      : extractXliffPairs(Buffer.from(encoded, "base64"), filename);
-    const candidates = pairs.map((pair, index) => ({
-      ...pair, locale: "zh-CN", assetType: "memory", decision: "ready", selected: true,
-      rowNumber: index + 1, score: 1, contentType: "general", domain: "general",
-      sourceFile: filename, sourceRow: index + 1
-    }));
-    const fileType = filename.toLowerCase().endsWith(".mqxliff") ? "mqxliff" : filename.toLowerCase().endsWith(".xliff") ? "xliff" : filename.toLowerCase().endsWith(".csv") ? "csv" : "xlsx";
+    // 记忆库可以一次选多个文件：files 数组优先，单文件参数继续兼容。
+    const files = (Array.isArray(body.files) && body.files.length
+      ? body.files
+      : [{ filename: body.filename, base64: body.base64 }])
+      .map((file) => ({ filename: String(file?.filename || "").trim(), base64: String(file?.base64 || "").replace(/^data:[^;]+;base64,/u, "") }))
+      .filter((file) => file.filename || file.base64);
+    if (!files.length) return json(res, 400, { error: "没有待导入的人工 TM 文件" });
+    const unsupported = files.find((file) => !/\.(xlsx|csv|xliff|mqxliff)$/iu.test(file.filename));
+    if (unsupported) return json(res, 400, { error: `人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff：${unsupported.filename}` });
+    const candidates = [];
+    let rowsScanned = 0;
+    const fileTypes = new Set();
+    for (const file of files) {
+      const pairs = /\.(xlsx|csv)$/iu.test(file.filename)
+        ? (await extractTermPairs({ filename: file.filename, base64: file.base64, locale: "zh-CN" })).candidates.map((candidate) => ({
+          entryId: candidate.entryId || "",
+          source: candidate.source,
+          target: candidate.target,
+          note: candidate.note || "",
+          previousSource: "",
+          nextSource: "",
+          context: candidate.sheet || "",
+          sourceRow: candidate.rowNumber || null,
+          sheet: candidate.sheet || ""
+        }))
+        : extractXliffPairs(Buffer.from(file.base64, "base64"), file.filename);
+      rowsScanned += pairs.length;
+      fileTypes.add(file.filename.toLowerCase().endsWith(".mqxliff") ? "mqxliff" : file.filename.toLowerCase().endsWith(".xliff") ? "xliff" : file.filename.toLowerCase().endsWith(".csv") ? "csv" : "xlsx");
+      pairs.forEach((pair, index) => {
+        candidates.push({
+          ...pair, locale: "zh-CN", assetType: "memory", decision: "ready", selected: true,
+          rowNumber: index + 1, score: 1, contentType: "general", domain: "general",
+          sourceFile: file.filename, sourceRow: pair.sourceRow || index + 1
+        });
+      });
+    }
     return json(res, 200, {
       batchId: randomUUID(),
-      filename,
+      filename: files.length === 1 ? files[0].filename : `${files[0].filename} 等 ${files.length} 个文件`,
       fileType: "tm",
-      sourceFileType: fileType,
+      sourceFileType: [...fileTypes][0] || "xlsx",
       projectId,
       candidates,
-      statistics: { rowsScanned: pairs.length, pairedRows: pairs.length },
+      files: files.map((file) => file.filename),
+      statistics: { rowsScanned, pairedRows: candidates.length },
       write: { modelCalled: false, databaseWritten: false }
     });
   }
@@ -1438,31 +1653,83 @@ async function apiHandler(req, res, url) {
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     if (!body.batchId || !Array.isArray(body.candidates)) return json(res, 400, { error: "预检批次或候选无效" });
+    const purpose = body.purpose === "tm" ? "tm" : "term";
+    const aiCleaning = purpose === "term" && body.aiCleaning === true;
+    // 批次级开关决定风格证据：预检候选里遗留的逐文件勾选值在这里统一归一。
+    const styleEvidence = body.styleEvidence === true;
+    const filename = String(body.filename || body.candidates[0]?.sourceFile || "双语资产导入").slice(0, 120);
     const candidates = body.candidates.map((candidate) => ({
       ...candidate,
       selected: candidate.selected !== false,
-      // 用户在预检弹窗里可以把单个文件改成术语清洗、TM 或风格证据。
-      assetType: candidate.purpose === "term_cleaning" ? "term" : "memory"
+      assetType: purpose === "tm" ? "memory" : "term",
+      styleEvidence
     }));
     const persisted = await saveImportPreview({
       batchId: body.batchId,
       projectId,
-      filename: body.filename || candidates[0]?.sourceFile || "双语资产导入",
+      filename,
       fileType: "multi",
       requestedLocale: "zh-CN",
       candidates,
       statistics: { rowsScanned: candidates.length, pairedRows: candidates.length },
       fileMode: "multi",
-      ai: { used: false, requested: false }
+      ai: { used: false, requested: aiCleaning }
     });
-    return json(res, 200, await commitTermImport({
-      ...body,
+    // 导入改到后台执行：页面可以关掉继续下一步，进度走任务中心与进度接口。
+    const task = await createBackgroundTask({
+      type: "asset_import",
+      title: `导入 · ${filename}`,
+      projectId,
+      progress: { phase: "queued", message: aiCleaning ? "已排队：先做 AI 清洗再入库" : "已排队：按表直接导入", total: persisted.candidates.length }
+    });
+    runAssetImportInBackground({
+      taskId: task.id,
       projectId,
       batchId: persisted.batchId,
+      filename,
       candidates: persisted.candidates,
-      // 资产预检默认不蒸馏风格证据，只有用户显式打开时才写入。
-      styleEvidence: body.styleEvidence === true || candidates.some((candidate) => candidate.styleEvidence === true)
-    }));
+      purpose,
+      aiCleaning,
+      styleEvidence
+    }).catch((error) => console.error("[Kami] 双语资产导入后台任务异常", error));
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: persisted.batchId, accepted: persisted.candidates.length, purpose, aiCleaning, styleEvidence });
+  }
+  if (req.method === "POST" && url.pathname === "/api/assets-import/resume") {
+    // 续传：用同一个批次的候选重跑一次。已写入的"原文+译文"会被当成重复跳过，
+    // 所以中断、失败、服务重启之后都能安全补齐，不需要重新上传文件。
+    const body = await readJsonBody(req);
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    const batchId = String(body.batchId || "").trim();
+    if (!batchId) return json(res, 400, { error: "缺少导入批次" });
+    const preview = await getImportPreview(batchId);
+    if (!preview || !Array.isArray(preview.candidates) || !preview.candidates.length) {
+      return json(res, 404, { error: "找不到这批导入的候选，需重新上传文件" });
+    }
+    const purpose = body.purpose === "tm" ? "tm" : "term";
+    const aiCleaning = purpose === "term" && body.aiCleaning === true;
+    const styleEvidence = body.styleEvidence === true;
+    const filename = String(preview.filename || "双语资产导入").slice(0, 120);
+    // 持久化的候选不带 selected（库里没有这一列），续跑时要按"默认全选"还原，
+    // 否则整批会被当成"未选择"直接跳过。
+    const candidates = preview.candidates.map((candidate) => ({ ...candidate, selected: candidate.selected !== false }));
+    const task = await createBackgroundTask({
+      type: "asset_import",
+      title: `续传 · ${filename}`,
+      projectId,
+      progress: { phase: "queued", message: "正在续传未完成的导入", total: candidates.length }
+    });
+    runAssetImportInBackground({
+      taskId: task.id,
+      projectId,
+      batchId,
+      filename,
+      candidates,
+      purpose,
+      aiCleaning,
+      styleEvidence
+    }).catch((error) => console.error("[Kami] 双语资产续传任务异常", error));
+    return json(res, 202, { taskId: task.id, batchId, accepted: candidates.length });
   }
   if (req.method === "POST" && url.pathname === "/api/tm-import/commit") {
     const body = await readJsonBody(req);
@@ -2687,7 +2954,14 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    workbenchSessionMonitor?.release(backgroundTaskHoldId(id));
     return json(res, 200, { ok: true });
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/background-tasks/")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/background-tasks/".length));
+    const task = await getBackgroundTask(id);
+    if (!task) return json(res, 404, { error: "后台任务不存在" });
+    return json(res, 200, { ...task, taskType: task.type });
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/")) {
     const batchId = decodeURIComponent(url.pathname.slice("/api/batch/run/".length));
@@ -3852,6 +4126,7 @@ if (process.env.KAMI_STORE !== "directus") {
 try {
   await initializeStore();
   await recoverInterruptedBatchWorkers();
+  await recoverInterruptedImportTasks();
 } catch (error) {
   console.error(`[Kami] 启动失败\n${error.message}`);
   process.exit(1);
@@ -4070,6 +4345,8 @@ function triggerAutoProposal(scope) {
 }
 
 const server = http.createServer(async (req, res) => {
+  // 用户关页面会直接掐断连接；把响应上的错误吞掉，别让长任务把它升级成进程级异常。
+  res.on("error", () => {});
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   try {
     if (url.pathname.startsWith("/api/")) {
@@ -4123,6 +4400,25 @@ async function recoverInterruptedBatchWorkers() {
   }
 }
 
+/**
+ * 服务重启会打断正在执行的后台导入。把它们标成"可继续"而不是永远停在
+ * 进行中，用户才能在任务中心点「继续导入」把剩下的候选补完。
+ */
+async function recoverInterruptedImportTasks() {
+  const tasks = await listBackgroundTasks({ limit: 500 });
+  for (const task of tasks) {
+    if (!["term_import", "asset_import"].includes(task.type)) continue;
+    if (task.status !== "in_progress") continue;
+    await saveBackgroundTask({
+      ...task,
+      status: "needs_attention",
+      progress: { ...(task.progress || {}), phase: "interrupted", message: "服务重启导致中断，可在任务中心继续导入" },
+      payload: { ...(task.payload || {}), resumable: true }
+    });
+    console.log(`[Kami] 已标记被服务重启打断的后台导入：${task.title}`);
+  }
+}
+
 async function shutdownManagedWorkbench() {
   if (workbenchShutdownStarted) return;
   workbenchShutdownStarted = true;
@@ -4144,11 +4440,13 @@ server.listen(PORT, HOST, () => {
   rescheduleConflictScan();
   if (AUTO_SHUTDOWN_ENABLED) {
     workbenchSessionMonitor = new WorkbenchSessionMonitor({
-      idleMs: WORKBENCH_IDLE_SHUTDOWN_MS,
+      closeGraceMs: WORKBENCH_CLOSE_GRACE_MS,
+      heartbeatGraceMs: WORKBENCH_HEARTBEAT_GRACE_MS,
+      startupGraceMs: WORKBENCH_STARTUP_GRACE_MS,
       onIdle: shutdownManagedWorkbench
     });
     workbenchSessionMonitor.start();
-    console.log(`[Kami] 页面全部关闭 ${WORKBENCH_IDLE_SHUTDOWN_MS / 1000} 秒后将自动停止。`);
+    console.log(`[Kami] 关闭最后一个页面 ${WORKBENCH_CLOSE_GRACE_MS / 1000} 秒后自动停止；最小化挂机时心跳失联 ${Math.round(WORKBENCH_HEARTBEAT_GRACE_MS / 60_000)} 分钟才视为关闭，后台任务执行期间不会停止。`);
   }
   if (HOST !== "127.0.0.1" && HOST !== "localhost") {
     for (const url of lanShareUrls("")) console.log(`局域网访问（分享给同事可用）：${url.replace(/\/share\/$/, "")}`);

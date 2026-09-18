@@ -45,6 +45,10 @@
 .pw-file-copy strong { margin-bottom: 4px; font-size: 13px; }
 .pw-file-copy small { color: #7b897f; font-size: 11px; line-height: 1.55; }
 .pw-preview { margin-top: 14px; padding: 13px 15px; border: 1px solid #e3e9df; border-radius: 11px; background: #fff; }
+.pw-toggle { display: grid; grid-template-columns: 20px 1fr; gap: 10px; align-items: start; margin-top: 14px; padding: 12px 14px; border: 1px solid #e3e9df; border-radius: 11px; background: #fff; cursor: pointer; }
+.pw-toggle input { margin-top: 2px; }
+.pw-toggle strong { display: block; margin-bottom: 3px; font-size: 12px; }
+.pw-toggle small { color: #718078; font-size: 11px; line-height: 1.65; }
 .pw-preview strong { display: block; margin-bottom: 8px; font-size: 12px; }
 .pw-preview ul { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
 .pw-preview li { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 7px; color: #65736b; font-size: 11px; }

@@ -113,14 +113,19 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
 
   async function submit() {
     if (saving) return;
+    // 必须先取值再重绘：render() 会用内存里的旧配置重建整个面板，
+    // 先 render 会把用户刚输入的模型地址、价格等直接丢掉（历史 bug）。
+    const submitted = Object.fromEntries(new FormData(find(".sp-form")));
     saving = true;
     render();
     try {
-      const form = new FormData(find(".sp-form"));
-      const saved = await api("/api/provider", { method: "POST", body: JSON.stringify(Object.fromEntries(form)) });
+      const saved = await api("/api/provider", { method: "POST", body: JSON.stringify(submitted) });
       provider = saved;
       onSaved?.(saved);
-      dialog.close();
+      // 保存成功不关闭面板：留下来核对自己刚填的值，关闭交给取消/×。
+      saving = false;
+      render();
+      find("[data-status]").textContent = `已保存 · ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}（可继续修改）`;
     } catch (error) {
       saving = false;
       render(error.message);
@@ -222,17 +227,19 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
 
   async function submit() {
     if (saving) return;
+    // 同模型设置：先把表单值取出来，再重绘保存中的状态。
+    const submitted = collect();
     saving = true;
     render();
     try {
-      const result = await api("/api/settings", { method: "POST", body: JSON.stringify({ settings: collect() }) });
+      const result = await api("/api/settings", { method: "POST", body: JSON.stringify({ settings: submitted }) });
       payload = { ...payload, ...result };
       onSaved?.(result);
-      if (result.notes?.length) {
-        saving = false;
-        render(result.notes);
-      } else {
-        dialog.close();
+      // 保存后留在面板里：被自动校正的项要看得见，也想再改一处时不用重开。
+      saving = false;
+      render(result.notes || []);
+      if (!result.notes?.length) {
+        find("[data-status]").textContent = `已保存并立即生效 · ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
       }
     } catch (error) {
       saving = false;

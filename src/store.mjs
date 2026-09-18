@@ -88,6 +88,7 @@ import {
   ,getDirectusResourceLibraries
   ,saveDirectusResourceLibrary
   ,deleteDirectusResourceLibrary
+  ,saveDirectusAssets
 } from "./directus-store.mjs";
 
 const ROOT = process.env.KAMI_DATA_DIR || fileURLToPath(new URL("../data", import.meta.url));
@@ -1480,6 +1481,14 @@ export async function getAssetStats(locale) {
 
 export async function saveAsset(locale, input) {
   return usesDirectus() ? saveDirectusAsset(locale, input) : saveJsonAsset(locale, input);
+}
+
+/** 批量写入术语：导入几千条时逐条写会把整批拖到分钟级。 */
+export async function saveAssets(locale, inputs = []) {
+  if (usesDirectus()) return saveDirectusAssets(locale, inputs);
+  const saved = [];
+  for (const input of inputs) saved.push(await saveJsonAsset(locale, input));
+  return saved;
 }
 
 export async function deleteAsset(locale, id) {

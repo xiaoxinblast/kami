@@ -64,7 +64,7 @@ call npm start
 exit /b %errorlevel%
 
 :open_workbench
-start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "$delay = [int]'%~1'; if ($delay -gt 0) { Start-Sleep -Seconds $delay }; $edge = $env:KAMI_EDGE_EXE; if (Test-Path -LiteralPath $edge) { $profile = Join-Path $env:LOCALAPPDATA 'KamiWorkbench\edge-safe-profile'; Start-Process -FilePath $edge -ArgumentList @('--disable-gpu', ('--user-data-dir=' + $profile), '--no-first-run', '--new-window', 'http://127.0.0.1:4173') } else { Start-Process 'http://127.0.0.1:4173' }"
+start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "$delay = [int]'%~1'; if ($delay -gt 0) { Start-Sleep -Seconds $delay }; $edge = $env:KAMI_EDGE_EXE; if (Test-Path -LiteralPath $edge) { $profile = Join-Path $env:LOCALAPPDATA 'KamiWorkbench\edge-safe-profile'; Start-Process -FilePath $edge -ArgumentList @(('--user-data-dir=' + $profile), '--no-first-run', '--new-window', 'http://127.0.0.1:4173') } else { Start-Process 'http://127.0.0.1:4173' }"
 exit /b 0
 
 :docker_failed

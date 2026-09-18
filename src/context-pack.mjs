@@ -101,7 +101,15 @@ export function buildContextPack({ source, locale, classification, matches, doma
     } : null,
     localeInstruction: LOCALES[locale].defaultInstruction,
     punctuation: punctuationGuidance(locale, titleOverrides),
-    requiredTerms: required.map(({ term, expectedTarget, libraryName, libraryPriority }) => ({ source: term.source, target: expectedTarget || term.source, preserveOriginal: true, note: term.note, libraryName: libraryName || term.libraryName || "", libraryPriority: libraryPriority ?? term.libraryPriority ?? null })),
+    // 注释为空时不下发这个键：提示词里塞满 `"note": ""` 只是噪音。
+    requiredTerms: required.map(({ term, expectedTarget, libraryName, libraryPriority }) => ({
+      source: term.source,
+      target: expectedTarget || term.source,
+      preserveOriginal: true,
+      ...(String(term.note || "").trim() ? { note: term.note } : {}),
+      libraryName: libraryName || term.libraryName || "",
+      libraryPriority: libraryPriority ?? term.libraryPriority ?? null
+    })),
     preferredTerms: preferred.map(({ term, mode, matchPhrase, score, scopeMismatch }) => ({
       source: term.source,
       matchedSource: matchPhrase,

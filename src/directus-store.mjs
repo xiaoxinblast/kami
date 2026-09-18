@@ -665,6 +665,30 @@ export async function saveDirectusAsset(locale, input) {
   return toTerm(saved);
 }
 
+/**
+ * 批量写入术语。
+ *
+ * 导入几千条术语时逐条 POST 会把整批拖到分钟级（每条都要一次往返 + 一次
+ * Directus 校验），所以按字节/条数分块写入。中途失败时抛出的错误上带着
+ * 已写入的条目，调用方可以据此报"部分写入"。
+ */
+export async function saveDirectusAssets(locale, inputs = []) {
+  const collection = collectionFor(locale);
+  const records = [];
+  for (const input of inputs) {
+    const item = toDirectusTerm(input);
+    if (!item.source || !item.target) {
+      const error = new Error("术语原文和目标译法不能为空");
+      error.statusCode = 400;
+      throw error;
+    }
+    records.push(item);
+  }
+  if (!records.length) return [];
+  const saved = await createItemsInChunks(`/items/${collection}`, records);
+  return saved.map(toTerm);
+}
+
 export async function deleteDirectusAsset(locale, id) {
   const collection = collectionFor(locale);
   await request(`/items/${collection}/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -724,6 +748,8 @@ export async function saveDirectusImportPreview(input) {
     project_id: input.projectId || "",
     source: candidate.source,
     target: candidate.target,
+    note: candidate.note || "",
+    sheet_mode: candidate.sheetMode || "",
     target_locale: candidate.locale,
     asset_type: candidate.assetType || "term",
     content_type: candidate.contentType || "general",
@@ -796,7 +822,7 @@ export async function getDirectusImportPreview(batchId) {
       "classification_confidence", "classification_source", "candidate_key", "candidate_role", "parent_candidate_key",
       "parent_row_number", "parent_candidate_keys", "parent_evidence", "candidate_origin", "term_category",
       "extraction_confidence", "source_span", "target_span", "frequency", "score", "source_file", "row_number",
-      "decision", "reason", "status"
+      "decision", "reason", "status", "note", "sheet_mode"
     ].join(","),
     filter: JSON.stringify({ batch_id: { _eq: batch.id } })
   });
@@ -807,6 +833,8 @@ export async function getDirectusImportPreview(batchId) {
     candidateId: item.id,
     source: item.source || "",
     target: item.target || "",
+    note: item.note || "",
+    sheetMode: item.sheet_mode || "",
     locale: item.target_locale || "",
     assetType: item.asset_type || "term",
     contentType: item.content_type || "general",

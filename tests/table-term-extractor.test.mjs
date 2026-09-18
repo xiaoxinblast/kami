@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
-import { applyModelDecisions, classifyImportCandidate, expandNestedTermCandidates, extractTermPairs, inferSheetMode, validateNestedTerms } from "../src/table-term-extractor.mjs";
+import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, inferSheetMode, validateNestedTerms } from "../src/table-term-extractor.mjs";
 
 async function workbookBase64(rows) {
   const workbook = new ExcelJS.Workbook();
@@ -39,6 +39,19 @@ test("重复术语对照合并，完整句子自动分流到翻译记忆", async
   assert.ok(sentence.reasons.some((reason) => reason.includes("翻译记忆")));
 });
 
+test("明确按术语表导入时整表入术语库，只有无效行被挡下", () => {
+  // FF7 的 term_base.xlsx 里 カード027：マインドフレア 这类带"："的词条一度被
+  // 本地句子判定改派到主 TM，术语库里就查不到它们了。
+  assert.equal(classifyImportRowKind({ source: "カード027：マインドフレア", sheetMode: "glossary" }), "term");
+  assert.equal(classifyImportRowKind({ source: "神羅バトルシミュレーター Version 3.0.4", sheetMode: "glossary" }), "term");
+  assert.equal(classifyImportRowKind({ source: "https://example.com", sheetMode: "glossary" }), "invalid");
+  assert.equal(classifyImportRowKind({ source: "100", sheetMode: "glossary" }), "invalid");
+  // 对话表仍然按句子与词条分流。
+  assert.equal(classifyImportRowKind({ source: "メンテナンスは明日午前10時に開始します。", sheetMode: "dialogue" }), "memory");
+  assert.equal(classifyImportRowKind({ source: "プレミアムパス", sheetMode: "dialogue" }), "memory");
+  assert.equal(classifyImportRowKind({ source: "プレミアムパス", sheetMode: "mixed" }), "term");
+});
+
 test("无表头表格可采用 AI 结构结论直接识别日中列", async () => {
   const base64 = await workbookBase64([
     ["海外社媒", "无字符限制", "プレミアムパス", "高级通行证"],
@@ -53,6 +66,46 @@ test("无表头表格可采用 AI 结构结论直接识别日中列", async () =
   assert.equal(result.sheets[0].sourceColumn, 3);
   assert.equal(result.candidates.length, 2);
   assert.deepEqual(result.candidates.map((item) => item.source), ["プレミアムパス", "限定バッジ"]);
+});
+
+test("表头带注释列时把原表注释带进候选", async () => {
+  const base64 = await workbookBase64([
+    ["日语", "简体中文", "注释"],
+    ["プレミアムパス", "高级通行证", "正式名，不要译成会员卡"],
+    ["メンテナンス", "维护", ""]
+  ]);
+  const result = await extractTermPairs({ filename: "带注释术语表.xlsx", base64, locale: "zh-CN" });
+  assert.equal(result.sheets[0].noteColumn, 3);
+  const withNote = result.candidates.find((item) => item.source === "プレミアムパス");
+  const withoutNote = result.candidates.find((item) => item.source === "メンテナンス");
+  assert.equal(withNote.note, "正式名，不要译成会员卡");
+  assert.equal(withoutNote.note, "");
+});
+
+test("備考等别名同样识别为注释列，超长注释会截断", async () => {
+  const longNote = "注".repeat(600);
+  const base64 = await workbookBase64([
+    ["日语", "简体中文", "備考"],
+    ["限定バッジ", "限定徽章", longNote]
+  ]);
+  const result = await extractTermPairs({ filename: "備考付き.xlsx", base64, locale: "zh-CN" });
+  assert.equal(result.sheets[0].noteColumn, 3);
+  const candidate = result.candidates[0];
+  assert.equal([...candidate.note].length, 500);
+  assert.ok(candidate.note.endsWith("…"));
+});
+
+test("无表头表格按 AI 结论识别注释列", async () => {
+  const base64 = await workbookBase64([
+    ["海外社媒", "プレミアムパス", "高级通行证", "仅 UI 使用"],
+    ["游戏内", "限定バッジ", "限定徽章", "不要拆词"]
+  ]);
+  const result = await extractTermPairs(
+    { filename: "无表头带注释.xlsx", base64, locale: "auto" },
+    { analyzeStructure: async (snapshot) => ({ sheets: [{ sheet: snapshot.sheets[0].sheet, headerRow: null, sourceColumn: 2, targetColumns: { "zh-CN": 3 }, noteColumn: 4 }] }) }
+  );
+  assert.equal(result.sheets[0].noteColumn, 4);
+  assert.deepEqual(result.candidates.map((item) => item.note), ["仅 UI 使用", "不要拆词"]);
 });
 
 test("AI 决策只能调整候选结论，不改写中外文本", () => {

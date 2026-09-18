@@ -43,6 +43,13 @@ const state = {
   assetPreflight: null,
   assetImportIntent: "auto",
   assetImportReturnView: "",
+  assetImportPurpose: "term",
+  assetImportAiCleaning: false,
+  assetImportStyleEvidence: false,
+  assetImportTaskId: "",
+  assetImportWizard: false,
+  memoryImportFiles: [],
+  memoryStyleEvidence: true,
   importPreview: null,
   importCompleted: false,
   importCandidateTab: "terms",
@@ -146,19 +153,34 @@ async function importWizardSource(file) {
   return { filename: file.name };
 }
 
-async function importWizardTerms(files) {
-  await setImportFiles(files, { intent: "terms", returnView: "workbench" });
-  if (!state.assetPreflight) throw new Error("术语表预检失败，请检查文件格式");
-  return { count: files.length };
+async function importWizardTerms(files, { aiCleaning = false, styleEvidence = false } = {}) {
+  // 向导的术语库步骤固定按"术语表"导入；等预检弹窗被处理完再推进下一步。
+  const outcome = await setImportFiles(files, {
+    intent: "terms",
+    purpose: "term",
+    aiCleaning,
+    styleEvidence,
+    returnView: "workbench",
+    fromWizard: true
+  });
+  if (!outcome?.submitted) return { submitted: false };
+  return {
+    submitted: true,
+    count: outcome.count,
+    files: files.length,
+    taskId: outcome.taskId,
+    batchId: outcome.batchId || state.assetPreflight?.batchId || "",
+    aiCleaning: Boolean(outcome.aiCleaning)
+  };
 }
 
 async function previewWizardTm(file) {
   return api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({ ...projectPayload(), filename: file.name, base64: await fileToBase64(file) }) });
 }
 
-async function commitWizardTm(preview) {
+async function commitWizardTm(preview, { styleEvidence = true } = {}) {
   const candidates = (preview.candidates || []).map((candidate) => ({ ...candidate, selected: true }));
-  const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: false }) });
+  const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence }) });
   await loadMemories(state.memoryLocale);
   return result;
 }
@@ -1700,11 +1722,19 @@ function renderTasks() {
     else if (action === "delete-share") deleteShareTaskRow(id, button);
     else if (action === "download-export") downloadBackgroundExport(id, button);
     else if (action === "open-import-review") openImportReview(id, button);
+    else if (action === "continue-import") continueImportTask(id, button);
     else if (action === "delete-background") deleteBackgroundTaskRow(id, button);
   }));
 }
 
-const BACKGROUND_TASK_LABELS = { term_import: "术语导入", batch_translation: "后台批次翻译", embedding_rebuild: "Embedding 重建", batch_export: "批次导出" };
+const BACKGROUND_TASK_LABELS = { term_import: "术语导入", asset_import: "双语资产导入", batch_translation: "后台批次翻译", embedding_rebuild: "Embedding 重建", batch_export: "批次导出" };
+
+/** 导入类任务的中断/失败都能用同一个批次续跑（已写入的重复项会自动跳过）。 */
+function resumableImportTask(task) {
+  if (!["term_import", "asset_import"].includes(task.taskType)) return false;
+  if (!["failed", "needs_attention"].includes(task.status)) return false;
+  return Boolean(task.payload?.batchId || task.payload?.resumable);
+}
 
 function renderBackgroundTaskRow(task) {
   const locale = state.bootstrap.locales[task.locale];
@@ -1716,15 +1746,43 @@ function renderBackgroundTaskRow(task) {
   const download = task.taskType === "batch_export" && task.status === "completed" && task.payload?.downloadUrl;
   const summary = task.payload?.summary;
   const canResumeImport = task.taskType === "term_import" && task.status === "review" && task.payload?.batchId;
+  const canContinueImport = resumableImportTask(task);
   const payloadText = summary
-    ? `术语 ${summary.terms ?? 0} · 译例 ${summary.memories ?? 0} · 风格草稿 ${summary.styleProfiles ?? 0} · 跳过 ${summary.skipped ?? 0}`
+    ? `术语 ${summary.terms ?? 0} · 译例 ${summary.memories ?? 0} · 风格草稿 ${summary.styleProfiles ?? 0} · 跳过 ${summary.skipped ?? 0}${summary.skippedByReason ? `（${Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join("；")}）` : ""}`
     : task.payload?.error ? `错误：${task.payload.error}` : "";
   return `<article class="task-row" data-task-id="${escapeHtml(task.id)}">
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="task-status ${escapeHtml(statusClass)}">${escapeHtml(statusLabel)}</span><span class="task-type-chip">${escapeHtml(BACKGROUND_TASK_LABELS[task.taskType] || "后台")}</span></div><small>${locale ? `${escapeHtml(locale.label)} · ` : ""}${escapeHtml(message || payloadText || contentTypeLabel(task.contentType))} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${percent}%"></i></div><span>${task.totalSegments ? `${task.completedSegments} / ${task.totalSegments}` : `${percent}%`}</span></div>
     <div class="task-qa"><strong>${payloadText || (canResumeImport ? `${task.payload.candidateCount || 0} 条候选` : "—")}</strong><small>${task.status === "in_progress" ? "后台执行中" : canResumeImport ? "识别完成，等待人工确认" : formatTaskTime(task.updatedAt)}</small></div>
-    <div class="task-actions">${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
+    <div class="task-actions">${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${canContinueImport ? `<button class="button secondary small" data-action="continue-import">继续导入</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
   </article>`;
+}
+
+/**
+ * 任务中心的「继续导入」：复用同一个批次续跑。已写入的条目会被当作重复跳过，
+ * 所以中断或服务重启之后都能补齐剩余候选。
+ */
+async function continueImportTask(id, button) {
+  const task = (state.tasks || []).find((item) => item.id === id);
+  const batchId = task?.payload?.batchId;
+  if (!batchId) return toast("这条任务没有可续传的批次，需重新上传文件");
+  const original = button?.textContent || "继续导入";
+  if (button) { button.disabled = true; button.textContent = "续传中…"; }
+  try {
+    const result = await api("/api/assets-import/resume", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
+      batchId,
+      purpose: task.payload?.purpose || "term",
+      aiCleaning: task.payload?.aiCleaning === true,
+      styleEvidence: task.payload?.styleEvidence === true
+    }) });
+    toast(`已续传 ${result.accepted || 0} 条候选，进度见任务中心`);
+    await loadTasks();
+    watchAssetImportTask(result.taskId, { returnView: "" }).catch(() => {});
+  } catch (error) {
+    if (button) { button.disabled = false; button.textContent = original; }
+    toast(error.message);
+  }
 }
 
 async function openImportReview(id, button) {
@@ -2596,18 +2654,36 @@ async function loadMemories(locale) {
   renderMemories();
 }
 
-async function setImportFiles(files = [], { intent = "auto", returnView = "" } = {}) {
+/**
+ * 双语资产预检。去向与清洗开关在**上传前**就已经定了：整批一个类型，
+ * 需要混合处理时分两次导入，避免"同一个文件既当术语又当 TM"。
+ */
+async function setImportFiles(files = [], {
+  intent = "auto",
+  returnView = "",
+  purpose = "",
+  aiCleaning = null,
+  styleEvidence = null,
+  fromWizard = false
+} = {}) {
   const selected = Array.from(files).filter(Boolean);
   if (!selected.length) return;
   const supported = /\.(xlsx|csv|xliff|mqxliff)$/iu;
   const invalid = selected.find((file) => !supported.test(file.name));
   if (invalid) return toast(`${invalid.name} 不是支持的双语资产格式`);
   if (selected.some((file) => file.size > 10 * 1024 * 1024)) return toast("单个导入文件不能超过 10MB");
+  const resolvedPurpose = purpose || (intent === "terms" ? "term" : readImportPurpose());
   state.importFiles = selected;
   state.importFile = selected[0];
   state.assetPreflight = null;
   state.assetImportIntent = intent;
   state.assetImportReturnView = returnView;
+  state.assetImportPurpose = resolvedPurpose;
+  state.assetImportAiCleaning = resolvedPurpose === "term" ? (aiCleaning ?? readImportAiCleaning()) : false;
+  state.assetImportStyleEvidence = styleEvidence ?? (resolvedPurpose === "tm" ? true : readImportStyleEvidence());
+  state.assetImportTaskId = "";
+  state.assetImportWizard = fromWizard;
+  assetPreflightOutcome = null;
   $("#filePrompt").textContent = selected.length === 1 ? selected[0].name : `已选择 ${selected.length} 个文件`;
   $("#fileMeta").textContent = "正在进行本地预检；不会调用模型，也不会写入数据库";
   $("#dropZone").classList.add("has-file");
@@ -2618,58 +2694,193 @@ async function setImportFiles(files = [], { intent = "auto", returnView = "" } =
     }) });
     state.assetPreflight = preview;
     renderAssetPreflight();
+    resetAssetImportProgress();
     $("#assetPreflightDialog").showModal();
-  } catch (error) { toast(error.message); }
+    if (fromWizard) {
+      // 向导必须等用户处理完预检弹窗再推进，否则会在弹窗后面偷偷跳过这一步。
+      return await new Promise((resolve) => { assetPreflightDeferred = { resolve }; });
+    }
+    return { submitted: false };
+  } catch (error) {
+    toast(error.message);
+    return { submitted: false };
+  }
+}
+
+function readImportPurpose() {
+  const checked = $$('input[name="importPurpose"]').find((input) => input.checked);
+  return checked?.value === "tm" ? "tm" : "term";
+}
+
+function readImportAiCleaning() {
+  return Boolean($("#importAiCleaning")?.checked);
+}
+
+function readImportStyleEvidence() {
+  return Boolean($("#importStyleEvidence")?.checked);
+}
+
+/**
+ * 类型选择联动：AI 清洗只对术语表有意义（人工 TM 本来就已人工确认），
+ * 风格证据则默认跟着类型走（人工 TM 默认写、术语表默认不写）。
+ */
+function syncImportPurposeControls({ resetDefaults = false } = {}) {
+  const purpose = readImportPurpose();
+  state.assetImportPurpose = purpose;
+  const aiRow = $("#importAiCleaningRow");
+  if (aiRow) aiRow.hidden = purpose !== "term";
+  if (resetDefaults) {
+    if ($("#importAiCleaning")) $("#importAiCleaning").checked = false;
+    if ($("#importStyleEvidence")) $("#importStyleEvidence").checked = purpose === "tm";
+  }
+}
+
+/** 预检弹窗的收尾：向导要等它关掉才知道这一步到底提交了什么。 */
+let assetPreflightDeferred = null;
+let assetPreflightOutcome = null;
+
+function resolveAssetPreflight() {
+  const deferred = assetPreflightDeferred;
+  assetPreflightDeferred = null;
+  if (deferred) deferred.resolve(assetPreflightOutcome || { submitted: false });
+}
+
+function closeAssetPreflightDialog() {
+  const dialog = $("#assetPreflightDialog");
+  if (dialog?.open) dialog.close();
+  resolveAssetPreflight();
+}
+
+function resetAssetImportProgress() {
+  const container = $("#assetImportProgress");
+  if (!container) return;
+  container.hidden = true;
+  $("#assetImportProgressBar").style.width = "0%";
+}
+
+function updateAssetImportProgress(progress = {}) {
+  const container = $("#assetImportProgress");
+  if (!container) return;
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  container.hidden = false;
+  $("#assetImportProgressText").textContent = progress.message || "正在导入";
+  $("#assetImportProgressMeta").textContent = `${percent}%`;
+  $("#assetImportProgressBar").style.width = `${percent}%`;
 }
 
 function renderAssetPreflight() {
   const preview = state.assetPreflight;
   if (!preview) return;
-  $("#assetPreflightBody").innerHTML = (preview.files || []).map((file, index) => {
-    const purpose = state.assetImportIntent === "terms" ? "term_cleaning" : file.defaultPurpose;
-    const locked = state.assetImportIntent === "terms" ? " disabled" : "";
-    return `<tr><td>${escapeHtml(file.filename)}</td><td>${escapeHtml(file.type || "未知")}</td><td>${Number(file.entries) || 0}</td><td><select data-asset-purpose="${index}"${locked}><option value="tm"${purpose === "tm" ? " selected" : ""}>写入人工主 TM</option><option value="term_cleaning"${purpose === "term_cleaning" ? " selected" : ""}>清洗后写入术语库</option></select></td><td><label><input type="checkbox" data-asset-style="${index}" ${state.assetImportIntent === "terms" ? "disabled" : ""}/> 作为风格证据</label><small>${escapeHtml((file.anomalies || []).join("；") || "未发现异常")}</small></td></tr>`;
+  const aiRow = $("#assetPreflightAiRow");
+  if (aiRow) aiRow.hidden = state.assetImportPurpose !== "term";
+  if ($("#assetPreflightAiCleaning")) $("#assetPreflightAiCleaning").checked = state.assetImportAiCleaning;
+  if ($("#assetPreflightStyleEvidence")) $("#assetPreflightStyleEvidence").checked = state.assetImportStyleEvidence;
+  const purposeLabel = state.assetImportPurpose === "tm" ? "写入人工主 TM" : state.assetImportAiCleaning ? "AI 清洗后分库写入" : "按表直接导入（本地规则分流）";
+  $("#assetPreflightBody").innerHTML = (preview.files || []).map((file) => {
+    return `<tr><td>${escapeHtml(file.filename)}</td><td>${escapeHtml(file.type || "未知")}</td><td>${Number(file.entries) || 0}</td><td>${escapeHtml(purposeLabel)}</td><td><small>${escapeHtml((file.anomalies || []).join("；") || "未发现异常")}${state.assetImportStyleEvidence ? " · 写入风格证据" : ""}</small></td></tr>`;
   }).join("") || '<tr><td colspan="5" class="table-empty">没有可预检的文件</td></tr>';
-  $("#assetPreflightSummary").textContent = `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。确认前不会清洗或入库。`;
+  const cleaningText = state.assetImportPurpose === "tm"
+    ? "不调用模型"
+    : state.assetImportAiCleaning ? "AI 清洗（较慢）" : "不调用模型，按本地规则分流";
+  $("#assetPreflightSummary").textContent = `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。去向：${purposeLabel}；${cleaningText}。确认后进入后台导入。`;
 }
 
 async function confirmAssetPreflight() {
   const preview = state.assetPreflight;
   if (!preview) return;
-  const candidates = (preview.candidates || []).map((candidate) => {
-    const fileIndex = (preview.files || []).findIndex((file) => file.filename === candidate.sourceFile);
-    const purpose = $(`[data-asset-purpose="${fileIndex}"]`)?.value || candidate.purpose || "tm";
-    const styleEvidence = Boolean($(`[data-asset-style="${fileIndex}"]`)?.checked);
-    return { ...candidate, purpose, styleEvidence, assetType: purpose === "term_cleaning" ? "term" : "memory" };
-  });
+  const candidates = (preview.candidates || []).map((candidate) => ({ ...candidate, selected: candidate.selected !== false }));
   if (!candidates.length) return toast("没有可入库的双语条目");
+  const purpose = state.assetImportPurpose;
+  // 弹窗里的勾选是最终生效值（预检弹窗可能来自术语库/记忆库页面，那里没有前置选择器）。
+  const aiCleaning = purpose === "term" && Boolean($("#assetPreflightAiCleaning")?.checked);
+  const styleEvidence = Boolean($("#assetPreflightStyleEvidence")?.checked);
+  state.assetImportAiCleaning = aiCleaning;
+  state.assetImportStyleEvidence = styleEvidence;
   try {
     $("#assetPreflightConfirm").disabled = true;
     const result = await api("/api/assets-import/commit", { method: "POST", body: JSON.stringify({
-      ...projectPayload(), batchId: preview.batchId, filename: state.importFile?.name || "双语资产导入", candidates
+      ...projectPayload(),
+      batchId: preview.batchId,
+      filename: state.importFile?.name || "双语资产导入",
+      candidates,
+      purpose,
+      aiCleaning,
+      styleEvidence
     }) });
     const returnView = state.assetImportReturnView;
-    state.importCompleted = true;
-    state.assetPreflight = null;
-    $("#assetPreflightDialog").close();
-    $("#mappingNote").textContent = `导入完成：术语 ${result.summary?.terms || 0} 条，主 TM ${result.summary?.memories || 0} 条，接回原翻译轨迹 ${result.summary?.trajectoriesLinked || 0} 条${result.summary?.trajectoryAmbiguous ? `，${result.summary.trajectoryAmbiguous} 条重复原文无法唯一定位` : ""}。`;
-    await Promise.all([loadAssets(state.assetLocale), loadMemories(state.memoryLocale)]);
-    toast("双语资产导入完成");
-    if (returnView) switchView(returnView);
+    const accepted = Number(result.accepted) || candidates.length;
+    state.assetImportTaskId = result.taskId || result.backgroundTaskId || "";
+    assetPreflightOutcome = {
+      submitted: true,
+      taskId: state.assetImportTaskId,
+      batchId: result.batchId || preview.batchId,
+      count: accepted,
+      files: state.importFiles?.length || 0,
+      aiCleaning,
+      purpose
+    };
+    $("#assetPreflightConfirm").hidden = true;
+    $("#assetPreflightClose").hidden = false;
+    updateAssetImportProgress({ message: aiCleaning ? "已在后台排队：先做 AI 清洗" : "已在后台排队：按表导入", percent: 1 });
+    toast(`已开始后台导入 ${accepted} 条；可以关掉这个窗口继续下一步`);
+    if (returnView) {
+      $("#assetPreflightTableWrap").hidden = true;
+      $("#assetPreflightSummary").textContent = `已提交后台导入：${state.importFiles?.length || 0} 个文件、${accepted} 条双语条目。${aiCleaning ? "先做 AI 清洗再入库。" : "按本地规则分流写入。"}可以关掉这个窗口，向导会继续下一步，进度与结果在任务中心可查。`;
+    }
+    watchAssetImportTask(state.assetImportTaskId, { returnView });
   } catch (error) { toast(error.message); }
   finally { $("#assetPreflightConfirm").disabled = false; }
 }
 
+/**
+ * 后台导入的进度与收尾。页面被关掉也没关系：任务在服务端继续跑，
+ * 任务中心会保留进度与跳过明细。
+ */
+async function watchAssetImportTask(taskId, { returnView = "" } = {}) {
+  if (!taskId) return;
+  let finished = false;
+  while (!finished) {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    let task = null;
+    try {
+      task = await api(`/api/background-tasks/${encodeURIComponent(taskId)}`);
+    } catch { finished = true; break; }
+    if (!task) { finished = true; break; }
+    updateAssetImportProgress(task.progress || {});
+    if (task.status === "completed" || task.status === "failed" || task.status === "needs_attention") {
+      finished = true;
+      const summary = task.payload?.summary;
+      if (task.status === "completed") {
+        const skipped = Number(summary?.skipped) || 0;
+        const text = `导入完成：术语 ${summary?.terms || 0} 条、主 TM ${summary?.memories || 0} 条${skipped ? `、跳过 ${skipped} 条（${Object.entries(summary?.skippedByReason || {}).map(([reason, count]) => `${reason} ${count}`).join("；")}）` : ""}。`;
+        $("#mappingNote").textContent = text;
+        toast(text);
+        await Promise.all([loadAssets(state.assetLocale), loadMemories(state.memoryLocale)]);
+      } else {
+        $("#mappingNote").textContent = `后台导入未完成：${task.progress?.message || task.payload?.error || "未知原因"}。可在任务中心点「继续导入」补齐。`;
+        toast("后台导入未完成，可在任务中心继续导入");
+      }
+      if (returnView) switchView(returnView);
+    }
+  }
+}
+
 async function previewMemoryImport() {
-  const file = state.memoryImportFile;
-  if (!file) return;
-  if (!/\.(xlsx|csv|xliff|mqxliff)$/iu.test(file.name)) return toast("人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff");
+  const files = state.memoryImportFiles.length ? state.memoryImportFiles : [state.memoryImportFile].filter(Boolean);
+  if (!files.length) return;
+  const invalid = files.find((file) => !/\.(xlsx|csv|xliff|mqxliff)$/iu.test(file.name));
+  if (invalid) return toast(`${invalid.name}：人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff`);
   try {
-    $("#memoryImportNote").textContent = "正在读取双语条目……";
-    const preview = await api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({ ...projectPayload(), filename: file.name, base64: await fileToBase64(file) }) });
+    $("#memoryImportNote").textContent = files.length > 1 ? `正在读取 ${files.length} 个文件的双语条目……` : "正在读取双语条目……";
+    const preview = await api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
+      filename: files.length === 1 ? files[0].name : `${files[0].name} 等 ${files.length} 个文件`,
+      files: await Promise.all(files.map(async (file) => ({ filename: file.name, base64: await fileToBase64(file) })))
+    }) });
     preview.candidates = (preview.candidates || []).map((candidate) => ({ ...candidate, selected: candidate.selected !== false }));
     state.memoryImportPreview = preview;
-    $("#memoryImportNote").textContent = `本地预检识别 ${preview.candidates.length} 条双语 TM；尚未调用模型，也尚未写入数据库。请检查后确认。`;
+    const evidenceText = state.memoryStyleEvidence ? "确认后同时写入主 TM 与风格学习证据。" : "确认后只写入主 TM，不进入风格证据池。";
+    $("#memoryImportNote").textContent = `本地预检识别 ${preview.candidates.length} 条双语 TM（来自 ${files.length} 个文件）；尚未调用模型，也尚未写入数据库。${evidenceText}`;
     $("#memoryImportPreview").hidden = false;
     $("#memoryImportPreviewBody").innerHTML = preview.candidates.slice(0, 500).map((candidate, index) => `<tr><td><input type="checkbox" data-memory-index="${index}" ${candidate.selected ? "checked" : ""} /></td><td>${escapeHtml(candidate.entryId || "")}</td><td>${escapeHtml(candidate.source)}</td><td>${escapeHtml(candidate.target)}</td><td>${escapeHtml([candidate.sourceFile, candidate.sourceRow ? `第 ${candidate.sourceRow} 行` : ""].filter(Boolean).join(" · "))}</td></tr>`).join("") || '<tr><td colspan="5" class="table-empty">没有可写入的双语条目</td></tr>';
     $("#memoryImportConfirm").disabled = !preview.candidates.length;
@@ -2684,8 +2895,10 @@ async function commitMemoryImport() {
   if (!candidates.some((candidate) => candidate.selected)) return toast("请至少选择一条 TM");
   try {
     $("#memoryImportConfirm").disabled = true;
-    const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: false }) });
-    $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${result.summary?.memories ?? result.imported?.length ?? 0} 条；接回原翻译轨迹 ${result.summary?.trajectoriesLinked || 0} 条${result.summary?.trajectoryAmbiguous ? `，${result.summary.trajectoryAmbiguous} 条需人工确认归属` : ""}。`;
+    const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: state.memoryStyleEvidence }) });
+    const skippedText = Number(result.summary?.skipped) ? `；跳过 ${result.summary.skipped} 条` : "";
+    const evidenceText = state.memoryStyleEvidence ? "，并已写入风格学习证据池" : "";
+    $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${result.summary?.memories ?? result.imported?.length ?? 0} 条${evidenceText}；接回原翻译轨迹 ${result.summary?.trajectoriesLinked || 0} 条${result.summary?.trajectoryAmbiguous ? `，${result.summary.trajectoryAmbiguous} 条需人工确认归属` : ""}${skippedText}。`;
     $("#memoryImportPreview").hidden = true;
     state.memoryImportPreview = null;
     await loadMemories(state.memoryLocale);
@@ -2755,6 +2968,9 @@ function resetImport() {
   state.assetPreflight = null;
   state.assetImportIntent = "auto";
   state.assetImportReturnView = "";
+  state.assetImportTaskId = "";
+  state.assetImportWizard = false;
+  assetPreflightOutcome = null;
   state.importPreview = null;
   state.importCompleted = false;
   state.importCandidateTab = "terms";
@@ -3959,7 +4175,8 @@ async function commitImport() {
     renderImportBatchLearning();
     const pendingStyles = (result.styleFallbacks || []).slice(0, 4).map((item) => `${state.bootstrap.locales[item.locale]?.shortLabel || item.locale} ${contentTypeLabel(item.contentType)} ${styleDistillProgress(item)}`).join("；");
     const learnedText = state.importBatchLearning.length ? `本批已形成 ${state.importBatchLearning.length} 个风格学习范围，具体内容见下方。` : "本批没有生成可展示的风格学习结果。";
-    $("#mappingNote").textContent = `批次已完成：写入术语 ${result.summary.terms || 0} 条、完整译例 / 风格证据 ${result.summary.memories || 0} 条、生成风格草稿 ${result.summary.styleProfiles || 0} 个，跳过 ${result.skipped.length} 条。${learnedText}${pendingStyles ? ` 尚在积累：${pendingStyles}。` : ""}所有资产均按日语→简体中文语言对与自动识别语体隔离。`;
+    const skippedReasons = Object.entries(result.summary.skippedByReason || {}).map(([reason, count]) => `${reason} ${count}`).join("；");
+    $("#mappingNote").textContent = `批次已完成：写入术语 ${result.summary.terms || 0} 条、完整译例 / 风格证据 ${result.summary.memories || 0} 条、生成风格草稿 ${result.summary.styleProfiles || 0} 个，跳过 ${result.summary.skipped ?? result.skipped.length} 条${skippedReasons ? `（${skippedReasons}）` : ""}。${learnedText}${pendingStyles ? ` 尚在积累：${pendingStyles}。` : ""}所有资产均按日语→简体中文语言对与自动识别语体隔离。`;
     renderImportCandidates();
     await Promise.all([...new Set(result.imported.filter((item) => item.assetType === "term").map((item) => item.locale))].map((locale) => loadAssets(locale)));
     toast(`已导入 ${result.summary.terms || 0} 条术语和 ${result.summary.memories || 0} 条翻译记忆`);
@@ -3979,6 +4196,20 @@ function populateSelects() {
 
 function bindEvents() {
   $$(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+  $$('input[name="importPurpose"]').forEach((input) => input.addEventListener("change", () => syncImportPurposeControls({ resetDefaults: true })));
+  $("#importAiCleaning")?.addEventListener("change", (event) => { state.assetImportAiCleaning = event.target.checked; });
+  $("#importStyleEvidence")?.addEventListener("change", (event) => { state.assetImportStyleEvidence = event.target.checked; });
+  $("#memoryStyleEvidence")?.addEventListener("change", (event) => { state.memoryStyleEvidence = event.target.checked; });
+  $("#assetPreflightDialog").addEventListener("close", () => resolveAssetPreflight());
+  $("#assetPreflightClose").addEventListener("click", () => closeAssetPreflightDialog());
+  $("#assetPreflightAiCleaning")?.addEventListener("change", (event) => {
+    state.assetImportAiCleaning = event.target.checked;
+    renderAssetPreflight();
+  });
+  $("#assetPreflightStyleEvidence")?.addEventListener("change", (event) => {
+    state.assetImportStyleEvidence = event.target.checked;
+    renderAssetPreflight();
+  });
   $$(".translation-mode").forEach((button) => button.addEventListener("click", () => setTranslationMode(button.dataset.translationMode)));
   $("#primaryAction").addEventListener("click", () => {
     if (state.view === "workbench" && state.translationMode === "single") translate();
@@ -4078,9 +4309,12 @@ function bindEvents() {
   });
   $("#memorySearch").addEventListener("input", renderMemories);
   $("#memoryFile").addEventListener("change", (event) => {
-    state.memoryImportFile = event.target.files[0] || null;
-    $("#memoryImportButton").disabled = !state.memoryImportFile;
-    $("#memoryImportNote").textContent = state.memoryImportFile ? `${state.memoryImportFile.name} · 等待预检` : "选择文件后先预检，确认后写入主 TM。";
+    state.memoryImportFiles = [...event.target.files];
+    state.memoryImportFile = state.memoryImportFiles[0] || null;
+    $("#memoryImportButton").disabled = !state.memoryImportFiles.length;
+    $("#memoryImportNote").textContent = state.memoryImportFiles.length
+      ? `${state.memoryImportFiles.length === 1 ? state.memoryImportFiles[0].name : `${state.memoryImportFiles.length} 个文件`} · 等待预检`
+      : "选择文件后先预检，确认后写入主 TM。";
   });
   $("#memoryImportButton").addEventListener("click", () => previewMemoryImport());
   $("#memoryImportConfirm").addEventListener("click", () => commitMemoryImport());

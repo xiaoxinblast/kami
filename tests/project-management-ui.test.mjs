@@ -51,3 +51,19 @@ test("项目管理提供新建向导、删除入口和稳定的表单重置", as
   assert.match(styles, /\.project-delete-list/u);
   assert.match(styles, /\.project-delete-row/u);
 });
+
+test("新建项目向导：术语步骤可选 AI 清洗，TM 步骤默认写入风格证据，并且等预检确认后再推进", async () => {
+  const [wizard, script] = await Promise.all([
+    readFile(new URL("../public/project-wizard.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8")
+  ]);
+  assert.match(wizard, /data-terms-ai-cleaning/u);
+  assert.match(wizard, /data-tm-style-evidence checked/u);
+  assert.match(wizard, /const result = await onImportTerms\(termFiles, \{ aiCleaning, styleEvidence: false \}\)/u);
+  assert.match(wizard, /if \(result\?\.submitted\) summary\.push\(`已提交后台导入：/u);
+  assert.doesNotMatch(wizard, /术语表已进入审核/u);
+  assert.match(wizard, /await onCommitTm\(tmPreview, \{ styleEvidence \}\)/u);
+  // 向导必须等预检弹窗被处理完，否则会在弹窗后面偷偷跳过一个步骤。
+  assert.match(script, /return await new Promise\(\(resolve\) => \{ assetPreflightDeferred = \{ resolve \}; \}\);/u);
+  assert.match(script, /const outcome = await setImportFiles\(files, \{\s*\n\s*intent: "terms",/u);
+});

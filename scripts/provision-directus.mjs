@@ -351,6 +351,8 @@ const definitions = [
       textField("corpus_id", "来源语料 ID", { width: "half", sort: 8 }),
       textField("source_file", "来源文件", { width: "half", sort: 9 }),
       { field: "row_number", type: "integer", meta: { interface: "input", width: "half", sort: 10, translations: label("原表行号") }, schema: { is_nullable: true } },
+      textField("note", "原表注释", { multiline: true, note: "术语表自带的注释列。入库后原样发给模型，用于消歧。", sort: 10 }),
+      textField("sheet_mode", "原工作表类型", { width: "half", note: "dialogue / glossary / mixed。续跑时要靠它复现按表导入的分流规则。", sort: 10 }),
       selectField("decision", "清洗结论", [["可入库", "ready"], ["需复核", "review"], ["已排除", "excluded"]], { defaultValue: "review", sort: 11 }),
       textField("reason", "判断依据", { multiline: true, sort: 12 }),
       selectField("status", "处理状态", [["待确认", "pending"], ["已采用", "accepted"], ["已忽略", "rejected"]], { defaultValue: "pending", sort: 13 }),
@@ -851,11 +853,11 @@ const definitions = [
     fields: [
       uuidField(),
       textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
-      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["批次翻译", "batch_translation"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
+      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["双语资产导入", "asset_import"], ["批次翻译", "batch_translation"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
       textField("title", "任务标题", { required: true, sort: 3 }),
       // 不归属单一翻译任务的后台操作没有目标语言，必须允许为空。
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { width: "half", sort: 4, nullable: true }),
-      selectField("status", "任务状态", [["进行中", "in_progress"], ["已完成", "completed"], ["失败", "failed"]], { defaultValue: "in_progress", sort: 5 }),
+      selectField("status", "任务状态", [["进行中", "in_progress"], ["等待审核", "review"], ["需要处理", "needs_attention"], ["已完成", "completed"], ["失败", "failed"]], { defaultValue: "in_progress", sort: 5 }),
       jsonField("progress", "进度快照", { note: "percent、phase、message、completed、total。", sort: 6 }),
       jsonField("payload", "结果载荷", { note: "导出文件下载地址、导入汇总、重建统计等。", sort: 7 }),
       dateField("date_created", "创建时间", "date-created", 8),

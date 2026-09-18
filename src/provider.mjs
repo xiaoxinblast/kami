@@ -335,6 +335,7 @@ export async function reviewTermCandidatesWithModel(locale, candidates) {
     assetType: candidate.assetType,
     source: candidate.source,
     target: candidate.target,
+    note: candidate.note || "",
     contentTypeHint: candidate.contentType || "general",
     domainHint: candidate.domain || "general",
     ruleScore: candidate.score,
@@ -397,7 +398,9 @@ export async function analyzeTermTableStructureWithModel(snapshot, requestedLoca
 
 表格可能完全没有表头，也可能前几行是标题、说明或元数据。请根据整列的文字脚本、成对行关系、长度和内容分布，找出一列日语源文以及简体中文目标列。纯汉字日文必须结合对应行语义与整列分布判断，不能因为缺少假名或表头就拒绝。
 
-不要把位置、描述、DDL、字符限制、语种要求、序号或日期列当成日中对照。headerRow 只有确实存在列名行时才填写，否则必须为 null。还要只根据工作表名称、表头和日语源列整体分布判断 sheetMode：dialogue=对白/字幕/剧情句段为主，glossary=独立命名词条为主，mixed=两类明显混合。目标语言译文长度不得影响 sheetMode。输出严格 JSON，不要 Markdown：{"sheets":[{"sheet":"原工作表名","headerRow":null,"sourceColumn":1,"targetColumns":{"zh-CN":2},"sheetMode":"dialogue","confidence":0.9,"reason":"简短依据"}]}`
+不要把位置、描述、DDL、字符限制、语种要求、序号或日期列当成日中对照。headerRow 只有确实存在列名行时才填写，否则必须为 null。还要只根据工作表名称、表头和日语源列整体分布判断 sheetMode：dialogue=对白/字幕/剧情句段为主，glossary=独立命名词条为主，mixed=两类明显混合。目标语言译文长度不得影响 sheetMode。
+
+如果表里另有一列写的是给译者的注释、备注、说明或用法提示（例如"不译""仅用于 UI""正式名""已废弃"），把它标为 noteColumn；没有这样的列时 noteColumn 必须为 null。禁止把位置、DDL、字符限制、语种要求、序号或日期列当成注释列。输出严格 JSON，不要 Markdown：{"sheets":[{"sheet":"原工作表名","headerRow":null,"sourceColumn":1,"targetColumns":{"zh-CN":2},"noteColumn":3,"sheetMode":"dialogue","confidence":0.9,"reason":"简短依据"}]}`
     },
     { role: "user", content: JSON.stringify(compactSnapshot) }
   ]);

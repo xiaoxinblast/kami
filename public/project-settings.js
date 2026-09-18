@@ -225,7 +225,8 @@ export function createProjectSettingsPanel(dialog, { api, onSaved }) {
       onSaved(project);
       draft.partial = false;
       initial = signature();
-      dialog.close();
+      // 保存后留在面板里：改完一处往往还要再核对下一处，关闭交给取消/×。
+      updateStatus(`已保存 · ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`);
     } catch (error) {
       updateStatus(`${draft.partial ? "部分更改已保存；" : "保存失败；"}${error.message}。编辑内容已保留，请重试。`, true);
     } finally {

@@ -57,8 +57,10 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     await page.getByRole("button", { name: "术语库" }).click();
     await page.locator("#termLibraryFile").setInputFiles({ name: "terms.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: Buffer.from("test") });
     await page.locator("#assetPreflightDialog").waitFor({ state: "visible" });
-    assert.equal(await page.locator('[data-asset-purpose="0"]').inputValue(), "term_cleaning");
-    assert.equal(await page.locator('[data-asset-purpose="0"]').isDisabled(), true);
+    // 类型在上传前已选定，弹窗只展示去向，并保留 AI 清洗 / 风格证据的最终开关。
+    assert.equal(await page.locator("#assetPreflightAiRow").isHidden(), false);
+    assert.equal(await page.locator("#assetPreflightAiCleaning").isChecked(), false);
+    assert.match(await page.locator("#assetPreflightSummary").textContent(), /按表直接导入/u);
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/term-library-upload.png`, animations: "disabled" });
