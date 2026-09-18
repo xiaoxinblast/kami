@@ -2,7 +2,7 @@ import { extname, basename } from "node:path";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { csvValues, parseCsvDocument, replaceCsvCells } from "./csv-document.mjs";
-import { buildSpreadsheetSnapshot, describeSpreadsheetAnalysis, inferSpreadsheetStructure, mergeSpreadsheetAnalysis } from "./spreadsheet-structure.mjs";
+import { applyColumnMapping, buildSpreadsheetSnapshot, describeSpreadsheetAnalysis, inferSpreadsheetStructure, mergeSpreadsheetAnalysis } from "./spreadsheet-structure.mjs";
 import { exportXliffDocument, prepareXliffDocument } from "./xliff-document.mjs";
 
 const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".docx", ".xlsx", ".csv", ".xliff", ".mqxliff"]);
@@ -143,7 +143,7 @@ function excelCellText(cell) {
   return String(cell.text || "").trim();
 }
 
-async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet, format = "xlsx") {
+async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet, format = "xlsx", columnMapping = null) {
   const snapshot = buildSpreadsheetSnapshot(workbook, excelCellText);
   const ruleAnalysis = inferSpreadsheetStructure(snapshot, { allowSingleColumnHeader: format === "csv" });
   let analysis = ruleAnalysis;
@@ -158,6 +158,8 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
       analysis = { ...ruleAnalysis, fallbackReason };
     }
   }
+  // 上传弹窗里的人工列映射优先：用户既已逐列确认，就不再让自动识别覆盖它。
+  analysis = applyColumnMapping(analysis, columnMapping);
   const collector = createCollector(segmentationMode);
   const cells = [];
   workbook.eachSheet((worksheet) => {
@@ -211,24 +213,96 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
   };
 }
 
-async function prepareXlsx(buffer, segmentationMode, analyzeSpreadsheet) {
+async function prepareXlsx(buffer, segmentationMode, analyzeSpreadsheet, columnMapping = null) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
-  return prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet, "xlsx");
+  return prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet, "xlsx", columnMapping);
 }
 
-async function prepareCsv(buffer, segmentationMode, analyzeSpreadsheet) {
+async function prepareCsv(buffer, segmentationMode, analyzeSpreadsheet, columnMapping = null) {
   const document = parseCsvDocument(buffer.toString("utf8"));
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet("CSV");
   for (const row of csvValues(document)) worksheet.addRow(row);
-  const prepared = await prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet, "csv");
+  const prepared = await prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet, "csv", columnMapping);
   return {
     ...prepared,
     structure: {
       ...prepared.structure,
       csv: { delimiter: document.delimiter, bom: document.bom, rows: document.rows.length }
     }
+  };
+}
+
+/**
+ * 上传待译表格时给"列含义"弹窗用：返回每个工作表识别到的列、建议角色与样例值，
+ * 用户可以在弹窗里逐列改角色、决定首行是不是表头，确认后再走 prepareBatchDocument。
+ * 只分析结构，不生成段落、不调用翻译。
+ */
+export async function describeBatchColumns(input = {}, options = {}) {
+  const filename = String(input.filename || "").trim();
+  const extension = extname(filename).toLowerCase();
+  if (![".xlsx", ".csv"].includes(extension)) fail("只有 .xlsx / .csv 表格需要确认列含义", 400);
+  const buffer = extension === ".csv"
+    ? (input.text !== undefined ? Buffer.from(String(input.text), "utf8") : decodeBase64(input.base64))
+    : decodeBase64(input.base64);
+  const workbook = new ExcelJS.Workbook();
+  if (extension === ".csv") {
+    const document = parseCsvDocument(buffer.toString("utf8"));
+    const worksheet = workbook.addWorksheet("CSV");
+    for (const row of csvValues(document)) worksheet.addRow(row);
+  } else {
+    await workbook.xlsx.load(buffer);
+  }
+  const snapshot = buildSpreadsheetSnapshot(workbook, excelCellText);
+  const ruleAnalysis = inferSpreadsheetStructure(snapshot, { allowSingleColumnHeader: extension === ".csv" });
+  let analysis = ruleAnalysis;
+  let fallbackReason = "";
+  if (options.analyzeSpreadsheet) {
+    try {
+      const modelAnalysis = await options.analyzeSpreadsheet(snapshot, ruleAnalysis);
+      analysis = mergeSpreadsheetAnalysis(snapshot, ruleAnalysis, modelAnalysis);
+      fallbackReason = analysis.usedModel ? "" : analysis.fallbackReason || "AI 未返回有效识别结果";
+    } catch (error) {
+      fallbackReason = error.message;
+      analysis = { ...ruleAnalysis, fallbackReason };
+    }
+  }
+  return {
+    filename,
+    format: extension.slice(1),
+    structureSource: analysis.usedModel ? "model" : "rules",
+    fallbackReason,
+    sheets: analysis.sheets.map((sheet) => {
+      const snapshotSheet = snapshot.sheets.find((item) => item.sheet === sheet.sheet);
+      const headerCells = new Map((snapshotSheet?.rows.find((row) => row.row === sheet.headerRow)?.cells || []).map((cell) => [cell.column, cell.text]));
+      return {
+        sheet: sheet.sheet,
+        headerRow: sheet.headerRow,
+        rowCount: snapshotSheet?.rowCount || 0,
+        reason: sheet.reason,
+        columns: sheet.columns.map((column) => {
+          const samples = (snapshotSheet?.columns.find((item) => item.column === column.column)?.samples || [])
+            .filter((sample) => !sheet.headerRow || sample.row !== sheet.headerRow)
+            .map((sample) => String(sample.text || "").slice(0, 80))
+            .filter(Boolean)
+            .slice(0, 3);
+          const header = sheet.headerRow ? (headerCells.get(column.column) || "") : "";
+          return {
+            column: column.column,
+            letter: column.letter,
+            label: column.label,
+            header,
+            // 表头为空但下面有内容的列：提示用户"这列没有表头，是按内容推断的"。
+            headerEmpty: Boolean(sheet.headerRow) && !header.trim(),
+            role: column.role,
+            confidence: column.confidence,
+            reason: column.reason,
+            samples
+          };
+        })
+      };
+    })
   };
 }
 
@@ -247,9 +321,9 @@ export async function prepareBatchDocument(input = {}, options = {}) {
   } else if (extension === ".docx") prepared = await prepareDocx(decodeBase64(input.base64), collectorMode);
   else if (extension === ".csv") {
     const buffer = input.text !== undefined ? Buffer.from(String(input.text), "utf8") : decodeBase64(input.base64);
-    prepared = await prepareCsv(buffer, collectorMode, options.analyzeSpreadsheet);
+    prepared = await prepareCsv(buffer, collectorMode, options.analyzeSpreadsheet, options.columnMapping || null);
   } else if (extension === ".xliff" || extension === ".mqxliff") prepared = prepareXliffDocument(decodeBase64(input.base64), filename);
-  else prepared = await prepareXlsx(decodeBase64(input.base64), collectorMode, options.analyzeSpreadsheet);
+  else prepared = await prepareXlsx(decodeBase64(input.base64), collectorMode, options.analyzeSpreadsheet, options.columnMapping || null);
   if (!prepared.segments.length) fail("没有找到可翻译的日语内容");
   return {
     filename,

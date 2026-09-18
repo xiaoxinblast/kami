@@ -106,7 +106,8 @@ export async function runServerBatch(batchId, {
         next: segment.context?.next || run.segments[position + 1]?.source || "",
         document: run.filename,
         segmentIndex: position + 1,
-        segmentCount: run.segments.length
+        segmentCount: run.segments.length,
+        entryKey: segment.entryKey || segment.locator?.entryKey || ""
       };
       const anchorCount = Math.max(0, Number(tmSettings.contextAnchorCount ?? 5));
       const boundary = contextBoundary(segment);
@@ -125,6 +126,7 @@ export async function runServerBatch(batchId, {
           batchId: run.batchId,
           segmentId: segment.id,
           entryId: segment.locator?.unitId || segment.locator?.entryId || segment.context?.entryId || "",
+          entryKey: segment.entryKey || segment.locator?.entryKey || "",
           sourceFile: run.filename,
           sourceRow: segment.locator?.row || segment.context?.row || null,
           previousSource: context.previous,

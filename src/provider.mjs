@@ -103,6 +103,7 @@ function formatNeighborContext(context = {}) {
   if (typeof context === "string") return context || "无";
   const lines = [];
   if (context.document) lines.push(`文档：${context.document}`);
+  if (context.entryKey) lines.push(`条目：${context.entryKey}（仅用于理解上下文，不得翻译进结果）`);
   if (context.sheet) lines.push(`工作表：${context.sheet}${context.row ? ` · 第 ${context.row} 行` : ""}${context.sourceColumn ? ` · 正文列：${context.sourceColumn}` : ""}`);
   if (context.segmentIndex && context.segmentCount) lines.push(`位置：第 ${context.segmentIndex} / ${context.segmentCount} 段`);
   if (context.previous) lines.push(`上文：${context.previous}`);
@@ -1152,6 +1153,8 @@ export async function analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysi
       content: `你是日语到简体中文的本地化项目 Excel 表格结构分析器。源语言固定为日语，目标语言是 ${locale}。你的任务只识别结构，不翻译、不改写任何单元格。
 
 请结合表头、列内样本、文字脚本、文本长度、行列分布和规则建议，为每张表识别表头行及每列角色。即使没有表头也必须根据数据分布推断，不能要求用户添加表头。
+
+columns 必须覆盖表里每一个有内容的列，包括表头单元格为空、或被合并表头盖住的列：这类列没有表头可依据，只能按它下面的数据判断角色，绝对不能漏掉不返回。
 
 列角色只能是：
 - source_text：真正需要翻译的日语正文、标题、按钮或文案。

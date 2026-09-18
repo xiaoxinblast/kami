@@ -470,6 +470,19 @@
       </form>
     </dialog>
     <dialog id="projectSettingsDialog" class="project-settings" aria-labelledby="projectSettingsTitle"></dialog>
+    <dialog id="batchColumnDialog">
+      <div class="dialog-card batch-column-card">
+        <div class="dialog-head"><div><span class="card-kicker">COLUMN MAPPING</span><h2>确认表格的列含义</h2></div><button class="icon-button" type="button" data-close="batchColumnDialog" aria-label="关闭">×</button></div>
+        <p class="panel-caption" id="batchColumnSummary">正在识别表格结构……</p>
+        <div class="batch-column-body" id="batchColumnBody"></div>
+        <p class="batch-column-hint" id="batchColumnHint">只有标记为「日文原文」的列会送去翻译；「已有译文」会作为参考、「条目 ID」用于把译文写回记忆库时的身份匹配。</p>
+        <div class="dialog-actions">
+          <button class="button ghost" type="button" id="batchColumnReset">恢复自动识别</button>
+          <button class="button ghost" type="button" data-close="batchColumnDialog">取消</button>
+          <button class="button primary" type="button" id="batchColumnConfirm" disabled>确认并继续</button>
+        </div>
+      </div>
+    </dialog>
     <dialog id="assetPreflightDialog">
       <div class="dialog-card asset-preflight-dialog-card">
         <div class="dialog-head"><div><span class="card-kicker">ASSET PREFLIGHT</span><h2>确认双语资产去向</h2></div><button class="icon-button" type="button" data-close="assetPreflightDialog" aria-label="关闭">×</button></div>

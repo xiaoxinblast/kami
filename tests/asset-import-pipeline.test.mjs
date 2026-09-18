@@ -149,3 +149,40 @@ test("人工 TM 导入支持后台任务：接口立刻返回任务号，页面�
   const wizard = await read("../public/project-wizard.js");
   assert.match(wizard, /已提交后台写入：\$\{tmResult\.accepted/u);
 });
+
+test("待译原文件上传：列映射弹窗 + 映射随解析请求下发", async () => {
+  const server = await read("../server.mjs");
+  assert.match(server, /url.pathname === "\/api\/batch\/columns"/u);
+  assert.match(server, /describeBatchColumns/u);
+  // 解析时把人工映射带进去
+  assert.match(server, /prepareBatchDocument\(body, \{ analyzeSpreadsheet, batch: project\?\.settings\?\.batch \|\| \{\}, columnMapping: body\.columnMapping \|\| null \}\)/u);
+  const document = await read("../src/batch-document.mjs");
+  assert.match(document, /analysis = applyColumnMapping\(analysis, columnMapping\);/u);
+  assert.match(document, /export async function describeBatchColumns/u);
+  const app = await read("../public/app.js");
+  assert.match(app, /if \(\/\\\.\(xlsx\|csv\)\$\/iu\.test\(file\.name\)\) \{/u);
+  assert.match(app, /const confirmed = await confirmBatchColumns\(file\);/u);
+  assert.match(app, /columnMapping: state\.batchColumnMapping \|\| undefined/u);
+  assert.match(app, /const accepted = await setBatchFile\(file\);/u);
+  const html = await read("../public/index.html");
+  assert.match(html, /id="batchColumnDialog"/u);
+  assert.match(html, /id="batchColumnConfirm"/u);
+});
+
+test("条目 ID 从待译段落一路带到提示词与译文记忆库", async () => {
+  const runner = await read("../src/batch-runner.mjs");
+  assert.match(runner, /entryKey: segment\.entryKey \|\| segment\.locator\?\.entryKey \|\| "",/u);
+  assert.match(runner, /entryKey: segment\.entryKey \|\| segment\.locator\?\.entryKey \|\| ""\s*\n\s*\};/u);
+  const server = await read("../server.mjs");
+  // 工作 TM / 人工采纳两条写库路径都带上条目身份
+  assert.match(server, /entryId: body\.entryId \|\| "", entryKey: body\.entryKey \|\| ""/u);
+  assert.match(server, /provenance: "batch-working-tm",[\s\S]{0,240}entryKey: body\.entryKey \|\| ""/u);
+  // 提示词里单独一行标注条目 ID
+  const provider = await read("../src/provider.mjs");
+  assert.match(provider, /if \(context\.entryKey\) lines\.push\(`条目：\$\{context\.entryKey\}（仅用于理解/u);
+  // CAT 匹配优先按条目 ID
+  const memory = await read("../src/translation-memory.mjs");
+  assert.match(memory, /entryKey && memory\?\.entryKey && String\(entryKey\) === String\(memory\.entryKey\)/u);
+  const app = await read("../public/app.js");
+  assert.match(app, /entryKey: segment\.entryKey \|\| segment\.locator\?\.entryKey \|\| "",/u);
+});

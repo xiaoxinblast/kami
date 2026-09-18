@@ -26,7 +26,7 @@ function normalizeNeighborContext(neighborContext) {
   };
 }
 
-export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], batchGroupEntries = [], factSchema = null, titleOverrides = null }) {
+export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], batchGroupEntries = [], factSchema = null, titleOverrides = null, entryId = "", entryKey = "" }) {
   // 字符串精确命中只能证明字面相同，不能证明当前句子使用的是术语义。
   // 仅“保留原文”属于可确定执行的硬约束；普通正式术语交给翻译器结合上下文判断。
   const required = matches.filter((item) => item.mode === "exact" && !item.scopeMismatch && (item.preserveOriginal ?? item.term?.preserveOriginal));
@@ -35,6 +35,9 @@ export function buildContextPack({ source, locale, classification, matches, doma
   return {
     sourceLanguage: "Japanese",
     targetLocale: locale,
+    // 当前段落的条目身份：用于提示词消歧，以及 CAT 匹配时判断"是不是同一条目"。
+    entryId: String(entryId || ""),
+    entryKey: String(entryKey || ""),
     targetLanguage: LOCALES[locale].language,
     domain,
     contentType: classification.contentType,

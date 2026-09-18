@@ -18,7 +18,7 @@ import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, ex
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
-import { exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
+import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
 import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories } from "./src/external-review.mjs";
@@ -632,6 +632,8 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
       queryEmbedding,
       contentTags: contextPack.contentTags || [],
       projectId,
+      entryId: contextPack.entryId || "",
+      entryKey: contextPack.entryKey || "",
       catMinFuzzy: projectSettings?.tm?.catMinFuzzy || 60,
       llmMinRelevance: projectSettings?.tm?.llmMinRelevance || 60
     });
@@ -2040,7 +2042,8 @@ async function apiHandler(req, res, url) {
       contentTags,
       qualityStatus: "human_approved", qaScore: 100, provenance: "human-accept",
       styleProfileId: body.styleProfileId || "", batchId: body.batchId || "", projectId, project: projectId, libraryId: masterTm?.id || "",
-      sourceFile: body.sourceFile || "", sourceRow: body.sourceRow || null, projectId
+      sourceFile: body.sourceFile || "", sourceRow: body.sourceRow || null, projectId,
+      entryId: body.entryId || "", entryKey: body.entryKey || ""
     });
     const demoted = await demoteMemories(locale, source, memory.id, { projectId });
     // 机器初稿只从轨迹取，不接受客户端提交：与终稿的差异是风格信号本身，
@@ -2932,13 +2935,20 @@ async function apiHandler(req, res, url) {
     });
     return json(res, 200, { run: await saveTrainingRun({ id: run.id, scope: learningScope(run), payload: advanced }) });
   }
+  if (req.method === "POST" && url.pathname === "/api/batch/columns") {
+    // 待译表格上传时的"列含义"弹窗：只分析结构（本地规则 + 可选 AI），不生成段落、不翻译。
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
+    const locale = assertActiveLocale(body.locale || "zh-CN");
+    const analyzeSpreadsheet = body.useAiStructure === false ? undefined : (snapshot, ruleAnalysis) => analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysis, locale);
+    return json(res, 200, await describeBatchColumns(body, { analyzeSpreadsheet }));
+  }
   if (req.method === "POST" && url.pathname === "/api/batch/prepare") {
     const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const locale = assertActiveLocale(body.locale || "zh-CN");
     const analyzeSpreadsheet = body.useAiStructure === false ? undefined : (snapshot, ruleAnalysis) => analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysis, locale);
     const project = body.projectId ? await getProject(String(body.projectId)) : null;
     if (body.projectId && !project) return json(res, 404, { error: "项目不存在" });
-    const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet, batch: project?.settings?.batch || {} });
+    const prepared = await prepareBatchDocument(body, { analyzeSpreadsheet, batch: project?.settings?.batch || {}, columnMapping: body.columnMapping || null });
     const { batchId } = await saveBatchRun({ ...prepared, projectId: body.projectId || "", locale, contentType: body.contentType || "general", domain: concreteDomain(body.domain, { contentType: body.contentType || "general" }), segments: prepared.segments, subBatches: prepared.subBatches, runState: "ready" });
     return json(res, 200, { ...prepared, batchId });
   }
@@ -3993,6 +4003,9 @@ async function apiHandler(req, res, url) {
       contentType: classification.contentType,
       domain,
       projectId,
+      // 条目身份优先用 memoQ 的稳定 ID：命中同一条目算 101/102 的 CAT 匹配。
+      entryId: body.entryId || "",
+      entryKey: body.entryKey || "",
       campaign: String(body.campaign || ""),
       retrievalPurpose: projectId ? MEMORY_PURPOSES.WORKING_CONSISTENCY : undefined,
       catMinFuzzy: projectSettings?.tm?.catMinFuzzy || 60,
@@ -4030,7 +4043,10 @@ async function apiHandler(req, res, url) {
       batchVerse,
       batchReferences: body.batchReferences || [],
       batchGroupEntries: body.batchGroupEntries || [],
-      factSchema
+      factSchema,
+      // 当前段落的条目身份（memoQ x-mmq-context / 表格里的条目 ID 列）。
+      entryId: body.entryId || "",
+      entryKey: body.entryKey || ""
     });
     const provider = getProviderConfig();
     const risk = assessTranslationRisk({
@@ -4156,6 +4172,7 @@ async function apiHandler(req, res, url) {
               provenance: "batch-working-tm",
               batchId: body.batchId || "",
               entryId: body.entryId || "",
+              entryKey: body.entryKey || "",
               previousSource: body.previousSource || "",
               nextSource: body.nextSource || "",
               sourceFile: body.sourceFile || body.neighborContext?.document || "",

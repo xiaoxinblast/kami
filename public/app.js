@@ -162,7 +162,8 @@ async function createProjectFromWizard({ name, description }) {
 }
 
 async function importWizardSource(file) {
-  await setBatchFile(file);
+  const accepted = await setBatchFile(file);
+  if (accepted === false) throw new Error("已取消列含义确认，请重新选择待译文件");
   if (!state.batchPreview) throw new Error("待译文件解析失败，请检查文件内容");
   return { filename: file.name };
 }
@@ -1148,6 +1149,7 @@ async function setBatchFile(file) {
   state.batchPreview = null;
   state.batchClassification = null;
   state.batchStyleProfile = null;
+  state.batchColumnMapping = null;
   updateBatchSegmentationOptions(file.name);
   $("#batchPasteText").value = "";
   $("#batchFilePrompt").textContent = file.name;
@@ -1157,7 +1159,148 @@ async function setBatchFile(file) {
   $("#spreadsheetAnalysis").hidden = true;
   renderBatchSegments();
   refreshActions();
+  // 表格文件先让用户确认列含义：哪一列是日文原文、哪一列是已有译文/条目 ID、首行是不是表头。
+  if (/\.(xlsx|csv)$/iu.test(file.name)) {
+    const confirmed = await confirmBatchColumns(file);
+    if (!confirmed) {
+      resetBatchFileSelection();
+      return false;
+    }
+  }
   await prepareBatch();
+  return true;
+}
+
+const BATCH_COLUMN_ROLES = [
+  { value: "source_text", label: "日文原文（要翻译）" },
+  { value: "existing_translation", label: "已有译文（参考）" },
+  { value: "entry_id", label: "条目 ID" },
+  { value: "context", label: "上下文 / 说明" },
+  { value: "constraint", label: "约束（字数、语言…）" },
+  { value: "ignore", label: "忽略此列" }
+];
+
+/**
+ * 待译表格上传后的"列含义"确认弹窗。
+ *
+ * 只对 .xlsx / .csv 弹：先让服务端给出每列的建议角色与样例，用户逐列调整、并决定首行是不是表头，
+ * 确认后把映射交给 /api/batch/prepare。返回 true 表示用户确认（可以继续解析），false 表示取消。
+ */
+async function confirmBatchColumns(file) {
+  const dialog = $("#batchColumnDialog");
+  if (!dialog) return true;
+  let structure = null;
+  try {
+    structure = await api("/api/batch/columns", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
+      filename: file.name,
+      base64: await fileToBase64(file),
+      locale: state.workbenchLocale,
+      useAiStructure: true
+    }) });
+  } catch (error) {
+    // 结构识别失败不该拦住上传：退回原来的全自动解析，并把原因告诉用户。
+    toast(`列结构识别失败，将按自动识别导入：${error.message}`);
+    return true;
+  }
+  state.batchColumns = structure;
+  state.batchColumnMapping = null;
+
+  const renderColumns = () => {
+    const sheets = structure.sheets || [];
+    $("#batchColumnSummary").textContent = `已识别 ${sheets.length} 个工作表、${sheets.reduce((sum, sheet) => sum + (sheet.columns?.length || 0), 0)} 列（${structure.structureSource === "model" ? "AI + 规则" : "本地规则"}）。逐列确认后再开始分段，只有「日文原文」列会被送去翻译。`;
+    $("#batchColumnBody").innerHTML = sheets.map((sheet, sheetIndex) => `
+      <section class="batch-column-sheet" data-sheet="${escapeHtml(sheet.sheet)}">
+        <div class="batch-column-sheet-head">
+          <div><strong>${escapeHtml(sheet.sheet)}</strong><small>${sheet.rowCount} 行 · ${escapeHtml(sheet.reason || "")}</small></div>
+          <label class="batch-column-header-toggle"><input type="checkbox" data-sheet-header="${sheetIndex}" ${sheet.headerRow ? "checked" : ""} />首行是表头</label>
+        </div>
+        ${(sheet.columns || []).map((column) => `
+          <div class="batch-column-row">
+            <div class="batch-column-key"><b>${escapeHtml(column.letter)} 列</b>${escapeHtml(column.header || "无表头")}</div>
+            <div class="batch-column-samples">${column.headerEmpty ? '<em class="batch-column-tag">表头为空 · 按下面内容识别</em>' : ""}${(column.samples?.length ? column.samples : ["（空）"]).map((sample) => `<em class="${sample === "（空）" ? "is-empty" : ""}">${escapeHtml(sample)}</em>`).join("")}<em class="is-empty">识别依据：${escapeHtml(column.reason || "")}</em></div>
+            <select data-sheet-index="${sheetIndex}" data-column="${column.column}">${BATCH_COLUMN_ROLES.map((role) => `<option value="${role.value}"${column.role === role.value ? " selected" : ""}>${escapeHtml(role.label)}</option>`).join("")}</select>
+          </div>`).join("")}
+      </section>`).join("") || '<div class="empty-list">这个文件没有可识别的列</div>';
+    updateBatchColumnState();
+  };
+
+  const collectMapping = () => ({
+    sheets: (structure.sheets || []).map((sheet, sheetIndex) => ({
+      sheet: sheet.sheet,
+      headerRow: $(`[data-sheet-header="${sheetIndex}"]`)?.checked ? (sheet.headerRow || 1) : null,
+      columns: $$(`select[data-sheet-index="${sheetIndex}"]`).map((select) => ({ column: Number(select.dataset.column), role: select.value }))
+    }))
+  });
+
+  const updateBatchColumnState = () => {
+    const mapping = collectMapping();
+    const sourceCount = mapping.sheets.reduce((sum, sheet) => sum + sheet.columns.filter((column) => column.role === "source_text").length, 0);
+    $("#batchColumnConfirm").disabled = sourceCount === 0;
+    $("#batchColumnHint").classList.toggle("is-error", sourceCount === 0);
+    $("#batchColumnHint").textContent = sourceCount
+      ? `将翻译 ${sourceCount} 列日文原文；「已有译文」作为参考、「条目 ID」用于把译文写回记忆库时的身份匹配。`
+      : "至少要指定一列「日文原文」，否则没有可翻译的内容。";
+    $$("#batchColumnBody select").forEach((select) => { select.dataset.role = select.value; });
+  };
+
+  renderColumns();
+  const result = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      dialog.removeEventListener("click", onClick);
+      dialog.removeEventListener("change", onChange);
+      dialog.removeEventListener("cancel", onCancel);
+      dialog.removeEventListener("close", onClose);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onClick = (event) => {
+      if (event.target.closest("#batchColumnConfirm")) return finish(collectMapping());
+      if (event.target.closest("#batchColumnReset")) {
+        state.batchColumns = structure;
+        renderColumns();
+      }
+    };
+    const onChange = (event) => {
+      const target = event.target;
+      if (target.matches("[data-sheet-header]")) {
+        const index = Number(target.dataset.sheetHeader);
+        structure.sheets[index].headerRow = target.checked ? (structure.sheets[index].headerRow || 1) : null;
+        renderColumns();
+        return;
+      }
+      updateBatchColumnState();
+    };
+    const onCancel = (event) => { event.preventDefault(); finish(null); };
+    // × / 取消 走通用关闭按钮，关闭事件兜底成"未确认"。
+    const onClose = () => finish(null);
+    dialog.addEventListener("click", onClick);
+    dialog.addEventListener("change", onChange);
+    dialog.addEventListener("cancel", onCancel);
+    dialog.addEventListener("close", onClose);
+    dialog.showModal();
+  });
+  if (!result) return false;
+  state.batchColumnMapping = result;
+  return true;
+}
+
+/** 取消列确认时把上传状态清干净，避免界面停在"已选择文件"却没有解析结果。 */
+function resetBatchFileSelection() {
+  state.batchFile = null;
+  state.batchBase64 = "";
+  state.batchPreview = null;
+  state.batchColumnMapping = null;
+  $("#batchFile").value = "";
+  $("#batchFilePrompt").textContent = "拖入或点击选择文件";
+  $("#batchFileMeta").textContent = "拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 20MB";
+  $("#batchDropZone").classList.remove("has-file");
+  $("#batchSourceMeta").textContent = "等待文件";
+  renderBatchSegments();
+  refreshActions();
 }
 
 async function resetBatch() {
@@ -1437,7 +1580,8 @@ async function prepareBatch() {
       text: state.batchFile ? undefined : pasted,
       segmentationMode: $("#batchSegmentationMode").value,
       locale: state.workbenchLocale,
-      useAiStructure: true
+      useAiStructure: true,
+      columnMapping: state.batchColumnMapping || undefined
     }) });
     prepared.segments.forEach((segment) => Object.assign(segment, { selected: true, status: "pending", translation: "", result: null, error: "", accepted: false }));
     state.batchPreview = prepared;
@@ -2226,6 +2370,9 @@ async function acceptSegment(segmentId) {
       termSuggestions: segment.result?.termSuggestions || [],
       batchId: state.batchPreview.batchId || "",
       sourceFile: state.batchPreview.filename || "",
+      // 条目身份：采纳进主 TM 时带上，后续同一条目的译例才能按 ID 命中。
+      entryId: segment.locator?.unitId || segment.locator?.entryId || "",
+      entryKey: segment.entryKey || segment.locator?.entryKey || "",
       trajectoryId: segment.result?.trajectoryId || segment.result?.trajectory_id || ""
     }) });
     segment.accepted = true;
@@ -2256,6 +2403,8 @@ async function acceptAllSegments() {
         termSuggestions: segment.result?.termSuggestions || [],
         batchId: state.batchPreview.batchId || "",
         sourceFile: state.batchPreview.filename || "",
+        entryId: segment.locator?.unitId || segment.locator?.entryId || "",
+        entryKey: segment.entryKey || segment.locator?.entryKey || "",
         trajectoryId: segment.result?.trajectoryId || segment.result?.trajectory_id || ""
       }) });
       segment.accepted = true;
@@ -4680,4 +4829,5 @@ async function initialize() {
 }
 
 initialize();
+
 

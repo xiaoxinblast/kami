@@ -153,6 +153,7 @@ export function rankTranslationMemories(source, memories = [], {
   project = "",
   projectId = "",
   entryId = "",
+  entryKey = "",
   previousSource = "",
   nextSource = "",
   channel = "",
@@ -185,7 +186,7 @@ export function rankTranslationMemories(source, memories = [], {
   const ranked = governed.references
     .map((memory) => {
       const { edit, overlap, exact } = lexicalScore(normalized, memory);
-      const cat = classifyCatMatch(source, memory, { entryId, previousSource, nextSource });
+      const cat = classifyCatMatch(source, memory, { entryId, entryKey, previousSource, nextSource });
       // 可信度决定一条译例能不能充当规范，相关度决定它是否属于当前句。
       // 两者不能相加：旧实现把 human_approved 的 0.18 在 lexical 和 blended
       // 中各加一次，导致完全无关的人工译例天然高于 0.28 检索门槛。
@@ -247,11 +248,13 @@ function sameContextValue(left, right) {
   return Boolean(String(left || "").trim() && String(right || "").trim() && catComparable(left) === catComparable(right));
 }
 
-export function classifyCatMatch(source, memory, { entryId = "", previousSource = "", nextSource = "" } = {}) {
+export function classifyCatMatch(source, memory, { entryId = "", entryKey = "", previousSource = "", nextSource = "" } = {}) {
   const exact = catComparable(source) === catComparable(memory?.source)
     && nonBreakTagSignature(source) === nonBreakTagSignature(memory?.source);
   if (!exact) return { rate: null, kind: "fuzzy", idMatch: false, contextMatch: false };
-  const idMatch = Boolean(entryId && memory?.entryId && String(entryId) === String(memory.entryId));
+  // 条目身份优先用 memoQ 的稳定 ID（entryKey）：unitId 只是文件内序号，跨文件不可比。
+  const idMatch = Boolean((entryKey && memory?.entryKey && String(entryKey) === String(memory.entryKey))
+    || (entryId && memory?.entryId && String(entryId) === String(memory.entryId)));
   const previousMatch = sameContextValue(previousSource, memory?.previousSource);
   const nextMatch = sameContextValue(nextSource, memory?.nextSource);
   const contextMatch = Boolean(previousSource || nextSource) && Boolean(memory?.previousSource || memory?.nextSource)

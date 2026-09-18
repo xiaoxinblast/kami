@@ -323,6 +323,7 @@ function parseXliffXml(xml, format) {
     // memoQ 把"这一条的稳定 ID"写在 x-mmq-context 里（如 CARD2_QST_13_0300_0500_00_vns），
     // trans-unit 的 id 只是文件内序号（每个文件都从 1 开始），不能当条目身份用。
     const memoQContext = contextNodes.find((item) => item.type === "x-mmq-context")?.value || "";
+    const otherContexts = contextNodes.filter((item) => item.type !== "x-mmq-context").map((item) => item.value).filter(Boolean);
     const notes = descendants(node).filter((child) => child.local === "note").map((child) => textContent(xml, child)).filter(Boolean);
     const sourceMixed = mixedText(xml, source);
     const targetMixed = target ? mixedText(xml, target) : { text: "" };
@@ -342,6 +343,7 @@ function parseXliffXml(xml, format) {
       locked,
       context: contexts.join(" | "),
       memoQContext,
+      otherContexts,
       note: notes.join(" | ")
     };
   });
@@ -401,8 +403,11 @@ export function prepareXliffDocument(buffer, filename) {
       index: segments.length + 1,
       source: unit.sourceText,
       locator: { type: "xliff-unit", unitIndex: unit.index, unitId: unit.id },
+      // 条目身份：memoQ 写在 x-mmq-context 里的稳定 ID，用于提示词消歧与写入 TM 时按 ID 匹配。
+      entryKey: unit.memoQContext || "",
       context: {
-        note: [unit.context, unit.note].filter(Boolean).join(" | "),
+        // 注释与条目 ID 拆开：ID 单独成字段后不再重复塞进 note（其它 context 保持原有顺序）。
+        note: [...(unit.otherContexts || []), unit.note].filter(Boolean).join(" | "),
         previous: parsed.units[unit.index - 2]?.sourceText || "",
         next: parsed.units[unit.index]?.sourceText || ""
       },

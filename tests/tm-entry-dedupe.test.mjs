@@ -100,6 +100,32 @@ test("发给模型的参考译例带上条目 ID 与文件名", () => {
   assert.match(serialized, /Batch16\.xlsx_zho-CN\.mqxliff/u);
 });
 
+test("当前段落的条目 ID 进入上下文包，并会随文档上下文发给模型", () => {
+  const pack = buildContextPack({
+    source: "ヴァネッサが来た。",
+    locale: "ja-JP",
+    classification: classifyContent("ヴァネッサが来た。", "dialogue"),
+    matches: [],
+    domain: "game",
+    entryId: "7",
+    entryKey: ENTRY_KEY,
+    neighborContext: { document: "Batch16.xlsx_zho-CN.mqxliff", entryKey: ENTRY_KEY }
+  });
+  assert.equal(pack.entryKey, ENTRY_KEY);
+  assert.equal(pack.entryId, "7");
+});
+
+test("CAT 匹配优先用条目 ID：同 ID 才算上下文匹配", async () => {
+  const { classifyCatMatch } = await import("../src/translation-memory.mjs");
+  const memory = { source: "ヴァネッサ", entryId: "2", entryKey: ENTRY_KEY, previousSource: "前文", nextSource: "后文" };
+  const sameEntry = classifyCatMatch("ヴァネッサ", memory, { entryKey: ENTRY_KEY, previousSource: "前文", nextSource: "后文" });
+  assert.equal(sameEntry.rate, 102);
+  assert.equal(sameEntry.idMatch, true);
+  const otherEntry = classifyCatMatch("ヴァネッサ", memory, { entryKey: "另一个条目", previousSource: "别的上文", nextSource: "别的下文" });
+  assert.equal(otherEntry.rate, 100, "不同条目只算普通完全匹配");
+  assert.equal(otherEntry.idMatch, false);
+});
+
 test("定位顺序：先按条目 ID，再退回原文+译文", () => {
   assert.deepEqual(memoryMatchAttempts({ source: "s", target: "t", entryKey: "k" }), [
     { kind: "entry", entryKey: "k", source: "s" },
