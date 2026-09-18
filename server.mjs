@@ -1,7 +1,7 @@
 import http from "node:http";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACTIVE_LOCALES, CONTENT_TAGS, CONTENT_TYPES, LOCALES, assertActiveLocale, assertLocale } from "./src/config.mjs";
@@ -18,10 +18,10 @@ import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, ex
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
-import { countMemories, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
+import { countMemories, deleteBatchRun, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
-import { readBatchOriginal, saveBatchOriginal } from "./src/batch-originals.mjs";
+import { deleteBatchOriginal, readBatchOriginal, saveBatchOriginal } from "./src/batch-originals.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
 import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories, matchReviewPairsToSegments } from "./src/external-review.mjs";
@@ -1853,7 +1853,17 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/assets") {
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale);
-    return json(res, 201, await saveAsset(locale, { ...(body.term || {}), projectId: body.projectId || body.term?.projectId || "" }));
+    const projectId = String(body.projectId || body.term?.projectId || "").trim();
+    const term = { ...(body.term || {}), projectId };
+    // 术语列表与模型参考只认"项目里启用的术语库"的条目：单条新增过去不写
+    // library_id，保存后既不出现在列表里、也不参与翻译。这里补上归属。
+    if (projectId && !term.libraryId) {
+      const libraries = await getResourceLibraries(projectId, { kind: "term_base" });
+      const library = libraries.find((item) => item.enabled) || libraries[0];
+      if (!library) throw Object.assign(new Error("这个项目还没有术语库，无法加入这条术语；请先在项目设置里新建术语库"), { statusCode: 400 });
+      term.libraryId = library.id;
+    }
+    return json(res, 201, await saveAsset(locale, term));
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/assets/")) {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
@@ -3230,6 +3240,36 @@ async function apiHandler(req, res, url) {
     const saved = await saveBatchRun({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") });
     return json(res, 200, saved);
   }
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/tasks/")) {
+    // 删除一条翻译批次：正在跑就先中断并等它停下，再删记录；关联的后台任务行、
+    // 原文件存档与后台导出文件一并清理，避免留下孤儿。
+    const batchId = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
+    const run = await getBatchRun(batchId);
+    if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
+    const stopFirst = String(url.searchParams.get("stop") || "") !== "0";
+    const worker = batchWorkers.get(batchId);
+    let stopped = false;
+    if (worker && !stopFirst) {
+      return json(res, 409, { error: "这条批次还在运行：请选择「停止并删除」或先中断它" });
+    }
+    if (worker) {
+      worker.cancelRequested = true;
+      stopped = true;
+      const deadline = Date.now() + 15_000;
+      while (batchWorkers.has(batchId) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    const related = (await listBackgroundTasks({ limit: 500 })).filter((task) => task.payload?.batchId === batchId);
+    for (const task of related) {
+      if (task.type === "batch_export") await rm(join(DATA_ROOT, "exports", `${task.id}.xlsx`), { force: true }).catch(() => {});
+      await deleteBackgroundTask(task.id).catch(() => {});
+    }
+    if (run.runnerOptions?.originalFile) {
+      await deleteBatchOriginal({ dataRoot: DATA_ROOT, relativePath: run.runnerOptions.originalFile }).catch(() => {});
+    }
+    const deleted = await deleteBatchRun(batchId);
+    logInfo("已删除翻译批次", { batchId, filename: run.filename, stopped, relatedTasks: related.length });
+    return json(res, deleted ? 200 : 404, { deleted, stopped, relatedTasks: related.length });
+  }
   if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/import-review$/u.test(url.pathname)) {
     // 审校回填：把在 memoQ 里改完的同一批文件导回来，覆盖译文 + 更新主 TM 与学习轨迹。
     const batchId = decodeURIComponent(url.pathname.split("/")[4]);
@@ -3806,9 +3846,13 @@ async function evaluateQaFile(body = {}) {
     deepCheck: body.deepCheck === true
   });
   logInfo("文件质检完成", { filename, segments: evaluated.segments.length, deepCheck: body.deepCheck === true, issues: evaluated.issues.length });
-  return {
+  const result = {
     sourceKind: "file",
     filename,
+    projectId,
+    locale,
+    contentType,
+    domain,
     segmentCount: evaluated.segments.length,
     segments: evaluated.segments,
     scores: evaluated.scores,
@@ -3817,6 +3861,29 @@ async function evaluateQaFile(body = {}) {
     deepCheck: body.deepCheck === true,
     fallbackReason: evaluated.failureReasons.join("；")
   };
+  // 存进任务中心：这样文件质检也能回放（不重新调模型）与删除。
+  try {
+    const task = await saveQaTask({
+      projectId,
+      locale,
+      contentType,
+      domain,
+      title: `${filename} 质检`,
+      sourceText: pairs.map((pair) => pair.source).join("\n").slice(0, 20_000),
+      translationText: pairs.map((pair) => pair.target).join("\n").slice(0, 20_000),
+      segmentCounts: { source: pairs.length, translation: pairs.length },
+      overallScore: result.scores.overall,
+      dimensionScores: result.scores.dimensions,
+      summary: result.summary,
+      alignmentNote: result.alignmentNote,
+      model: getProviderConfig().model,
+      report: result
+    });
+    result.qaTaskId = task.id;
+  } catch (error) {
+    console.error(`[Kami] 质检报告入库失败：${error.message}`);
+  }
+  return result;
 }
 
 /** 质检：直接回放某条批次里翻译时已经算好的逐段结果（不重复调模型）。 */

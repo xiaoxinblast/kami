@@ -1165,6 +1165,17 @@ export async function getDirectusBatchRun(batchId) {
   }
 }
 
+/** 删除一条批次运行记录（任务中心"完整删除"用）。 */
+export async function deleteDirectusBatchRun(batchId) {
+  try {
+    await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}`, { method: "DELETE" });
+    return true;
+  } catch (error) {
+    if (isMissingItem(error)) return false;
+    throw error;
+  }
+}
+
 function summarizeBatchRun(item) {
   const fallbackMetrics = item.segments ? batchMetrics(arrayValue(item.segments), item.run_state || "") : null;
   const totalSegments = item.total_segments == null ? fallbackMetrics?.totalSegments || 0 : Number(item.total_segments);

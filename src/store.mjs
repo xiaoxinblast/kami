@@ -53,6 +53,7 @@ import {
   saveDirectusImportPreview,
   getDirectusImportPreview,
   persistDirectusImportCleaning,
+  deleteDirectusBatchRun,
   saveDirectusStyleEvidence,
   saveDirectusStyleProfileEvaluation,
   updateDirectusStyleProfileRules,
@@ -731,6 +732,16 @@ async function saveJsonBatchRun(input) {
 
 async function getJsonBatchRun(batchId) {
   return readJson(join(ROOT, "batches", `${String(batchId)}.json`), null);
+}
+
+async function deleteJsonBatchRun(batchId) {
+  try {
+    await rm(join(ROOT, "batches", `${String(batchId)}.json`));
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function listJsonBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
@@ -1633,6 +1644,10 @@ export async function saveBatchRun(input) {
 
 export async function getBatchRun(batchId) {
   return usesDirectus() ? getDirectusBatchRun(batchId) : getJsonBatchRun(batchId);
+}
+
+export async function deleteBatchRun(batchId) {
+  return usesDirectus() ? deleteDirectusBatchRun(batchId) : deleteJsonBatchRun(batchId);
 }
 
 export async function listBatchRuns(options) {

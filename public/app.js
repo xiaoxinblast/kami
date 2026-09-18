@@ -1737,6 +1737,27 @@ function jumpToNextBatchIssue() {
   setTimeout(() => row.classList.remove("is-highlighted"), 2_500);
 }
 
+/**
+ * 跳过说明：XLIFF 里被跳过的句段（锁定 / 已有译文）不参与翻译，但要讲清楚，
+ * 否则用户会以为"段数不对/漏翻了"——导出时这些句段会原样保留。
+ */
+function batchSkipSummary(structure) {
+  const xliff = structure?.xliff || {};
+  const locked = Number(xliff.skippedLocked) || 0;
+  const existing = Number(xliff.skippedExisting) || 0;
+  const skipped = locked + existing;
+  if (!skipped) return "";
+  const reasons = [locked ? `锁定 ${locked}` : "", existing ? `已有译文 ${existing}` : ""].filter(Boolean).join("、");
+  return ` · 跳过 ${skipped}（${reasons}）`;
+}
+
+/** 分段队列左上角那句"N 字 · M 段 / M 段 · 历史任务"统一带上跳过说明。 */
+function batchSourceMetaText({ segments, characters, suffix }) {
+  const count = Number(segments) || 0;
+  const prefix = characters ? `${characters} 字 · ` : "";
+  return `${prefix}${count} 段${batchSkipSummary(state.batchPreview?.structure)}${suffix ? ` · ${suffix}` : ""}`;
+}
+
 function renderBatchSegments() {
   const container = $("#batchSegments");
   const segments = state.batchPreview?.segments || [];
@@ -1921,7 +1942,10 @@ async function prepareBatch() {
     state.batchStyleProfile = null;
     localStorage.setItem("kami-batch-id", prepared.batchId || "");
     await saveBatchProgress();
-    $("#batchSourceMeta").textContent = `${prepared.statistics.characters} 字 · ${prepared.statistics.segments} 段`;
+    $("#batchSourceMeta").textContent = batchSourceMetaText({
+      segments: prepared.statistics.segments,
+      characters: prepared.statistics.characters
+    });
     renderSpreadsheetAnalysis(prepared.spreadsheetAnalysis);
     if (!state.batchFile) {
       $("#batchFilePrompt").textContent = "已载入粘贴长文";
@@ -2233,6 +2257,7 @@ function renderTasks() {
     else if (action === "continue-task") continueBatchTask(id, button);
     else if (action === "import-review") importReviewTask(id, button);
     else if (action === "jump-qa") jumpToTaskQa(id, button);
+    else if (action === "delete-task") deleteTaskRow(id, button);
     else if (action === "cancel-task") cancelBatchTask(id, button);
     else if (action === "cancel-background") cancelBackgroundTaskRow(id, button);
     else if (action === "delete-background") deleteBackgroundTaskRow(id, button);
@@ -2271,6 +2296,38 @@ function renderBackgroundTaskRow(task) {
     <div class="task-qa"><strong title="${escapeHtml(payloadText || "")}">${payloadText || (canResumeImport ? `${task.payload.candidateCount || 0} 条候选` : "—")}</strong><small>${task.status === "in_progress" ? "后台执行中" : canResumeImport ? "识别完成，等待人工确认" : formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-actions">${canCancel ? '<button class="button ghost small" data-action="cancel-background">中断</button>' : ""}${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${canContinueImport ? `<button class="button secondary small" data-action="continue-import">继续导入</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
   </article>`;
+}
+
+/** 删除一条翻译批次：在跑的可以先中断再删（服务端会清理关联任务、原文件存档与导出文件）。 */
+async function deleteTaskRow(batchId, button) {
+  const task = findBatchTask(batchId);
+  if (!task) return toast("找不到这条批次任务");
+  const running = ["queued", "running"].includes(task.runState);
+  const choice = await confirmTaskDelete({
+    title: `删除「${task.filename}」`,
+    summary: running
+      ? "这条批次正在后台翻译。你想怎么处理？"
+      : `删除后这条批次的段落与进度都会消失（已采纳进记忆库的译文不受影响）。共 ${task.totalSegments} 段。`,
+    running,
+    stopHint: "先中断翻译（当前段跑完就停），再删除批次记录",
+    recordHint: running ? "翻译会继续跑完，但任务中心不再显示这条批次" : "删除批次记录"
+  });
+  if (!choice) return;
+  button.disabled = true;
+  button.textContent = "删除中…";
+  try {
+    const result = await api(`/api/tasks/${encodeURIComponent(batchId)}?stop=${choice === "stop" ? "1" : "0"}`, { method: "DELETE", body: JSON.stringify(projectPayload()) });
+    if (localStorage.getItem("kami-batch-id") === batchId) {
+      localStorage.removeItem("kami-batch-id");
+      if (state.batchPreview?.batchId === batchId) resetBatchFileSelection?.();
+    }
+    toast(result.stopped ? "已停止并删除该批次" : "已删除该批次");
+    await loadTasks();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "删除";
+    toast(error.message);
+  }
 }
 
 /** 任务中心里的批次操作：暂停 / 继续 / 中断，都走已有的批次接口。 */
@@ -2456,8 +2513,35 @@ function downloadBackgroundExport(id, button) {
   window.location.href = `/api/export-tasks/${encodeURIComponent(id)}/download`;
 }
 
+/**
+ * 删除任务：进行中的任务要先问清楚是"停止并删除"还是"只删记录"，
+ * 否则删了列表项后台还在跑，用户以为任务已经没了。
+ */
+async function confirmTaskDelete({ title, summary, running, stopHint, recordHint }) {
+  const options = [];
+  if (running) options.push({ id: "stop", label: "停止并删除", hint: stopHint || "先中断任务，等它真正停下再删除记录" });
+  options.push({ id: "record", label: running ? "仅删除记录" : "删除", hint: recordHint || (running ? "后台会继续跑完，但列表里不再显示" : "删除这条记录，已完成的结果一并清掉") });
+  return openChoiceDialog({ kicker: "DELETE TASK", title, summary, options });
+}
+
 async function deleteBackgroundTaskRow(id, button) {
-  if (!confirm("确认删除这条后台任务记录？进行中的任务会在后台继续执行但不再展示。")) return;
+  const task = (state.tasks || []).find((item) => item.id === id);
+  const running = task?.status === "in_progress";
+  const choice = await confirmTaskDelete({
+    title: `删除「${task?.title || "后台任务"}」`,
+    summary: running
+      ? "这条任务还在后台运行。你想怎么处理？"
+      : "确认删除这条任务记录？（导入类任务已写入的数据不会被删除）",
+    running: Boolean(running),
+    stopHint: "先请求中断（跑批循环在下一处分块停下），再删除记录",
+    recordHint: running ? "后台会继续跑完，但列表里不再显示" : "只删记录"
+  });
+  if (!choice) return;
+  if (choice === "stop") {
+    await api(`/api/background-tasks/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify(projectPayload()) }).catch(() => {});
+    // 给跑批循环一点时间在分块边界停下，避免刚删完又被进度写回来。
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
   button.disabled = true;
   button.textContent = "删除中…";
   try {
@@ -2525,7 +2609,7 @@ function renderBatchTaskRow(task) {
     <div class="task-qa">${task.qaPending
       ? `<button class="qa-jump" type="button" data-action="jump-qa" title="打开这条批次并跳到第一条待处理"><strong>${task.qaPending} 条待处理</strong><small>点击定位 →</small></button>`
       : "<strong>QA 已清</strong>"}${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
-    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">导出</button></div>
+    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">导出</button><button class="button ghost small" data-action="delete-task">删除</button></div>
   </article>`;
 }
 
@@ -2544,6 +2628,13 @@ async function openQaTask(id) {
   try {
     const payload = await api(`/api/qa-tasks/${encodeURIComponent(id)}`);
     const { task, report } = payload;
+    // 新版质检（文件/批次来源）的报告是新结构：直接回放到统一段列表，不重新调模型。
+    if (report?.sourceKind) {
+      switchView("autoqa");
+      applyQaResult(report);
+      toast("已回放这次质检报告（未重新调用模型）");
+      return;
+    }
     $("#autoQaSource").value = task.sourceText || "";
     $("#autoQaTarget").value = task.translationText || "";
     $("#autoQaSourceCount").textContent = `${[...(task.sourceText || "")].length} 字`;
@@ -2746,7 +2837,7 @@ async function exportTaskRow(batchId, button) {
   try {
     const run = await api(`/api/batch/run/${encodeURIComponent(batchId)}?projectId=${encodeURIComponent(state.activeProjectId || "")}`);
     const hasOriginal = Boolean(run.runnerOptions?.originalFile);
-    const choice = await openExportOptionsDialog({
+    const choice = await openChoiceDialog({ kicker: "EXPORT OPTIONS",
       title: "导出方式",
       summary: `${run.filename} · ${run.format?.toUpperCase?.() || ""}${hasOriginal ? " · 原文件已随批次存档" : " · 没有原文件存档"}${batchWriteBackLabelFor(run)}`,
       options: [
@@ -2854,7 +2945,7 @@ function applyStoredBatchRun(run) {
   $("#contentType").value = run.contentType || "auto";
   localStorage.setItem("kami-batch-id", run.batchId);
   renderLocaleStrip($("#workbenchLocales"), state.workbenchLocale, updateWorkbenchLocale);
-  $("#batchSourceMeta").textContent = `${run.segments.length} 段 · 历史任务`;
+  $("#batchSourceMeta").textContent = batchSourceMetaText({ segments: run.segments.length, suffix: "历史任务" });
   $("#batchFilePrompt").textContent = run.filename || "已恢复历史任务";
   $("#batchFileMeta").textContent = "任务内容已从后台恢复，可继续 QA、编辑或导出 Excel";
   $("#batchDropZone").classList.add("has-file");
@@ -2897,11 +2988,12 @@ function invalidateBatchTranslations(message) {
 }
 
 /**
- * 导出方式选择弹窗：写回原文件 / 仅译文 / 任务 Excel。
- * 以前缺原文件时会静默导成自定义"任务 Excel"，用户以为导出坏了——现在必须自己选。
+ * 通用"选一个"弹窗：导出方式（写回原文件 / 仅译文 / 任务 Excel）、删除确认都用它。
+ * 返回所选 option id，取消关闭返回空字符串。
  */
-function openExportOptionsDialog({ title, summary, options }) {
+function openChoiceDialog({ kicker = "CHOOSE", title, summary, options }) {
   const dialog = $("#exportOptionsDialog");
+  $("#exportOptionsKicker").textContent = kicker;
   $("#exportOptionsTitle").textContent = title;
   $("#exportOptionsSummary").textContent = summary;
   $("#exportOptionsBody").innerHTML = options
@@ -2971,7 +3063,7 @@ async function exportBatch() {
   let exportFormat = format;
   // 先确认导出方式：写回原文件 / 仅译文 / 任务 Excel。缺原文件时不再静默换格式。
   if (needsSource && !hasSource) {
-    const choice = await openExportOptionsDialog({
+    const choice = await openChoiceDialog({ kicker: "EXPORT OPTIONS",
       title: "没有原文件，无法写回",
       summary: `${format.toUpperCase()} 的译文要写回原文件才能保留原有结构与译文位置，但历史任务没有保存原始文件。选一种方式继续：`,
       options: [
@@ -2989,7 +3081,7 @@ async function exportBatch() {
       exportFormat = "task-xlsx";
     }
   } else {
-    const choice = await openExportOptionsDialog({
+    const choice = await openChoiceDialog({ kicker: "EXPORT OPTIONS",
       title: "导出方式",
       summary: `原文件：${state.batchFile?.name || (state.batchHasStoredOriginal ? `${state.batchPreview.filename}（已随批次存档）` : state.batchPreview.filename)}${writeBack ? ` · ${writeBack}` : ""}`,
       options: [
@@ -3299,7 +3391,7 @@ async function restoreBatchProgress() {
     const details = state.bootstrap.locales[state.workbenchLocale];
     $("#targetKicker").textContent = `TARGET · ${state.workbenchLocale.toUpperCase()}`;
     $("#targetTitle").textContent = `${details.label}译文`;
-    $("#batchSourceMeta").textContent = `${run.segments.length} 段 · 已恢复保存的进度`;
+    $("#batchSourceMeta").textContent = batchSourceMetaText({ segments: run.segments.length, suffix: "已恢复保存的进度" });
     if (run.format === "text" || run.format === "markdown") {
       $("#batchFilePrompt").textContent = "已恢复粘贴长文进度";
       $("#batchFileMeta").textContent = `${run.segments.length} 段 · 刷新后自动恢复`;

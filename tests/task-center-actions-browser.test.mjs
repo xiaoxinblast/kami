@@ -44,6 +44,11 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.route("**/api/**", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
+      // 删除类请求统一记账：断言"点了删除到底打了哪个接口"。
+      if (request.method() === "DELETE") {
+        actions.push(`DELETE ${url.pathname}${url.search}`);
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ deleted: true, stopped: true }) });
+      }
       if (url.pathname === "/api/tasks" && request.method() === "GET") {
         return route.fulfill({
           status: 200, contentType: "application/json",
@@ -61,6 +66,11 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
               status: "needs_attention", contentType: "general", domain: "general", totalSegments: 100, completedSegments: 40,
               progress: { phase: "cancelled", message: "已中断：已写入 40 条，可在任务中心继续导入" },
               payload: { batchId: "b-9", filename: "old.xlsx", resumable: true }, updatedAt: "2026-09-18T12:00:00Z"
+            },
+            {
+              id: "qa-1", type: "autoqa", title: "dialogue.xlsx 质检", locale: "zh-CN",
+              status: "completed", contentType: "general", domain: "game", overallScore: 87,
+              totalSegments: 12, completedSegments: 12, failedSegments: 0, qaPending: 3, updatedAt: "2026-09-18T12:00:00Z"
             }
           ])
         });
@@ -94,6 +104,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
           body: JSON.stringify({
             batchId: "batch-2", filename: "interrupted.xlsx", format: "xlsx", locale: "zh-CN", contentType: "general", domain: "game",
             segmentationMode: "unit", runState: "paused", runnerOptions: { route: "auto", reflect: true },
+            structure: { xliff: { skippedLocked: 1, skippedExisting: 6 } },
             segments: [
               { id: "seg-1", source: "メンテナンスは明日開始します。", translation: "维护明天开始。", selected: true, status: "done", result: { qaScore: 97, issues: [{ severity: "warning", category: "accuracy_omission", message: "未体现「变得能够…」的状态变化", suggestion: "…了。" }], aiQa: { status: "passed" } }, locator: { type: "xlsx-cell", sheet: "S", address: "B2", row: 2, column: 2, entryId: "ID-1" } },
               { id: "seg-2", source: "アップデートをダウンロードしています。", translation: "正在下载更新。", selected: true, status: "done", locator: { type: "xlsx-cell", sheet: "S", address: "B3", row: 3, column: 2, entryId: "ID-2" } }
@@ -190,6 +201,12 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.locator('#taskList .task-row[data-task-id="batch-2"] [data-action="open-task"]').click();
     await page.waitForFunction(() => document.querySelector("#batchPreviewMeta") !== null || true);
     await page.waitForSelector("#tertiaryAction:not([hidden])");
+    // 段数说明：XLIFF 里被跳过的锁定/已有译文句段要写清楚，否则用户以为漏翻了
+    assert.match(await page.locator("#batchSourceMeta").textContent(), /2 段 · 跳过 7（锁定 1、已有译文 6） · 历史任务/u);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/batch-skip-summary.png`, animations: "disabled" });
+    }
     await page.locator("#tertiaryAction").click();
     await page.waitForSelector("#exportOptionsDialog[open]");
     assert.match(await page.locator("#exportOptionsTitle").textContent(), /没有原文件/u, "缺原文件时要明确告知，而不是悄悄导成任务 Excel");
@@ -267,6 +284,40 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.waitForFunction(() => Boolean(document.querySelector("#batchSegments .batch-segment.is-highlighted")));
     await page.locator('#batchQaChips .qa-filter-chip[data-batch-filter=""]').click();
     await page.waitForFunction(() => document.querySelectorAll("#batchSegments .batch-segment").length === 2);
+
+    // 译文质检也出现在任务中心：能回放报告，也能删除，不是"做完就找不到"
+    await page.locator('.nav-item[data-view="tasks"]').click();
+    await page.waitForSelector('#taskList .task-row[data-task-id="qa-1"]');
+    const qaRow = page.locator('#taskList .task-row[data-task-id="qa-1"]');
+    assert.match(await qaRow.textContent(), /dialogue\.xlsx 质检/u);
+    assert.equal(await qaRow.locator('[data-action="open-qa-task"]').count(), 1, "质检任务要能打开报告");
+    await qaRow.locator('[data-action="delete-qa-task"]').click();
+    await page.waitForFunction(() => /已删除质检任务/.test(document.querySelector("#toast")?.textContent || ""));
+    assert.ok(actions.includes("DELETE /api/qa-tasks/qa-1"), `质检任务删除要打到 qa-tasks 接口：${actions.join(" | ")}`);
+
+    // 删除翻译任务：先问清楚是「停止并删除」还是「仅删除记录」
+    await page.locator('#taskList .task-row[data-task-id="batch-1"] [data-action="delete-task"]').click();
+    await page.waitForSelector("#exportOptionsDialog[open]");
+    assert.equal(await page.locator("#exportOptionsKicker").textContent(), "DELETE TASK");
+    assert.match(await page.locator("#exportOptionsSummary").textContent(), /正在后台翻译/u);
+    assert.equal(await page.locator('[data-export-option="stop"]').count(), 1, "在跑的批次要能「停止并删除」");
+    assert.equal(await page.locator('[data-export-option="record"]').count(), 1, "也要能只删记录");
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/delete-task-dialog.png`, animations: "disabled" });
+    }
+    await page.locator('[data-export-option="stop"]').click();
+    await page.waitForFunction(() => /已停止并删除/.test(document.querySelector("#toast")?.textContent || ""));
+    assert.ok(actions.includes("DELETE /api/tasks/batch-1?stop=1"), `停止并删除要打到批次删除接口：${actions.join(" | ")}`);
+
+    // 导入类后台任务：选「停止并删除」时要先请求中断，再删记录
+    const cancelBefore = actions.filter((item) => item === "POST /api/background-tasks/task-1/cancel").length;
+    await page.locator('#taskList .task-row[data-task-id="task-1"] [data-action="delete-background"]').click();
+    await page.waitForSelector("#exportOptionsDialog[open]");
+    await page.locator('[data-export-option="stop"]').click();
+    await page.waitForFunction(() => /已删除后台任务/.test(document.querySelector("#toast")?.textContent || ""), null, { timeout: 15_000 });
+    assert.equal(actions.filter((item) => item === "POST /api/background-tasks/task-1/cancel").length, cancelBefore + 1, "停止并删除要先打中断接口");
+    assert.ok(actions.includes("DELETE /api/background-tasks/task-1"), `删除要打到后台任务接口：${actions.join(" | ")}`);
 
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });

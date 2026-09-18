@@ -44,3 +44,24 @@ test("导入时存档、导出时补存档：服务端两条路径都接上了",
   const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.equal((app.match(/id: "pick-source"/gu) || []).length, 2, "翻译界面与任务中心都要有这个兜底选项");
 });
+
+test("任务可完整删除：批次先中断再删，关联记录一起清理", async () => {
+  const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  assert.match(server, /req\.method === "DELETE" && url\.pathname\.startsWith\("\/api\/tasks\/"\)/u);
+  assert.match(server, /这条批次还在运行：请选择「停止并删除」或先中断它/u);
+  assert.match(server, /worker\.cancelRequested = true;/u);
+  assert.match(server, /await deleteBackgroundTask\(task\.id\)/u);
+  assert.match(server, /await deleteBatchOriginal\(\{ dataRoot: DATA_ROOT, relativePath: run\.runnerOptions\.originalFile \}\)/u);
+  assert.match(server, /const deleted = await deleteBatchRun\(batchId\);/u);
+  // 文件质检也要存进任务中心（可回放、可删除）
+  assert.match(server, /title: `\$\{filename\} 质检`/u);
+  assert.match(server, /report: result/u);
+  // 前端：删除必须先问"停止并删除 / 仅删记录"
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(app, /async function confirmTaskDelete/u);
+  assert.match(app, /data-action="delete-task">删除/u);
+  assert.match(app, /\/api\/tasks\/\$\{encodeURIComponent\(batchId\)\}\?stop=/u);
+  // 跳过说明：XLIFF 的锁定/已有译文要在界面上讲清楚，避免"段数不对"的误会
+  assert.match(app, /function batchSkipSummary\(structure\)/u);
+  assert.match(app, /跳过 \$\{skipped\}（\$\{reasons\}）/u);
+});
