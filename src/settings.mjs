@@ -37,6 +37,7 @@ export const SETTING_SPECS = Object.freeze({
   "quality.penaltyCritical": { min: 10, max: 100, step: 5, default: 35, label: "critical 扣分", hint: "事实层面的丢失或捏造" },
   "quality.penaltyMajor": { min: 1, max: 50, step: 1, default: 12, label: "major 扣分", hint: "语义范围有出入但信息点仍在" },
   "quality.penaltyMinor": { min: 1, max: 20, step: 1, default: 3, label: "minor 扣分", hint: "措辞偏好" },
+  "quality.autoConsistencyCheck": { type: "boolean", default: true, label: "批次结束后自动一致性核对", hint: "整批翻完自动跑跨条目一致性核对与质量报告；关掉可省额度，批次页仍可手动运行" },
 
   "retrieval.translationMemoryLimit": { min: 1, max: 20, step: 1, default: 5, label: "参考译例条数", hint: "每次翻译注入的相似译例上限" },
   "retrieval.qaCaseLimit": { min: 1, max: 20, step: 1, default: 3, label: "QA 反例条数", hint: "注入的历史问题译文上限" },
@@ -100,6 +101,14 @@ function clampNumber(value, spec) {
   return clamped === stepped ? { value: clamped } : { value: clamped, note: `超出 ${spec.min}~${spec.max}，已夹紧到 ${clamped}` };
 }
 
+function clampBoolean(value, spec) {
+  if (typeof value === "boolean") return { value };
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "on", "yes"].includes(text)) return { value: true };
+  if (["false", "0", "off", "no"].includes(text)) return { value: false };
+  return { value: spec.default, note: "不是布尔值，已回落默认" };
+}
+
 /**
  * Normalize an arbitrary settings object into a valid one.
  *
@@ -114,7 +123,7 @@ export function sanitizeSettings(input = {}) {
   for (const [path, spec] of Object.entries(SETTING_SPECS)) {
     const raw = pathValue(input, path);
     if (raw === undefined || raw === null || raw === "") continue;
-    const { value, note } = clampNumber(raw, spec);
+    const { value, note } = spec.type === "boolean" ? clampBoolean(raw, spec) : clampNumber(raw, spec);
     assignPath(settings, path, value);
     if (note) notes.push({ path, label: spec.label, note });
   }

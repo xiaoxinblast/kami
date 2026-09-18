@@ -97,6 +97,11 @@ const state = {
   batchQaCursor: -1,
   batchClassification: null,
   batchStyleProfile: null,
+  // 语境档案（整份文件的用途区间）与质量报告：翻译前/翻译后的两份整体结论。
+  batchBrief: null,
+  batchBriefPending: false,
+  batchBriefDraft: null,
+  batchReport: null,
   projectSettings: null
 };
 
@@ -139,6 +144,14 @@ function escapeHtml(value) {
 
 function projectPayload() {
   return state.activeProjectId ? { projectId: state.activeProjectId } : {};
+}
+
+/**
+ * 语体与领域不再让用户逐段配置：翻译路径统一按自动识别走，需要人工纠正时
+ * 改语境档案里的区间用途（整份文件一次），而不是在每个请求上手填两个下拉框。
+ */
+function scopePayload() {
+  return { contentType: "auto", domain: "auto" };
 }
 
 function renderProjectSelector() {
@@ -625,8 +638,8 @@ function renderQa(result) {
   const issues = result.issues.map((issue, index) => `<div class="qa-item ${issue.severity}"><div>${escapeHtml(issue.message)}</div><div class="qa-decision-actions"><button class="button ghost small single-qa-action" data-action="accept" data-issue-index="${index}">采纳并让 AI 修订</button><button class="button ghost small single-qa-action" data-action="partial" data-issue-index="${index}">部分采纳</button>${issue.severity !== "error" || issue.mqmSeverity === "minor" ? `<button class="button ghost small single-qa-action" data-action="reject" data-issue-index="${index}">拒绝意见</button>` : ""}</div></div>`).join("");
   const humanDecisions = result.aiQa?.humanDecisions?.length ? `<div class="reflection-box"><strong>人工 QA 决定</strong>\n${result.aiQa.humanDecisions.map((item) => `${item.actionLabel || item.action || item.decision || "已处理"} · ${item.issue?.message || item.issue || "QA 意见"}`).map(escapeHtml).join("\n")}</div>` : "";
   const receipt = result.reviewReceipt?.textZh ? `<div class="reflection-box review-receipt"><strong>审阅意见处理回执</strong>\n${escapeHtml(result.reviewReceipt.textZh)}</div>` : "";
-  const routing = result.routing ? `<div class="reflection-box"><strong>风险与生成路线</strong>\n${escapeHtml(`${result.routing.risk?.tier || "medium"} 风险 · ${result.routing.label || result.routing.route} · ${result.routing.modelRole || "main"} 模型${result.routing.modelFallback ? "（未配置专用模型，已回退主模型）" : ""}`)}\n${escapeHtml((result.routing.risk?.reasons || []).join("；"))}</div>` : "";
-  const qualityRoute = result.qualityRoute ? `<div class="reflection-box"><strong>质量路由</strong>\n${escapeHtml(`${result.qualityRoute.decision || "human_review"} · ${result.qualityRoute.reason || ""}`)}</div>` : "";
+  const routing = result.routing ? `<div class="reflection-box"><strong>本段用途与质量档</strong>\n${escapeHtml(`${contentTypeLabel(result.classification?.contentType || "general")} · ${result.qualityTierLabel || "标准"}档${result.qualityTierSource === "manual" ? "（手动指定）" : "（自动判定）"}${result.qualityUpgradeFrom ? ` · 已由${result.qualityUpgradeFrom === "fast" ? "快速" : "标准"}档自动升级` : ""}`)}\n${escapeHtml(result.tierReason || (result.routing.description || ""))}</div>` : "";
+  const qualityRoute = result.qualityRoute ? `<div class="reflection-box"><strong>质量判定</strong>\n${escapeHtml(`${result.qualityRoute.decision || "human_review"} · ${result.qualityRoute.reason || ""}`)}</div>` : "";
   const factSummary = result.factSchema?.facts?.length || result.factSchema?.limits?.length ? `<div class="reflection-box"><strong>事实与交付约束</strong>\n${escapeHtml(`${result.factSchema.facts?.length || 0} 个事实锚点 · ${result.factSchema.limits?.length || 0} 项交付限制`)}</div>` : "";
   $("#qaList").className = "qa-list";
   const fallback = result.aiQa?.fallbackReason ? `<div class="qa-item warning">AIQA 暂未完成：${escapeHtml(result.aiQa.fallbackReason)}</div>` : "";
@@ -689,14 +702,6 @@ async function handOffToAutoQa({ source, translation, locale, contentType, domai
     $("#autoQaTargetKicker").textContent = `TARGET · ${locale.toUpperCase()}`;
     $("#autoQaTargetTitle").textContent = `${state.bootstrap.locales[locale]?.label || locale}译文`;
   }
-  // 沿用翻译时生效的作用域，让质检和翻译看同一份风格规范与译例。
-  if (contentType && [...$("#autoQaContentType").options].some((option) => option.value === contentType)) {
-    $("#autoQaContentType").value = contentType;
-  }
-  if (domain && [...$("#autoQaDomain").options].some((option) => option.value === domain)) {
-    $("#autoQaDomain").value = domain;
-  }
-
   switchView("autoqa");
   toast(`${label} 已送入 Auto QA，开始逐句质检…`);
   await runAutoQa();
@@ -917,8 +922,7 @@ async function runQaFromFile() {
       locale: state.autoQaLocale,
       filename: file.name,
       base64: await fileToBase64(file),
-      contentType: $("#autoQaContentType").value,
-      domain: $("#autoQaDomain").value,
+      ...scopePayload(),
       deepCheck: $("#qaDeepCheck").checked
     }) }));
     toast("质检完成（按文件原生句段，未做切句对齐）");
@@ -963,8 +967,7 @@ async function runAutoQa() {
         ...projectPayload(),
         source, translation,
         locale: state.autoQaLocale,
-        contentType: $("#autoQaContentType").value,
-        domain: $("#autoQaDomain").value
+        ...scopePayload()
       })
     });
     renderAutoQaReport(payload);
@@ -1137,7 +1140,7 @@ async function resolveSingleQaIssue(issueIndex, action, button) {
   try {
     const resolved = await api("/api/qa/resolve", { method: "POST", body: JSON.stringify(qaResolutionBody({
       source: $("#sourceText").value.trim(), translation: result.translation, result, action, issueIndex,
-      contentType: result.classification?.contentType || "general", domain: $("#domain").value, batchId: "single-review", review
+      contentType: result.classification?.contentType || "general", domain: result.domainResolution?.domain || "auto", batchId: "single-review", review
     })) });
     state.lastResult = { ...result, ...resolved, translation: resolved.translation, issues: resolved.issues, qaScore: resolved.qaScore, aiQa: resolved.aiQa, reviewReceipt: resolved.reviewReceipt };
     renderTranslationOutput();
@@ -1266,7 +1269,7 @@ async function selectTranslationCandidate(index, button) {
       translation: candidate.translation,
       locale: state.workbenchLocale,
       contentType: result.classification?.contentType || "general",
-      domain: result.domainResolution?.domain || $("#domain").value,
+      domain: result.domainResolution?.domain || "auto",
       aiQa: true
     }) });
     state.lastResult = { ...result, ...qa, candidates: result.candidates, routing: result.routing, translation: qa.translation };
@@ -1308,7 +1311,7 @@ async function acceptSingleTranslation() {
       translation,
       locale: state.workbenchLocale,
       contentType: state.lastResult.classification.contentType,
-      domain: $("#domain").value,
+      domain: state.lastResult.domainResolution?.domain || "auto",
       styleProfileId: state.lastResult.styleProfile?.id || "",
       qaCaseId: state.lastResult.aiQa?.qaCases?.[0]?.id || "",
       termSuggestions: state.lastResult.termSuggestions || [],
@@ -1345,7 +1348,7 @@ async function applyTermSuggestion() {
       translation: state.lastResult.translation,
       locale: state.workbenchLocale,
       contentType: state.lastResult.classification.contentType,
-      domain: $("#domain").value,
+      domain: state.lastResult.domainResolution?.domain || "auto",
       aiQa: true
     }) });
     state.lastResult.translation = qa.translation;
@@ -1365,12 +1368,15 @@ let previewTimer;
 function previewClassificationAndMatches() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(async () => {
+    // 翻译与审校进行中不要用预检结果覆盖结果面板：预检响应可能比翻译晚回来，
+    // 那样用户看到的就是"只有语体没有本次参考"的旧信息。
+    if (state.busy) return;
     const text = $("#sourceText").value.trim();
     $("#sourceCount").textContent = `${[...text].length} 字`;
     if (!text || !state.bootstrap) return;
     try {
-      const classification = await api("/api/classify", { method: "POST", body: JSON.stringify({ text, hint: $("#contentType").value, domain: $("#domain").value }) });
-      const resolvedDomain = classification.domainResolution?.domain || $("#domain").value;
+      const classification = await api("/api/classify", { method: "POST", body: JSON.stringify({ text, hint: "auto", domain: "auto" }) });
+      const resolvedDomain = classification.domainResolution?.domain || "auto";
       const matched = await api("/api/match", { method: "POST", body: JSON.stringify({ ...projectPayload(), text, locale: state.workbenchLocale, contentType: classification.contentType, domain: resolvedDomain }) });
       $("#classificationPreview").innerHTML = `<span class="pulse-dot"></span><span>${resolutionSummary(classification, classification.domainResolution)} · 置信度 ${Math.round(classification.confidence * 100)}% · 命中 ${matched.matches.length} 条术语</span>`;
       renderMatches(matched.matches);
@@ -1388,8 +1394,9 @@ async function translate() {
   try {
     const result = await api("/api/translate", { method: "POST", body: JSON.stringify({
       ...projectPayload(),
-      source, locale: state.workbenchLocale, contentType: $("#contentType").value, domain: $("#domain").value,
-      neighborContext: $("#neighborContext").value, reflect: $("#reflect").checked, route: $("#translationRoute").value, useModelClassification: true
+      source, locale: state.workbenchLocale, ...scopePayload(),
+      qualityTier: $("#qualityTier").value,
+      neighborContext: $("#neighborContext").value, useModelClassification: true
     }) });
     state.lastResult = result;
     renderTranslationOutput();
@@ -1843,7 +1850,7 @@ function renderBatchSegments() {
       <div class="batch-segment-index"><input class="batch-segment-check" data-id="${segment.id}" type="checkbox" ${segment.selected ? "checked" : ""} ${state.batchRunning ? "disabled" : ""} aria-label="选择第 ${segment.index} 段" /><span class="row-ref">${segment.index}</span></div>
       <div class="batch-segment-source"><div class="segment-source-text">${escapeHtml(segment.source)}</div>${segment.context?.metadata?.length || segment.context?.referenceTranslations?.length ? `<div class="segment-context">${(segment.context.metadata || []).map((item) => `<span class="${item.role === "constraint" ? "constraint" : ""}" title="${escapeHtml(item.value)}">${escapeHtml(item.label)}：${escapeHtml(item.value)}</span>`).join("")}${(segment.context.referenceTranslations || []).map((item) => `<span class="reference" title="${escapeHtml(item.value)}">参考 · ${escapeHtml(item.label)}：${escapeHtml(item.value)}</span>`).join("")}</div>` : ""}</div>
       <div class="batch-target-cell">${renderBatchTarget(segment)}</div>
-      <div class="segment-status ${className}"><strong>${segment.accepted ? "已采纳" : label}</strong><small>${escapeHtml(meta)}</small>${acceptEnabled ? `<button class="button ghost small accept-segment" data-id="${segment.id}">采纳</button>` : ""}</div>
+      <div class="segment-status ${className}"><strong>${segment.accepted ? "已采纳" : label}</strong><small>${escapeHtml(meta)}</small>${segmentTierChips(segment)}${acceptEnabled ? `<button class="button ghost small accept-segment" data-id="${segment.id}">采纳</button>` : ""}</div>
       ${renderBatchDetails(segment)}
     </div>`;
   }).join("") || '<div class="empty-list batch-empty">当前筛选下没有分段。</div>';
@@ -1915,7 +1922,7 @@ async function resolveBatchQaIssue(segmentId, issueIndex, action, button) {
   try {
     const resolved = await api("/api/qa/resolve", { method: "POST", body: JSON.stringify(qaResolutionBody({
       source: segment.source, translation: segment.translation, result: segment.result, action, issueIndex,
-      contentType: state.batchClassification?.contentType || "general", domain: $("#domain").value,
+      contentType: segment.result?.segmentPurpose || state.batchClassification?.contentType || "general", domain: "auto",
       batchId: state.batchPreview.batchId || "batch-review", review
     })) });
     segment.translation = resolved.translation || segment.translation;
@@ -1943,8 +1950,8 @@ async function retrySegmentQa(segmentId) {
       source: segment.source,
       translation: segment.translation,
       locale: state.workbenchLocale,
-      contentType: state.batchClassification?.contentType || "general",
-      domain: $("#domain").value,
+      contentType: segment.result?.segmentPurpose || state.batchClassification?.contentType || "general",
+      domain: "auto",
       batchId: state.batchPreview.batchId || "manual-recheck",
       aiQa: true
     }) });
@@ -1989,6 +1996,10 @@ async function prepareBatch() {
     state.batchPreview = prepared;
     state.batchClassification = null;
     state.batchStyleProfile = null;
+    state.batchBrief = null;
+    state.batchBriefDraft = null;
+    state.batchBriefPending = Boolean(prepared.contextBriefPending);
+    state.batchReport = null;
     localStorage.setItem("kami-batch-id", prepared.batchId || "");
     await saveBatchProgress();
     $("#batchSourceMeta").textContent = batchSourceMetaText({
@@ -2002,6 +2013,9 @@ async function prepareBatch() {
       $("#batchDropZone").classList.add("has-file");
     } else $("#batchFileMeta").textContent = `${(state.batchFile.size / 1024).toFixed(1)} KB · ${prepared.spreadsheetAnalysis?.usedModel ? "AI 已识别正文与补充信息" : prepared.format === "xlsx" ? "已按规则识别表格" : "已完成分段"}`;
     renderBatchSegments();
+    renderBatchBrief();
+    renderBatchReport();
+    if (prepared.contextBriefPending) loadBatchBrief(prepared.batchId);
     toast(prepared.format === "xlsx" ? `已识别 ${prepared.statistics.segments} 个翻译单元，补充信息不会作为正文翻译` : `已自动拆分为 ${prepared.statistics.segments} 段，可取消不需要翻译的段落`);
   } catch (error) { toast(error.message); }
   finally { setBusy(false); }
@@ -2045,7 +2059,14 @@ function mergeServerBatchRun(run) {
     index: index + 1
   }));
   state.batchClassification = { contentType: run.contentType || "general", source: "server-runner" };
+  if (run.contextBrief !== undefined) {
+    state.batchBrief = run.contextBrief;
+    if (run.contextBrief) state.batchBriefPending = false;
+  }
+  if (run.qualityReport !== undefined) state.batchReport = run.qualityReport;
   renderBatchSegments();
+  renderBatchBrief();
+  renderBatchReport();
   refreshActions();
 }
 
@@ -2059,6 +2080,8 @@ async function pollServerBatch(batchId) {
       state.batchCancelling = false;
       refreshActions();
       renderBatchSegments();
+      await loadBatchBrief(batchId);
+      await loadBatchReport(batchId);
       if (run.runState === "completed") toast("后台批次翻译完成，可以导出原格式文件");
       else if (run.runState === "paused" && run.runnerOptions?.cancelled) toast("批次已中断，已完成的段落保留，可随时继续");
       else if (run.runState === "paused") toast("后台批次已暂停，进度已保存");
@@ -2066,6 +2089,238 @@ async function pollServerBatch(batchId) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1_200));
+  }
+}
+
+/** 质量档：批次级设置，逐段由服务端判定实际档位。 */
+function batchQualityTier() {
+  return $("#batchQualityTier")?.value || "auto";
+}
+
+function briefPurposeLabel(purpose) {
+  return state.bootstrap?.contentTypes?.[purpose]?.label || purpose || "通用";
+}
+
+function segmentTierChips(segment) {
+  const purpose = segment.result?.segmentPurpose;
+  const tier = segment.result?.qualityTier;
+  if (!purpose && !tier) return "";
+  const tierLabel = { fast: "快速", standard: "标准", strict: "严苛" }[tier] || "";
+  const upgraded = segment.result?.qualityUpgradeFrom ? `<span class="segment-chip upgraded" title="由${{ fast: "快速", standard: "标准" }[segment.result.qualityUpgradeFrom] || segment.result.qualityUpgradeFrom}档自动升级">↑${tierLabel}</span>` : (tierLabel ? `<span class="segment-chip">${tierLabel}</span>` : "");
+  return `<span class="segment-chips">${purpose ? `<span class="segment-chip purpose" title="${escapeHtml(segment.result?.tierReason || "")}">${escapeHtml(briefPurposeLabel(purpose))}</span>` : ""}${upgraded}</span>`;
+}
+
+/**
+ * 语境档案：翻译前通读整份文件得到的用途区间。默认只读，编辑态可以改区间用途、
+ * 删除某条注意点——因为它是全流程的输入，用户必须能纠正系统的判断。
+ */
+function renderBatchBrief() {
+  const panel = $("#batchBriefPanel");
+  if (!panel) return;
+  const brief = state.batchBrief;
+  const pending = state.batchBriefPending;
+  if (!brief && !pending) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const draft = state.batchBriefDraft;
+  const summary = $("#batchBriefSummary");
+  if (pending) {
+    summary.textContent = "正在通读全文做语境分析……完成后每段用途会自动继承，翻译开始前必须完成";
+  } else if (brief?.status === "ready") {
+    const coverage = brief.coverage || {};
+    summary.textContent = `${briefPurposeLabel(brief.documentType?.purpose)} · ${(brief.sections || []).length} 个用途区间 · 覆盖 ${coverage.covered || 0} / ${coverage.total || 0} 条${brief.documentType?.summary ? ` · ${brief.documentType.summary}` : ""}`;
+  } else {
+    summary.textContent = "语境分析失败：翻译会按通用口径继续，可重新分析或手动补用途";
+  }
+  const editing = Boolean(draft);
+  $("#batchBriefActions").hidden = !editing;
+  $("#batchBriefEditToggle").textContent = editing ? "编辑中" : "编辑用途";
+  const sections = editing ? draft.sections : (brief?.sections || []);
+  $("#batchBriefSections").innerHTML = sections.length
+    ? sections.map((section, index) => `<div class="batch-brief-row">
+        <span class="batch-brief-range">第 ${section.from}–${section.to} 条</span>
+        ${editing
+          ? `<select data-brief-section-purpose="${index}">${Object.entries(state.bootstrap?.contentTypes || {}).map(([value, details]) => `<option value="${value}"${value === section.purpose ? " selected" : ""}>${escapeHtml(details.label)}</option>`).join("")}</select><input data-brief-section-note="${index}" value="${escapeHtml(section.note || "")}" placeholder="这段的处理要点（可留空）" />`
+          : `<span class="batch-brief-purpose">${escapeHtml(briefPurposeLabel(section.purpose))}</span><span class="batch-brief-note-text">${escapeHtml(section.note || "")}</span>`}
+      </div>`).join("")
+    : '<div class="empty-list batch-empty">还没有用途区间。</div>';
+  const notes = editing ? draft.notes : (brief?.notes || []);
+  $("#batchBriefNotes").innerHTML = notes.length
+    ? `<div class="batch-brief-note-head">格式与一致性注意点</div>${notes.map((note, index) => `<div class="batch-brief-note"><span>${escapeHtml(note.text)}</span>${editing ? `<button class="button ghost small" type="button" data-brief-note-remove="${index}">删除</button>` : ""}</div>`).join("")}`
+    : "";
+  const crossRefs = brief?.crossRefs || [];
+  if (!editing && crossRefs.length) {
+    $("#batchBriefNotes").innerHTML += `<div class="batch-brief-note-head">跨条目必须一致</div>${crossRefs.map((ref) => `<div class="batch-brief-note"><span>${escapeHtml(ref.note)}</span><em>${escapeHtml((ref.ids || []).join("、"))}</em></div>`).join("")}`;
+  }
+}
+
+async function loadBatchBrief(batchId = state.batchPreview?.batchId) {
+  if (!batchId) return;
+  try {
+    const payload = await api(`/api/batch/run/${encodeURIComponent(batchId)}/context-brief`);
+    state.batchBrief = payload.brief || null;
+    state.batchBriefPending = Boolean(payload.pending);
+  } catch {
+    state.batchBrief = null;
+    state.batchBriefPending = false;
+  }
+  renderBatchBrief();
+  return state.batchBrief;
+}
+
+async function rerunBatchBrief() {
+  const batchId = state.batchPreview?.batchId;
+  if (!batchId) return;
+  state.batchBriefPending = true;
+  renderBatchBrief();
+  try {
+    await api(`/api/batch/run/${encodeURIComponent(batchId)}/context-brief`, { method: "POST", body: JSON.stringify(projectPayload()) });
+    toast("已重新开始语境分析，完成后可在任务中心查看");
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      const brief = await loadBatchBrief(batchId);
+      if (brief) break;
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+    }
+  } catch (error) {
+    state.batchBriefPending = false;
+    renderBatchBrief();
+    toast(`语境分析失败：${error.message}`);
+  }
+}
+
+/** 等语境分析出结果（最多约 10 分钟）：先触发一次分析，再轮询状态。 */
+async function waitForBatchBrief(batchId) {
+  state.batchBriefPending = true;
+  renderBatchBrief();
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (attempt === 0) {
+      try {
+        await api(`/api/batch/run/${encodeURIComponent(batchId)}/context-brief`, { method: "POST", body: JSON.stringify(projectPayload()) });
+      } catch { /* 已经在跑时服务端会复用同一次任务 */ }
+    }
+    const brief = await loadBatchBrief(batchId);
+    if (brief) {
+      state.batchBriefPending = false;
+      renderBatchBrief();
+      return brief.status === "ready";
+    }
+    if (!state.batchBriefPending) return false;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  state.batchBriefPending = false;
+  renderBatchBrief();
+  return false;
+}
+
+function toggleBatchBriefEdit() {
+  if (state.batchBriefDraft) {
+    state.batchBriefDraft = null;
+  } else if (state.batchBrief) {
+    state.batchBriefDraft = {
+      sections: (state.batchBrief.sections || []).map((section) => ({ ...section })),
+      notes: (state.batchBrief.notes || []).map((note) => ({ ...note }))
+    };
+  }
+  renderBatchBrief();
+}
+
+async function saveBatchBriefEdit() {
+  const batchId = state.batchPreview?.batchId;
+  if (!batchId || !state.batchBriefDraft) return;
+  for (const select of $$("#batchBriefSections select[data-brief-section-purpose]")) {
+    const section = state.batchBriefDraft.sections[Number(select.dataset.briefSectionPurpose)];
+    if (section) section.purpose = select.value;
+  }
+  for (const input of $$("#batchBriefSections input[data-brief-section-note]")) {
+    const section = state.batchBriefDraft.sections[Number(input.dataset.briefSectionNote)];
+    if (section) section.note = input.value.trim();
+  }
+  try {
+    const payload = await api(`/api/batch/run/${encodeURIComponent(batchId)}/context-brief`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...projectPayload(), sections: state.batchBriefDraft.sections, notes: state.batchBriefDraft.notes })
+    });
+    state.batchBriefDraft = null;
+    await loadBatchBrief(batchId);
+    toast(`语境档案已更新：${payload.summary?.sections || 0} 个用途区间`);
+  } catch (error) {
+    toast(`保存失败：${error.message}`);
+  }
+}
+
+/** 质量报告与跨条目待核对清单。 */
+function renderBatchReport() {
+  const panel = $("#batchReportPanel");
+  if (!panel) return;
+  const payload = state.batchReport;
+  if (!payload?.report) {
+    panel.hidden = true;
+    return;
+  }
+  const report = payload.report;
+  panel.hidden = false;
+  $("#batchReportSummary").textContent = `${report.totals?.translated || 0} / ${report.totals?.selected || 0} 段已翻译 · 质检覆盖 ${report.coverage?.percent ?? 0}% · 平均 ${report.scores?.average ?? "—"} 分`;
+  const metrics = [
+    ["档位分布", `快速 ${report.tiers?.fast || 0} · 标准 ${report.tiers?.standard || 0} · 严苛 ${report.tiers?.strict || 0}${report.upgrades ? ` · 升级 ${report.upgrades}` : ""}`],
+    // 未采用不一定是错：术语要结合句义判断（「パス→帕斯」落在「プレミアムパス」里就该让位），
+    // 所以这里既报采用率也报未采用条数，供人工判断而不是直接判错。
+    ["术语采用率", report.terms?.adoptionRate === null
+      ? "无命中"
+      : `${report.terms?.adoptionRate ?? 0}%（${report.terms?.applied || 0} / ${report.terms?.expectedUses || 0}）${(report.terms?.expectedUses || 0) - (report.terms?.applied || 0) ? `，${(report.terms?.expectedUses || 0) - (report.terms?.applied || 0)} 条按语境判断未采用` : ""}`],
+    ["保护标记", `${report.protectedTokens?.preserved || 0} / ${report.protectedTokens?.total || 0}`],
+    ["事实锚点问题", `${report.facts?.issueCount || 0} 处 / ${report.facts?.segments || 0} 段`],
+    ["待人工复核", `${report.humanReview?.suggested || 0} 段${(report.humanReview?.reasons || []).length ? `（${report.humanReview.reasons.map((item) => `${item.reason} × ${item.count}`).join("；")}）` : ""}`],
+    ["跨条目待核对", `${report.consistency?.findings || 0} 条`]
+  ];
+  $("#batchReportMetrics").innerHTML = metrics.map(([label, value]) => `<div class="batch-report-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  const findings = payload.findings || [];
+  $("#batchReportFindings").innerHTML = findings.length
+    ? `<div class="batch-brief-note-head">待核对清单</div>${findings.map((finding) => `<div class="batch-brief-note"><span><strong>${escapeHtml(FINDING_TYPE_LABELS[finding.type] || finding.type)}</strong> · ${escapeHtml(finding.detail)}${finding.suggestion ? `<em>建议：${escapeHtml(finding.suggestion)}</em>` : ""}</span><em>${escapeHtml((finding.ids || []).join("、"))}</em></div>`).join("")}`
+    : '<div class="empty-list batch-empty">没有发现跨条目不一致。</div>';
+}
+
+const FINDING_TYPE_LABELS = {
+  duplicate_source: "同原文不同译文",
+  term_usage_gap: "术语译法未统一",
+  term_drift: "术语漂移",
+  name_drift: "专名漂移",
+  voice_drift: "角色口吻漂移",
+  style_conflict: "与风格规范冲突",
+  format_risk: "格式风险"
+};
+
+async function loadBatchReport(batchId = state.batchPreview?.batchId) {
+  if (!batchId) return;
+  try {
+    state.batchReport = await api(`/api/batch/run/${encodeURIComponent(batchId)}/consistency-check`);
+  } catch {
+    state.batchReport = null;
+  }
+  renderBatchReport();
+}
+
+async function runConsistencyCheckNow() {
+  const batchId = state.batchPreview?.batchId;
+  if (!batchId) return;
+  toast("已开始跨条目一致性核对，完成后本页自动刷新");
+  try {
+    await api(`/api/batch/run/${encodeURIComponent(batchId)}/consistency-check`, { method: "POST", body: JSON.stringify(projectPayload()) });
+    const before = state.batchReport?.report?.generatedAt || "";
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const payload = await api(`/api/batch/run/${encodeURIComponent(batchId)}/consistency-check`);
+      if (payload?.report && payload.report.generatedAt !== before) {
+        state.batchReport = payload;
+        renderBatchReport();
+        toast(`一致性核对完成：${(payload.findings || []).length} 条待核对`);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+    toast("一致性核对还没完成，可稍后在任务中心查看");
+  } catch (error) {
+    toast(`一致性核对失败：${error.message}`);
   }
 }
 
@@ -2109,16 +2364,35 @@ async function runBatch() {
   if (!state.batchPreview?.batchId || state.batchRunning) return;
   const hasPending = state.batchPreview.segments.some((segment) => segment.selected && segment.status !== "done");
   if (!hasPending) return toast("没有待翻译的分段");
+  // 语境分析是翻译的前置条件：服务端会返回 409，这里等在原地，避免用"猜出来的用途"翻整批。
+  if (state.batchBriefPending || !state.batchBrief || state.batchBrief.status !== "ready") {
+    const ready = await waitForBatchBrief(state.batchPreview.batchId);
+    if (!ready) return toast("语境分析还没完成，请稍后重试或手动重新分析");
+  }
   state.batchRunning = true;
   state.batchPaused = false;
   refreshActions();
   renderBatchSegments();
   try {
     await saveBatchProgress();
-    await api(`/api/batch/run/${encodeURIComponent(state.batchPreview.batchId)}/start`, {
-      method: "POST",
-      body: JSON.stringify({ ...projectPayload(), route: $("#translationRoute").value, reflect: $("#reflect").checked })
-    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await api(`/api/batch/run/${encodeURIComponent(state.batchPreview.batchId)}/start`, {
+          method: "POST",
+          body: JSON.stringify({ ...projectPayload(), qualityTier: batchQualityTier() })
+        });
+        break;
+      } catch (error) {
+        // 服务端发现语境档案还没就绪：等它跑完再自动继续，而不是把 409 甩给用户。
+        if (attempt === 0 && /语境分析/.test(error.message)) {
+          toast("服务端还在做语境分析，完成后自动开始翻译");
+          const ready = await waitForBatchBrief(state.batchPreview.batchId);
+          if (!ready) throw error;
+          continue;
+        }
+        throw error;
+      }
+    }
     toast("批次已交给服务端后台执行，关闭页面也会继续");
     await pollServerBatch(state.batchPreview.batchId);
   } catch (error) {
@@ -2146,7 +2420,7 @@ async function runBatchInBrowserLegacy() {
     try {
       state.batchClassification = await api("/api/classify", { method: "POST", body: JSON.stringify({
         text: documentText,
-        hint: $("#contentType").value,
+        hint: "auto",
         useModel: true
       }) });
       const contentType = state.batchClassification.contentType;
@@ -2191,8 +2465,8 @@ async function runBatchInBrowserLegacy() {
         ...projectPayload(),
         source: segment.source,
         locale: state.workbenchLocale,
-        contentType: state.batchClassification.contentType,
-        domain: $("#domain").value,
+        contentType: segment.result?.segmentPurpose || state.batchClassification.contentType,
+        domain: "auto",
         neighborContext: context,
         styleProfile: state.batchStyleProfile,
         batchId: state.batchPreview.batchId || state.batchPreview.filename,
@@ -2204,8 +2478,7 @@ async function runBatchInBrowserLegacy() {
         nextSource: context.next || "",
         batchReferences,
         batchGroupEntries: groupContext?.group.map((item) => ({ id: item.id, source: item.source, context: item.context })) || [],
-        route: $("#translationRoute").value,
-        reflect: $("#reflect").checked,
+        qualityTier: batchQualityTier(),
         useModelClassification: false
       }) });
       if (result.styleProfile?.source === "style-library") state.batchStyleProfile = result.styleProfile;
@@ -2232,7 +2505,7 @@ async function runBatchInBrowserLegacy() {
         ...projectPayload(),
         locale: state.workbenchLocale,
         contentType: state.batchClassification?.contentType || "general",
-        domain: $("#domain").value,
+        domain: "auto",
         batchId: state.batchPreview.batchId || ""
       }) });
       const parts = [];
@@ -2301,6 +2574,7 @@ function renderTasks() {
     else if (action === "delete-share") deleteShareTaskRow(id, button);
     else if (action === "download-export") downloadBackgroundExport(id, button);
     else if (action === "open-import-review") openImportReview(id, button);
+    else if (action === "open-batch") openTask(button.dataset.batchId || "");
     else if (action === "continue-import") continueImportTask(id, button);
     else if (action === "pause-task") pauseBatchTask(id, button);
     else if (action === "continue-task") continueBatchTask(id, button);
@@ -2313,7 +2587,7 @@ function renderTasks() {
   }));
 }
 
-const BACKGROUND_TASK_LABELS = { term_import: "术语导入", asset_import: "双语资产导入", batch_translation: "后台批次翻译", embedding_rebuild: "Embedding 重建", batch_export: "批次导出" };
+const BACKGROUND_TASK_LABELS = { term_import: "术语导入", asset_import: "双语资产导入", batch_translation: "后台批次翻译", context_analysis: "语境分析", consistency_check: "一致性核对", embedding_rebuild: "Embedding 重建", batch_export: "批次导出" };
 
 /** 导入类任务的中断/失败都能用同一个批次续跑（已写入的重复项会自动跳过）。 */
 function resumableImportTask(task) {
@@ -2335,6 +2609,8 @@ function renderBackgroundTaskRow(task) {
   const summary = task.payload?.summary;
   const canResumeImport = task.taskType === "term_import" && task.status === "review" && task.payload?.batchId;
   const canContinueImport = resumableImportTask(task);
+  // 语境分析与一致性核对都属于某条批次：任务行要能一键跳回批次页看结果。
+  const canOpenBatch = ["context_analysis", "consistency_check"].includes(task.taskType) && Boolean(task.payload?.batchId);
   const canCancel = task.status === "in_progress";
   // 导入类任务会把审校稿接回学习轨迹：接回多少条、多少条因歧义/找不到原文没接上，
   // 用户要能在任务行直接看到，不用去翻任务 payload。
@@ -2350,7 +2626,7 @@ function renderBackgroundTaskRow(task) {
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="task-status ${escapeHtml(statusClass)}">${escapeHtml(statusLabel)}</span><span class="task-type-chip">${escapeHtml(BACKGROUND_TASK_LABELS[task.taskType] || "后台")}</span></div><small title="${escapeHtml(message || payloadText || "")}">${locale ? `${escapeHtml(locale.label)} · ` : ""}${escapeHtml(message || payloadText || contentTypeLabel(task.contentType))} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${percent}%"></i></div><span>${task.totalSegments ? `${task.completedSegments} / ${task.totalSegments}` : `${percent}%`}</span></div>
     <div class="task-qa"><strong title="${escapeHtml(payloadText || "")}">${payloadText || (canResumeImport ? `${task.payload.candidateCount || 0} 条候选` : "—")}</strong><small>${task.status === "in_progress" ? "后台执行中" : canResumeImport ? "识别完成，等待人工确认" : formatTaskTime(task.updatedAt)}</small></div>
-    <div class="task-actions">${canCancel ? '<button class="button ghost small" data-action="cancel-background">中断</button>' : ""}${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${canContinueImport ? `<button class="button secondary small" data-action="continue-import">继续导入</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
+    <div class="task-actions">${canCancel ? '<button class="button ghost small" data-action="cancel-background">中断</button>' : ""}${canOpenBatch ? `<button class="button secondary small" data-action="open-batch" data-batch-id="${escapeHtml(task.payload.batchId)}">查看批次</button>` : ""}${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${canContinueImport ? `<button class="button secondary small" data-action="continue-import">继续导入</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
   </article>`;
 }
 
@@ -2995,10 +3271,12 @@ function applyStoredBatchRun(run) {
   };
   state.batchClassification = { contentType: run.contentType || "general", source: "restored" };
   state.batchStyleProfile = null;
+  state.batchBrief = run.contextBrief || null;
+  state.batchBriefDraft = null;
+  state.batchBriefPending = false;
+  state.batchReport = run.qualityReport || null;
   updateBatchSegmentationOptions(run.filename || "");
   state.workbenchLocale = run.locale || state.workbenchLocale;
-  $("#domain").value = run.domain || "game";
-  $("#contentType").value = run.contentType || "auto";
   localStorage.setItem("kami-batch-id", run.batchId);
   renderLocaleStrip($("#workbenchLocales"), state.workbenchLocale, updateWorkbenchLocale);
   $("#batchSourceMeta").textContent = batchSourceMetaText({ segments: run.segments.length, suffix: "历史任务" });
@@ -3011,6 +3289,8 @@ function applyStoredBatchRun(run) {
   state.batchSegmentFilter = "";
   state.batchQaCursor = -1;
   renderBatchSegments();
+  renderBatchBrief();
+  renderBatchReport();
   refreshActions();
 }
 
@@ -3157,7 +3437,7 @@ async function exportBatch() {
         method: "POST",
         signal: AbortSignal.timeout(EXPORT_PREFLIGHT_TIMEOUT_MS),
         body: JSON.stringify({
-          ...projectPayload(), locale: state.workbenchLocale, contentType: state.batchClassification?.contentType || "general", domain: $("#domain").value, segments: exportSegments
+          ...projectPayload(), locale: state.workbenchLocale, contentType: state.batchClassification?.contentType || "general", domain: "auto", segments: exportSegments
         })
       });
     } catch (error) {
@@ -3312,7 +3592,7 @@ async function acceptSegment(segmentId) {
       translation: segment.translation,
       locale: state.workbenchLocale,
       contentType: state.batchClassification?.contentType || "general",
-      domain: $("#domain").value,
+      domain: "auto",
       styleProfileId: state.batchStyleProfile?.id || "",
       qaCaseId: segment.result?.aiQa?.qaCases?.[0]?.id || "",
       termSuggestions: segment.result?.termSuggestions || [],
@@ -3345,7 +3625,7 @@ async function acceptAllSegments() {
         translation: segment.translation,
         locale: state.workbenchLocale,
         contentType: state.batchClassification?.contentType || "general",
-        domain: $("#domain").value,
+        domain: "auto",
         styleProfileId: state.batchStyleProfile?.id || "",
         qaCaseId: segment.result?.aiQa?.qaCases?.[0]?.id || "",
         termSuggestions: segment.result?.termSuggestions || [],
@@ -3378,7 +3658,7 @@ async function saveBatchProgress() {
       filename: preview.filename,
       locale: state.workbenchLocale,
       contentType: state.batchClassification?.contentType || "general",
-      domain: $("#domain").value,
+      domain: "auto",
       format: preview.format,
       segmentationMode: preview.segmentationMode,
       structure: preview.structure,
@@ -3440,6 +3720,10 @@ async function restoreBatchProgress() {
     };
     state.batchClassification = { contentType: run.contentType || "general", source: "restored" };
     state.batchStyleProfile = null;
+    state.batchBrief = run.contextBrief || null;
+    state.batchBriefDraft = null;
+    state.batchBriefPending = false;
+    state.batchReport = run.qualityReport || null;
     state.batchHasStoredOriginal = Boolean(run.runnerOptions?.originalFile);
     state.workbenchLocale = run.locale || state.workbenchLocale;
     setTranslationMode("batch");
@@ -3458,6 +3742,8 @@ async function restoreBatchProgress() {
       $("#batchDropZone").classList.add("has-file");
     }
     renderBatchSegments();
+    renderBatchBrief();
+    renderBatchReport();
     refreshActions();
     if (["queued", "running"].includes(run.runState)) {
       state.batchRunning = true;
@@ -6335,10 +6621,8 @@ async function commitImport() {
 
 function populateSelects() {
   const contentOptions = Object.entries(state.bootstrap.contentTypes).map(([value, details]) => `<option value="${value}">${details.label}</option>`).join("");
-  $("#contentType").insertAdjacentHTML("beforeend", contentOptions);
   $("#assetForm select[name=contentType]").innerHTML = contentOptions;
   $("#learningContentType").innerHTML = contentOptions;
-  $("#autoQaContentType").insertAdjacentHTML("beforeend", contentOptions);
   if ([...$("#learningContentType").options].some((option) => option.value === "general")) $("#learningContentType").value = "general";
   $("#taskLocale").innerHTML = Object.entries(state.bootstrap.locales).map(([locale, details]) => `<option value="${locale}">日语→${details.label}</option>`).join("");
 }
@@ -6393,6 +6677,21 @@ function bindEvents() {
   $("#cancelBatchAction")?.addEventListener("click", () => cancelBatchRun().catch((error) => toast(error.message)));
   $("#reviewImportFile").addEventListener("change", (event) => submitReviewImport(event.target.files?.[0]));
   $("#batchJumpNext").addEventListener("click", () => jumpToNextBatchIssue());
+  $("#batchQualityTier")?.addEventListener("change", () => {
+    if (state.batchPreview) saveBatchProgress();
+    toast(`质量档已设为${$("#batchQualityTier").selectedOptions[0]?.textContent || "自动"}，下一段起生效`);
+  });
+  $("#batchBriefRerun")?.addEventListener("click", () => rerunBatchBrief());
+  $("#batchBriefEditToggle")?.addEventListener("click", () => toggleBatchBriefEdit());
+  $("#batchBriefSave")?.addEventListener("click", () => saveBatchBriefEdit());
+  $("#batchBriefCancel")?.addEventListener("click", () => { state.batchBriefDraft = null; renderBatchBrief(); });
+  $("#batchConsistencyRun")?.addEventListener("click", () => runConsistencyCheckNow());
+  $("#batchBriefPanel")?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-brief-note-remove]");
+    if (!remove || !state.batchBriefDraft) return;
+    state.batchBriefDraft.notes.splice(Number(remove.dataset.briefNoteRemove), 1);
+    renderBatchBrief();
+  });
   $("#qaSourceTabs").addEventListener("click", (event) => {
     const tab = event.target.closest(".qa-source-tab");
     if (tab) setQaSource(tab.dataset.qaSource);
@@ -6420,14 +6719,6 @@ function bindEvents() {
     if (!shouldRoutePasteToBatch(text)) return;
     event.preventDefault();
     loadPastedTextAsBatch(text).catch((error) => toast(error.message));
-  });
-  $("#contentType").addEventListener("change", () => {
-    previewClassificationAndMatches();
-    invalidateBatchTranslations("批次语体已改变，请重新运行翻译");
-  });
-  $("#domain").addEventListener("change", () => {
-    previewClassificationAndMatches();
-    invalidateBatchTranslations("批次领域已改变，请重新运行翻译");
   });
   $("#autoQaSource").addEventListener("input", () => {
     $("#autoQaSourceCount").textContent = `${[...$("#autoQaSource").value].length} 字`;

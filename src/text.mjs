@@ -107,3 +107,49 @@ export function digitsRecoverable(source, translation) {
   }
   return true;
 }
+
+/**
+ * 从模型回复里取出一个 JSON 对象。
+ *
+ * 模型经常在 JSON 前后加解释、代码围栏，或者一口气输出两个对象；旧写法"第一个 {
+ * 到最后一个 }"会把两段拼在一起，然后 JSON.parse 报 Unexpected non-whitespace
+ * character（真实发生过：语境分析因此整片判失败）。这里改成按括号配对取第一个
+ * 完整对象，并保留"整段就是 JSON"的快路径。
+ */
+export function parseModelJsonObject(content = "") {
+  const text = String(content ?? "").replace(/```json/giu, "```").trim();
+  const start = text.indexOf("{");
+  const candidates = [];
+  if (start >= 0) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const character = text[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === "\\") continue;
+      if (character === '"') { inString = true; continue; }
+      if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          candidates.push(text.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  candidates.push(text, text.replace(/```/gu, ""));
+  let lastError = null;
+  for (const candidate of candidates) {
+    const value = String(candidate || "").trim();
+    if (!value) continue;
+    try { return JSON.parse(value); } catch (error) { lastError = error; }
+  }
+  throw lastError || new Error("没有可解析的 JSON 对象");
+}

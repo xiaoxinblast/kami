@@ -48,22 +48,40 @@ const { embed, fetchWithTimeout } = await import("../src/provider.mjs");
 
 const chatInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
 
+/**
+ * 请求计数由服务端处理函数累加：客户端超时主动断开时，"服务端到底收到没有"取决于
+ * 事件循环时序。并行跑整套用例时（浏览器测试会占满 CPU）这个时序会漂，所以这里
+ * 容忍短暂延迟，等计数稳定再断言，而不是把机器负载当成产品行为。
+ */
+async function settleRequests(counter) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return counter();
+}
+
+async function waitForCount(counter, expected) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (counter() >= expected) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return counter();
+}
+
 test("正文读取阶段超时转换为带标签错误，且不再泄漏 DOMException", async () => {
-  const before = chatRequests;
+  const before = await settleRequests(() => chatRequests);
   await assert.rejects(
     () => fetchWithTimeout(`http://127.0.0.1:${stallPort}/v1/chat/completions`, chatInit, { timeoutMs: 400, label: "翻译" }),
     (error) => /翻译请求超时（400 毫秒）/.test(error.message)
   );
-  assert.equal(chatRequests, before + 1, "默认不重试");
+  assert.equal(await waitForCount(() => chatRequests, before + 1), before + 1, "默认不重试");
 });
 
 test("超时自动重试一次，第二次仍超时才抛出", async () => {
-  const before = chatRequests;
+  const before = await settleRequests(() => chatRequests);
   await assert.rejects(
     () => fetchWithTimeout(`http://127.0.0.1:${stallPort}/v1/chat/completions`, chatInit, { timeoutMs: 400, label: "AIQA", retries: 1 }),
     (error) => /AIQA请求超时（400 毫秒）/.test(error.message)
   );
-  assert.equal(chatRequests, before + 2, "超时应重试一次共两次请求");
+  assert.equal(await waitForCount(() => chatRequests, before + 2), before + 2, "超时应重试一次共两次请求");
 });
 
 test("正常响应原样返回文本与状态", async () => {

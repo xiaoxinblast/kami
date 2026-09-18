@@ -388,6 +388,8 @@ const definitions = [
       jsonField("segments", "分段与译文", { sort: 9 }),
       jsonField("sub_batches", "服务端子批次", { note: "按项目条目数和字符数限制生成的真实执行检查点。", sort: 10 }),
       jsonField("runner_options", "后台执行选项", { sort: 11 }),
+      jsonField("context_brief", "语境档案", { note: "翻译前通读全文得到的用途区间、跨条目关联与格式注意点。", sort: 12 }),
+      jsonField("quality_report", "质量报告", { note: "批次完成后的质量指标与一致性待核对清单。", sort: 13 }),
       selectField("run_state", "后台运行状态", [["待启动", "ready"], ["排队", "queued"], ["运行中", "running"], ["已暂停", "paused"], ["已完成", "completed"], ["需要处理", "needs_attention"]], { defaultValue: "ready", sort: 12 }),
       selectField("task_status", "任务状态", [["待启动", "ready"], ["进行中", "in_progress"], ["已暂停", "paused"], ["QA 待处理", "review"], ["存在失败", "needs_attention"], ["已完成", "completed"]], { defaultValue: "ready", sort: 13 }),
       { field: "total_segments", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 11, translations: label("总分段数") }, schema: { is_nullable: true } },
@@ -857,7 +859,7 @@ const definitions = [
     fields: [
       uuidField(),
       textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
-      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["双语资产导入", "asset_import"], ["批次翻译", "batch_translation"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
+      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["双语资产导入", "asset_import"], ["批次翻译", "batch_translation"], ["语境分析", "context_analysis"], ["一致性核对", "consistency_check"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
       textField("title", "任务标题", { required: true, sort: 3 }),
       // 不归属单一翻译任务的后台操作没有目标语言，必须允许为空。
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { width: "half", sort: 4, nullable: true }),

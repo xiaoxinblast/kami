@@ -1,6 +1,8 @@
 import { MODEL_THINKING_ROLES, loadProviderConfig, saveProviderConfig } from "./provider-store.mjs";
 import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-qa.mjs";
+import { contextBriefMessages, parseContextBriefPart } from "./context-brief.mjs";
+import { consistencyMessages, parseConsistencyFindings } from "./consistency-check.mjs";
 
 const loadedProvider = loadProviderConfig();
 let persistence = loadedProvider.persistence;
@@ -162,6 +164,7 @@ export function createUsageCollector() {
 }
 
 function formatNeighborContext(context = {}) {
+  if (!context) return "无";
   if (typeof context === "string") return context || "无";
   const lines = [];
   if (context.document) lines.push(`文档：${context.document}`);
@@ -182,8 +185,167 @@ function formatNeighborContext(context = {}) {
   return lines.join("\n") || "无";
 }
 
-function packPrompt(contextPack) {
-  const translationSkill = contextPack.translationSkill;
+/**
+ * 人工风格指南按原文结构下发。
+ *
+ * 之前它整份被 JSON.stringify 塞进提示词：8058 字的指南在每条句段的每次调用里
+ * 都变成一大串带 \n 转义的转义串，既浪费 token 又让模型难以按小节定位。这里改成
+ * 原样保留换行的文本块，仍然放在稳定前缀的最前面。
+ */
+function formatStyleGuide(profile) {
+  if (!profile) return "";
+  const instruction = String(profile.instruction || "").trim();
+  const examples = Array.isArray(profile.examples) ? profile.examples : [];
+  const blocks = [];
+  if (instruction) blocks.push(instruction);
+  if (examples.length) {
+    blocks.push("正反例：");
+    for (const item of examples) {
+      if (item && typeof item === "object") {
+        const source = String(item.source || "").trim();
+        const target = String(item.target || "").trim();
+        const note = String(item.note || item.reason || "").trim();
+        blocks.push(source || target ? `· ${source}${target ? ` → ${target}` : ""}${note ? `（${note}）` : ""}` : `· ${JSON.stringify(item)}`);
+      } else {
+        blocks.push(`· ${String(item)}`);
+      }
+    }
+  }
+  return blocks.join("\n");
+}
+
+function formatStyleRules(rules = [], limit = 30) {
+  return (Array.isArray(rules) ? rules : []).slice(0, limit)
+    .map((rule) => (typeof rule === "string" ? rule : String(rule?.rule || "").trim()))
+    .filter(Boolean);
+}
+
+function formatDocumentBrief(brief) {
+  if (!brief) return "";
+  const lines = [];
+  const document = brief.document || {};
+  lines.push(`文件用途：${document.purpose || "general"}${document.tone ? `（整体语气：${document.tone}）` : ""}`);
+  if (document.summary) lines.push(`文件概述：${document.summary}`);
+  if (brief.section) {
+    lines.push(`本段所属区间：第 ${brief.section.from}–${brief.section.to} 条 · 用途 ${brief.section.purpose}${brief.section.tone ? ` · 语气 ${brief.section.tone}` : ""}`);
+  }
+  for (const note of brief.notes || []) lines.push(`注意：${note.text}`);
+  for (const ref of brief.crossRefs || []) lines.push(`跨条目一致：${ref.note}（涉及 ${ref.ids.join("、")}）`);
+  return lines.join("\n");
+}
+
+/**
+ * 按用途裁剪 Context Pack。
+ *
+ * 初译、审校、修订、自检、术语裁决需要的字段并不相同：审校不需要翻译技能与
+ * 本地化示范，裁决只需要术语与事实。之前四处都把完整 pack 原样送给模型，
+ * 既重复付费也让重点被淹没。
+ */
+export function projectContextPack(contextPack = {}, purpose = "translate") {
+  const core = {
+    source: contextPack.source,
+    sourceLanguage: contextPack.sourceLanguage,
+    targetLocale: contextPack.targetLocale,
+    targetLanguage: contextPack.targetLanguage,
+    contentType: contextPack.contentType,
+    contentTypeLabel: contextPack.contentTypeLabel,
+    contentTags: contextPack.contentTags,
+    domain: contextPack.domain,
+    register: contextPack.register,
+    entryId: contextPack.entryId,
+    entryKey: contextPack.entryKey,
+    documentBrief: contextPack.documentBrief || null,
+    styleProfile: contextPack.styleProfile ? {
+      id: contextPack.styleProfile.id,
+      name: contextPack.styleProfile.name,
+      version: contextPack.styleProfile.version,
+      instruction: contextPack.styleProfile.instruction,
+      contentTypeDirective: contextPack.styleProfile.contentTypeDirective,
+      registerPolicy: contextPack.styleProfile.registerPolicy,
+      rules: formatStyleRules(contextPack.styleProfile.generationRules),
+      reviewRubric: contextPack.styleProfile.reviewRubric
+    } : null,
+    userProfile: contextPack.userProfile ? {
+      name: contextPack.userProfile.name,
+      version: contextPack.userProfile.version,
+      instruction: contextPack.userProfile.instruction,
+      examples: contextPack.userProfile.examples
+    } : null,
+    requiredTerms: contextPack.requiredTerms || [],
+    preferredTerms: contextPack.preferredTerms || [],
+    protectedTokens: contextPack.protectedTokens || [],
+    factSchema: contextPack.factSchema || null,
+    translationReferences: contextPack.translationReferences || [],
+    qaGuidance: contextPack.qaGuidance || [],
+    batchReferences: contextPack.batchReferences || [],
+    batchVerse: contextPack.batchVerse || null,
+    batchGroupEntries: contextPack.batchGroupEntries || [],
+    rhymeLike: contextPack.rhymeLike === true,
+    neighborContext: contextPack.neighborContext || null,
+    localeInstruction: contextPack.localeInstruction,
+    punctuation: contextPack.punctuation
+  };
+  if (purpose === "translate") {
+    return { ...core, translationSkill: contextPack.translationSkill || null };
+  }
+  if (purpose === "adjudicate") {
+    // 术语裁决只需要"哪条术语候选 + 当前句义与事实"，不需要译例与技能。
+    return {
+      source: core.source,
+      targetLanguage: core.targetLanguage,
+      contentTypeLabel: core.contentTypeLabel,
+      documentBrief: core.documentBrief,
+      requiredTerms: core.requiredTerms,
+      preferredTerms: core.preferredTerms,
+      protectedTokens: core.protectedTokens,
+      factSchema: core.factSchema,
+      neighborContext: core.neighborContext,
+      styleProfile: core.styleProfile ? { name: core.styleProfile.name, instruction: core.styleProfile.instruction } : null
+    };
+  }
+  if (purpose === "reflect") {
+    // 自检只看内容与硬约束，不重复下发示例与技能。
+    return {
+      ...core,
+      styleProfile: core.styleProfile ? { ...core.styleProfile, rules: [] } : null,
+      userProfile: core.userProfile ? { name: core.userProfile.name, version: core.userProfile.version, instruction: core.userProfile.instruction, examples: [] } : null,
+      translationSkill: null
+    };
+  }
+  return { ...core, translationSkill: null };
+}
+
+/** 把投影后的 pack 渲染成结构化文本：稳定信息在前，逐段变量在后。 */
+export function contextPackText(contextPack = {}, purpose = "review") {
+  const pack = projectContextPack(contextPack, purpose);
+  const lines = [];
+  lines.push(`目标语言：${pack.targetLanguage || pack.targetLocale || ""}`);
+  lines.push(`内容用途：${pack.contentTypeLabel || pack.contentType || "general"}｜语体要求：${pack.register || ""}`);
+  if (pack.styleProfile?.contentTypeDirective) lines.push(`本语体写作口径：${pack.styleProfile.contentTypeDirective}`);
+  if (pack.styleProfile) {
+    lines.push(`项目风格规范：${pack.styleProfile.name || ""} v${pack.styleProfile.version || 1}`);
+    for (const rule of pack.styleProfile.rules || []) lines.push(`· ${rule}`);
+  }
+  const guide = formatStyleGuide(pack.userProfile);
+  if (guide) lines.push(`人工风格指南（优先级最高，与其它风格规则冲突时以它为准）：\n${guide}`);
+  const briefText = formatDocumentBrief(pack.documentBrief);
+  if (briefText) lines.push(`文件语境：\n${briefText}`);
+  if (pack.requiredTerms?.length) lines.push(`强制术语（必须逐字采用）：${JSON.stringify(pack.requiredTerms)}`);
+  if (pack.preferredTerms?.length) lines.push(`参考术语（结合句义判断，不得仅凭字面强制替换）：${JSON.stringify(pack.preferredTerms)}`);
+  if (pack.protectedTokens?.length) lines.push(`必须原样保留：${JSON.stringify(pack.protectedTokens)}`);
+  if (pack.factSchema?.facts?.length || pack.factSchema?.limits?.length) lines.push(`事实锚点：${JSON.stringify(pack.factSchema)}`);
+  if (pack.translationReferences?.length) lines.push(`历史译例：${JSON.stringify(pack.translationReferences)}`);
+  if (pack.qaGuidance?.length) lines.push(`历史 AIQA 反例：${JSON.stringify(pack.qaGuidance)}`);
+  if (pack.batchReferences?.length) lines.push(`本批已定稿译文（保持一致）：${JSON.stringify(pack.batchReferences)}`);
+  const neighbor = formatNeighborContext(pack.neighborContext || {});
+  if (neighbor && neighbor !== "无") lines.push(`文档上下文（仅用于理解，不得翻译进结果）：\n${neighbor}`);
+  lines.push(`当前原文：\n${pack.source}`);
+  return lines.join("\n");
+}
+
+export function packPrompt(contextPack) {
+  const pack = projectContextPack(contextPack, "translate");
+  const translationSkill = pack.translationSkill;
   const rhymeHint = contextPack.rhymeLike
     ? "⚠️ 本条原文带有顺口溜/韵文结构（短句对仗 + 长句收尾，可能押韵）：必须用目标语言自然重现节奏与押韵，可以调整语序、换用拟态词、谚语与地道说法，严禁机械逐字重复原文的字数结构。\n"
     : "";
@@ -200,38 +362,47 @@ function packPrompt(contextPack) {
   const exampleHint = localeExamples.length
     ? `本地化示范（左：原文 → 直译，右：合格的地道译法。请达到右侧的水平）：\n${localeExamples.map((item) => `· ${item.source} → ${item.literal} ✗ / ${item.idiomatic} ✓（${item.note}）`).join("\n")}\n`
     : "";
-  return `你是资深游戏本地化写手。你的任务不是逐字翻译，而是把${contextPack.sourceLanguage}文案用 ${contextPack.targetLanguage} 玩家最自然的方式重新表达：先读懂这句话在游戏场景里的意图、情绪与角色，再用目标语言母语者会用的说法写出来。只改变表达方式，不改变信息。\n\n` +
-    `内容类型：${contextPack.contentTypeLabel}\n` +
-    `语体要求：${contextPack.register}\n` +
-    `本语体写作口径：${contextPack.styleProfile?.contentTypeDirective || ""}\n` +
-    `语域上限（写完会用同一口径判定，超出会被标记）：${JSON.stringify(contextPack.styleProfile?.registerPolicy || {})}——promotional 推销感、casual 口语网感、generic 套话平淡，数值越低表示该倾向越不被允许。\n` +
-    `翻译风格：${contextPack.styleProfile?.name || contextPack.contentTypeLabel} · 版本 ${contextPack.styleProfile?.version || 1} · ${contextPack.styleProfile?.instruction || contextPack.register}\n` +
-    `风格正反例：${JSON.stringify(contextPack.styleProfile?.examples || [])}\n` +
-    `翻译技能：${translationSkill ? `${translationSkill.name} · v${translationSkill.version} · ${translationSkill.instruction || "沿用当前稳定流程"}` : "默认稳定流程"}\n` +
-    `技能增量规则：${JSON.stringify(translationSkill?.additionalRules || [])}\n` +
-    `译者长期偏好画像 / 人工风格指南（跨语体全局，版本 ${contextPack.userProfile?.version || "无"}；人工导入的风格指南优先级最高，与上面任何风格规则冲突时以它为准）：${contextPack.userProfile ? JSON.stringify({ instruction: contextPack.userProfile.instruction, examples: contextPack.userProfile.examples }) : "无"}\n` +
-    `历史译例（同语言、相似度与人工可信度排序）：${JSON.stringify(contextPack.translationReferences || [])}\n` +
-    `历史 AIQA 反例与修订：${JSON.stringify(contextPack.qaGuidance || [])}\n` +
-    batchVerseHint +
-    batchReferenceHint +
-    batchGroupHint +
-    exampleHint +
-    `目标语言要求：${contextPack.localeInstruction}\n` +
-    (contextPack.punctuation ? `标点约定：${contextPack.punctuation}
-` : "") +
-    `领域：${contextPack.domain}\n` +
-    `文档上下文（仅用于理解，不得翻译进结果）：\n${formatNeighborContext(contextPack.neighborContext)}\n\n` +
-    `强制术语：${JSON.stringify(contextPack.requiredTerms, null, 2)}\n` +
-    `参考术语：${JSON.stringify(contextPack.preferredTerms, null, 2)}\n` +
-    `术语判断：参考术语中的 exact 只表示原文字符串精确命中，不表示当前词义必然相同；必须结合完整句义、上下文和内容类型判断是否采用登记译法，禁止仅凭字面命中强制替换。\n` +
-    `必须原样保留（URL、占位符、标签、带单位的数值）：${JSON.stringify(contextPack.protectedTokens)}
-` +
-    `结构化事实锚点（translation 范围必须在译文中保持等价；task 范围只作为交付约束，不得翻译进正文）：${JSON.stringify(contextPack.factSchema || { facts: [], limits: [] })}
-` +
-    `数字与日期：数值必须等价，但格式要按目标语言习惯改写；不得为了保留字面而在译文里额外塞入原样数字。
-
-` +
-    `规则：\n1. 不得使用其他目标语言的表达。\n2. 信息保真：数字、日期、名称、占位符、强制术语和事实必须完整保留；除此之外，语序、句式、用词、修辞都可以自由改写为地道说法——换一种地道表达不等于漏译或增译。\n3. 强制术语必须逐字采用指定目标译法。\n4. 上下文只用于消歧和保持连贯，不得把上文或下文混入译文。\n5. 标有 contextualFallback 或 contentType 不同的历史译例只用于稳定术语与基础表达，不得覆盖当前语体要求。\n6. 拒绝翻译腔：成语、习语、重复、语气词、客套话一律换成目标语言中语义与语气对等的自然说法；译文读起来必须像目标语言原生文案，而不是日语的逐字影子。\n7. 原文含押韵、对仗、重复或口号结构时，必须在目标语言中重现节奏与韵律，允许换用地道表达；语气要与原句一致（如闲散自嘲不得译成命令口吻）。\n8. 只翻译“当前原文”，只输出译文，不解释。\n\n${rhymeHint}当前原文：\n${contextPack.source}`;
+  const termsSummary = (terms = []) => terms
+    .map((term) => `· ${term.source} → ${term.target}${term.note ? `（${term.note}）` : ""}${term.matchMode ? ` [${term.matchMode}]` : ""}`)
+    .join("\n");
+  const conflictedTerms = (pack.preferredTerms || []).filter((term) => term.conflict === true);
+  const stable = [
+    `你是资深游戏本地化写手。你的任务不是逐字翻译，而是把${pack.sourceLanguage}文案用 ${pack.targetLanguage} 玩家最自然的方式重新表达：先读懂这句话在游戏场景里的意图、情绪与角色，再用目标语言母语者会用的说法写出来。只改变表达方式，不改变信息。`,
+    `硬规则（任何其它说明与它冲突时以硬规则为准）：\n1. 不得使用其他目标语言的表达。\n2. 信息保真：数字、日期、名称、占位符、强制术语和事实必须完整保留；除此之外，语序、句式、用词、修辞都可以自由改写为地道说法——换一种地道表达不等于漏译或增译。\n3. 强制术语必须逐字采用指定目标译法。\n4. 上下文与语境档案只用于消歧和保持一致，不得把上文、下文或说明文字混入译文。\n5. 数字与日期：数值必须等价，格式按目标语言习惯改写；不得为了保留字面而在译文里额外塞入原样数字。\n6. 拒绝翻译腔：成语、习语、重复、语气词、客套话一律换成目标语言中语义与语气对等的自然说法；译文读起来必须像目标语言原生文案，而不是日语的逐字影子。\n7. 原文含押韵、对仗、重复或口号结构时，必须在目标语言中重现节奏与韵律，允许换用地道表达；语气要与原句一致（如闲散自嘲不得译成命令口吻）。\n8. 只翻译“当前原文”，只输出译文，不解释。`
+  ];
+  const guide = formatStyleGuide(pack.userProfile);
+  if (guide) stable.push(`人工风格指南（版本 ${pack.userProfile?.version || "无"}，跨语体全局；优先级最高，与下面任何风格规则冲突时以它为准）：\n${guide}`);
+  if (pack.styleProfile) {
+    const rules = formatStyleRules(pack.styleProfile.rules);
+    stable.push(`项目风格规范：${pack.styleProfile.name || ""} · 版本 ${pack.styleProfile.version || 1}${pack.styleProfile.instruction ? `\n规范说明：${pack.styleProfile.instruction}` : ""}${rules.length ? `\n规范要点：\n${rules.map((rule) => `· ${rule}`).join("\n")}` : ""}`);
+  }
+  if (exampleHint) stable.push(exampleHint.trim());
+  stable.push(`目标语言要求：${pack.localeInstruction}${pack.punctuation ? `\n标点约定：${pack.punctuation}` : ""}`);
+  stable.push(`本条用途：${pack.contentTypeLabel}｜语体要求：${pack.register}｜领域：${pack.domain}${pack.styleProfile?.contentTypeDirective ? `\n本语体写作口径：${pack.styleProfile.contentTypeDirective}` : ""}${pack.styleProfile?.registerPolicy ? `\n语域上限（写完会用同一口径判定，超出会被标记）：${JSON.stringify(pack.styleProfile.registerPolicy)}——promotional 推销感、casual 口语网感、generic 套话平淡，数值越低表示该倾向越不被允许。` : ""}`);
+  if (translationSkill) {
+    stable.push(`翻译技能：${translationSkill.name} · v${translationSkill.version} · ${translationSkill.instruction || "沿用当前稳定流程"}${(translationSkill.additionalRules || []).length ? `\n技能增量规则：${JSON.stringify(translationSkill.additionalRules)}` : ""}`);
+  }
+  const variable = [];
+  const briefText = formatDocumentBrief(pack.documentBrief);
+  const neighborText = formatNeighborContext(pack.neighborContext);
+  if (briefText) variable.push(`文件语境（来自整份文件的语境分析）：\n${briefText}`);
+  if (neighborText && neighborText !== "无") variable.push(`文档上下文（仅用于理解，不得翻译进结果）：\n${neighborText}`);
+  if (pack.requiredTerms?.length) variable.push(`强制术语（必须逐字采用）：\n${termsSummary(pack.requiredTerms)}`);
+  if (pack.preferredTerms?.length) {
+    variable.push(`参考术语（结合完整句义、上下文与用途判断是否采用；exact 只表示字符串精确命中，不表示当前词义必然相同，禁止仅凭字面命中强制替换）：\n${termsSummary(pack.preferredTerms)}`);
+  }
+  if (conflictedTerms.length) {
+    variable.push(`⚠️ 以下原文在术语库里存在多个登记译法，本次译文只能采用其中一个，不得在同一条里混用，也不得自行造第三种译法：\n${conflictedTerms.map((term) => `· ${term.source}：${term.target}`).join("\n")}`);
+  }
+  if (pack.protectedTokens?.length) variable.push(`必须原样保留（URL、占位符、标签、带单位的数值）：${JSON.stringify(pack.protectedTokens)}`);
+  if (pack.factSchema) variable.push(`结构化事实锚点（translation 范围必须在译文中保持等价；task 范围只作为交付约束，不得翻译进正文）：${JSON.stringify(pack.factSchema)}`);
+  if (pack.translationReferences?.length) variable.push(`历史译例（同语言、相似度与人工可信度排序；标有 contextualFallback 或用途不同的译例只用于稳定术语与基础表达，不得覆盖当前用途要求）：${JSON.stringify(pack.translationReferences)}`);
+  if (pack.qaGuidance?.length) variable.push(`历史 AIQA 反例与修订：${JSON.stringify(pack.qaGuidance)}`);
+  if (batchVerseHint) variable.push(batchVerseHint.trim());
+  if (batchReferenceHint) variable.push(batchReferenceHint.trim());
+  if (batchGroupHint) variable.push(batchGroupHint.trim());
+  if (rhymeHint) variable.push(rhymeHint.trim());
+  return `${[...stable, ...variable].join("\n\n")}\n\n当前原文：\n${pack.source}`;
 }
 
 /**
@@ -696,7 +867,16 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
       role: "system",
       content: `你是独立于翻译器的亚洲语言本地化 QA 审校员。按照 MQM 思路逐项检查六个一级维度：Accuracy、Fluency、Terminology、Style、Locale、Platform。category 必须以小写一级维度开头，可细分为 accuracy_omission、accuracy_addition、accuracy_mistranslation、fluency_grammar、fluency_naturalness、terminology_required、terminology_forbidden、style_register、style_brand、locale_convention、platform_constraint、platform_placeholder。contextPack.styleProfile.reviewRubric 是评审标准，不是生成提示。contextPack.preferredTerms 中 matchMode 为 exact 只代表字面精确命中；你必须根据原文句义和上下文判断该条正式术语在此处是否适用，不能仅因译文未采用登记译法就报错。approvedReferences 是人工批准的译例，只有同语种、同语体且语义相关时才引用，且仍不能盲从。machineDrafts 是本系统自己此前产出的机器译文，只能用于发现同一文档内自相矛盾，绝不能当作正确与否的依据，也不得以"与 machineDrafts 不一致"为由报告问题。不要直接给总分，只报告可定位的问题。严重度只能是 critical、major、minor。message、suggestion 和其他解释性字段必须全部使用简体中文，禁止用目标语言解释问题；sourceSpan、targetSpan 必须逐字保留原文或译文中的证据片段。特别注意：只有语义确实丢失或凭空添加事实才算漏译/增译；调整语序、换用同义地道表达、重写修辞都不是问题。发现译文逐字直译、翻译腔、不像目标语言原生文案时，记 major（category 用 fluency_naturalness）。原文含押韵、对仗、重复或口号结构时，译文必须用目标语言自然重现节奏与韵律；机械逐字重复、把闲散语气译成命令口吻、韵律完全丢失都应记 major。若输入里的 contextPack 携带 batchVerse 或 batchReferences（同批排比韵文），必须检查当前译文与本批已定稿译文的句式、节奏与用词风格是否一致，明显不一致记 major。没有问题返回空数组。输出严格 JSON：{"issues":[{"severity":"major","category":"accuracy_omission","sourceSpan":"原文片段","targetSpan":"译文片段","message":"简体中文问题原因","suggestion":"简体中文可执行修订意见","evidenceMemoryId":"可选ID","confidence":0.9}]}`
     },
-    { role: "user", content: JSON.stringify({ contextPack, translation, approvedReferences: references.slice(0, 5), machineDrafts: machineDrafts.slice(0, 3), qaCases: qaCases.slice(0, 3) }) }
+    {
+      role: "user",
+      content: [
+        contextPackText(contextPack, "review"),
+        `待审译文：\n${translation}`,
+        `人工批准译例（只有同语种、同用途且语义相关时才可引用，且不能盲从）：${JSON.stringify(references.slice(0, 5))}`,
+        `本系统此前的机器译文（只能用于发现同一文档内自相矛盾，不得当作正确与否的依据）：${JSON.stringify(machineDrafts.slice(0, 3))}`,
+        `历史反例：${JSON.stringify(qaCases.slice(0, 3))}`
+      ].join("\n\n")
+    }
   ];
   let content = await chat(messages, runtimeConfig, { temperature, seed, onSeedUnsupported, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "AIQA", responseFormat: { type: "json_object" }, onUsage });
   let payload;
@@ -721,7 +901,15 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
         role: "system",
         content: "你是本地化 QA。不要输出 JSON。若没有问题只输出 PASS；若有问题，每个问题单独一行，严格使用：ISSUE|critical/major/minor|英文类别代码|原文片段|译文片段|简体中文问题原因|简体中文修订建议。问题原因和修订建议禁止使用目标语言。不得输出其他内容。"
       },
-      { role: "user", content: JSON.stringify({ contextPack, translation, references: references.slice(0, 3), qaCases: qaCases.slice(0, 2) }) }
+      {
+        role: "user",
+        content: [
+          contextPackText(contextPack, "review"),
+          `待审译文：\n${translation}`,
+          `人工批准译例：${JSON.stringify(references.slice(0, 3))}`,
+          `历史反例：${JSON.stringify(qaCases.slice(0, 2))}`
+        ].join("\n\n")
+      }
     ], runtimeConfig, { temperature: 0, seed, onSeedUnsupported, timeoutMs: 60_000, maxTokens: 1600, requestLabel: "AIQA 行式降级", onUsage });
     try {
       payload = { issues: parseAiQaLineResponse(lineContent) };
@@ -1167,8 +1355,17 @@ export function parseAiQaLineResponse(content) {
 
 export async function reviseTranslationWithQa({ contextPack, translation, issues, references = [], qaCases = [], onUsage = null }) {
   return chat([
-    { role: "system", content: "你是最终修订译者。只修复 QA 明确指出的问题，保留正确内容、数字、格式、占位符、术语的语境判断结果、明确硬约束和原有信息边界；若问题涉及表达不地道，就用更地道的说法改写，不要退回逐字直译；若原文带韵律结构（contextPack.rhymeLike 为 true），修订必须同时重现节奏与押韵。只输出完整修订译文，不要解释。" },
-    { role: "user", content: JSON.stringify({ contextPack, currentTranslation: translation, issues, references: references.slice(0, 5), qaCases: qaCases.slice(0, 3) }) }
+    { role: "system", content: "你是最终修订译者。只修复 QA 明确指出的问题，保留正确内容、数字、格式、占位符、术语的语境判断结果、明确硬约束和原有信息边界；若问题涉及表达不地道，就用更地道的说法改写，不要退回逐字直译；若原文或文件语境显示韵律结构，修订必须同时重现节奏与押韵。只输出完整修订译文，不要解释。" },
+    {
+      role: "user",
+      content: [
+        contextPackText(contextPack, "revise"),
+        `当前译文：\n${translation}`,
+        `必须修复的问题：${JSON.stringify(issues)}`,
+        `人工批准译例：${JSON.stringify(references.slice(0, 5))}`,
+        `历史反例：${JSON.stringify(qaCases.slice(0, 3))}`
+      ].join("\n\n")
+    }
   ], runtimeConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "AIQA 修订", onUsage });
 }
 
@@ -1184,7 +1381,14 @@ export async function adjudicatePotentialTermsWithModel({ contextPack, translati
       role: "system",
       content: "你是游戏本地化术语裁决译者。逐项判断当前原文中的疑似表达是否与术语库正式源词表示同一概念。若是，必须在完整译文中自然地采用 officialTarget；若不是，不得强行替换。保留全部事实、格式、数字和其他正确内容。reason 必须使用简体中文，便于中文项目成员审核。输出严格 JSON：{\"translation\":\"裁决后的完整译文\",\"decisions\":[{\"officialSource\":\"正式源词\",\"matchedSource\":\"当前表达\",\"officialTarget\":\"正式译法\",\"decision\":\"apply|not_applicable\",\"reason\":\"简体中文简短理由\"}]}"
     },
-    { role: "user", content: JSON.stringify({ contextPack, currentTranslation: translation, candidates }) }
+    {
+      role: "user",
+      content: [
+        contextPackText(contextPack, "adjudicate"),
+        `当前译文：\n${translation}`,
+        `待裁决术语：${JSON.stringify(candidates)}`
+      ].join("\n\n")
+    }
   ], runtimeConfig, { temperature: 0.05, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "术语自动裁决", responseFormat: { type: "json_object" }, onUsage });
   const start = content.indexOf("{");
   const end = content.lastIndexOf("}");
@@ -1360,6 +1564,56 @@ export async function classifyWithModel(text, { descriptor = "", location = "" }
   return { ...JSON.parse(match[0]), source: "model" };
 }
 
+/** 语境分析：通读一整片条目，产出用途区间、跨条目关联与格式注意点。 */
+export async function analyzeDocumentContextWithModel({ filename = "", format = "", locale = "zh-CN", declaredPurpose = "", entries = [], part = null, onUsage = null } = {}) {
+  const messages = contextBriefMessages({ filename, format, locale, declaredPurpose, entries, part });
+  const content = await chat(messages, configForRole("main"), {
+    temperature: 0.2, timeoutMs: 120_000, maxTokens: 3_000, requestLabel: "语境分析", responseFormat: { type: "json_object" }, onUsage
+  });
+  try {
+    return parseContextBriefPart(content, { entries });
+  } catch (error) {
+    // 模型偶发返回非 JSON：只重试一次格式，不重试内容判断。
+    const retry = await chat([
+      ...messages,
+      { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
+      { role: "user", content: "上一个回答不是可解析的严格 JSON。请只重新输出一个紧凑 JSON 对象，字段为 documentType、sections、crossRefs、notes；不要 Markdown、解释或代码围栏。" }
+    ], configForRole("main"), {
+      temperature: 0, timeoutMs: 60_000, maxTokens: 3_000, requestLabel: "语境分析格式重试", responseFormat: { type: "json_object" }, onUsage
+    });
+    try {
+      return parseContextBriefPart(retry, { entries });
+    } catch {
+      throw new Error(`语境分析模型返回格式无效：${error.message}`);
+    }
+  }
+}
+
+/** 交付前一致性核对：只报跨条目的漂移，不重复逐条 QA。 */
+export async function checkBatchConsistencyWithModel({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, onUsage = null } = {}) {
+  const messages = consistencyMessages({ filename, locale, purpose, pairs, part });
+  const content = await chat(messages, configForRole("main"), {
+    temperature: 0.1, timeoutMs: 120_000, maxTokens: 2_000, requestLabel: "一致性检查", responseFormat: { type: "json_object" }, onUsage
+  });
+  const validIds = pairs.map((pair) => String(pair.id));
+  try {
+    return parseConsistencyFindings(content, { validIds });
+  } catch (error) {
+    const retry = await chat([
+      ...messages,
+      { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
+      { role: "user", content: '上一个回答不是可解析的严格 JSON。请只重新输出 {"findings":[]} 这种形状的紧凑 JSON，不要 Markdown 或解释。' }
+    ], configForRole("main"), {
+      temperature: 0, timeoutMs: 60_000, maxTokens: 2_000, requestLabel: "一致性检查格式重试", responseFormat: { type: "json_object" }, onUsage
+    });
+    try {
+      return parseConsistencyFindings(retry, { validIds });
+    } catch {
+      throw new Error(`一致性检查模型返回格式无效：${error.message}`);
+    }
+  }
+}
+
 export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "", modelRole = "main" } = {}) {
   const rhymeLike = contextPack?.rhymeLike === true;
   const batchVerse = contextPack?.batchVerse?.active === true;
@@ -1379,12 +1633,12 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
   }
   const reflection = await chat([
     { role: "system", content: "你是严格的双语本地化审校。只指出漏译、误译、术语、事实、语体、翻译腔和韵律/重复结构丢失问题（原文押韵、对仗或口号式重复时，译文须自然重现节奏与语气）；若上下文带有同批已定稿译文，还要检查句式与风格是否保持一致；没有问题则回答 PASS。" },
-    { role: "user", content: `上下文要求：${JSON.stringify(contextPack)}\n\n初译：\n${initial}` }
+    { role: "user", content: `${contextPackText(contextPack, "reflect")}\n\n初译：\n${initial}` }
   ], callConfig, { temperature: 0.35, timeoutMs: 60_000, requestLabel: "翻译自检", onUsage });
   if (/^PASS[。.!]?$/i.test(reflection)) return { initial, translation: initial, reflection };
   const translation = await chat([
     { role: "system", content: "你是最终修订译者。根据审校意见做最小必要修改，严格保留事实、格式、术语的语境判断结果和明确硬约束。只输出最终译文。" },
-    { role: "user", content: `上下文要求：${JSON.stringify(contextPack)}\n\n初译：${initial}\n\n审校意见：${reflection}` }
+    { role: "user", content: `${contextPackText(contextPack, "reflect")}\n\n初译：${initial}\n\n审校意见：${reflection}` }
   ], callConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "翻译修订", onUsage });
   return { initial, translation, reflection };
 }

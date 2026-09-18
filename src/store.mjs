@@ -932,6 +932,8 @@ async function saveJsonBatchRun(input) {
     structure: input.structure ?? null,
     subBatches: input.subBatches ?? existing?.subBatches ?? [],
     runnerOptions: input.runnerOptions ?? existing?.runnerOptions ?? {},
+    contextBrief: input.contextBrief ?? existing?.contextBrief ?? null,
+    qualityReport: input.qualityReport ?? existing?.qualityReport ?? null,
     runState: String(input.runState || existing?.runState || "ready"),
     segments: (input.segments || []).slice(0, 2_000),
     createdAt: existing?.createdAt || new Date().toISOString(),

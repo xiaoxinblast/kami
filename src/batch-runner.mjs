@@ -1,4 +1,5 @@
 import { splitBatchSubBatches, splitTranslationGroups } from "./batch-document.mjs";
+import { contextBriefSlice, purposeForIndex } from "./context-brief.mjs";
 
 function compactResult(result) {
   if (!result) return null;
@@ -17,6 +18,11 @@ function compactResult(result) {
       termDecisions: (result.aiQa.termDecisions || []).slice(0, 12),
       humanDecisions: (result.aiQa.humanDecisions || []).slice(0, 30)
     } : null,
+    // 本段实际用的用途与质量档：批次页、质量报告与人工复核都要能回溯到"为什么这样跑"。
+    segmentPurpose: result.classification?.contentType || "",
+    qualityTier: result.qualityTier || "",
+    tierReason: clip(result.tierReason || "", 200),
+    qualityUpgradeFrom: result.qualityUpgradeFrom || "",
     styleProfile: result.styleProfile ? { id: result.styleProfile.id, name: result.styleProfile.name, version: result.styleProfile.version } : null,
     trajectoryId: result.trajectoryId || ""
   };
@@ -63,7 +69,8 @@ export async function runServerBatch(batchId, {
   shouldPause = () => false,
   shouldCancel = () => false,
   touch = () => {},
-  review = async () => {}
+  review = async () => {},
+  finalize = async () => {}
 } = {}) {
   const run = await loadRun(batchId);
   if (!run) throw new Error("未找到批次任务");
@@ -72,9 +79,12 @@ export async function runServerBatch(batchId, {
   const batchSettings = project.settings?.batch || {};
   const tmSettings = project.settings?.tm || {};
   const selected = (run.segments || []).filter((segment) => segment.selected !== false);
-  const contentType = run.contentType && run.contentType !== "general"
-    ? run.contentType
-    : await classifyDocument(selected.map((segment) => segment.source).join("\n").slice(0, 8_000));
+  // 语境档案已经给出整份文件的用途时直接用它；没有档案才退回"读前 8000 字判一次"。
+  const brief = run.contextBrief && run.contextBrief.status === "ready" ? run.contextBrief : null;
+  const declaredContentType = String(run.contentType || "general");
+  const contentType = brief?.documentType?.purpose
+    || (declaredContentType && declaredContentType !== "general" ? declaredContentType
+      : await classifyDocument(selected.map((segment) => segment.source).join("\n").slice(0, 8_000)));
   const subBatches = splitBatchSubBatches(selected, {
     maxEntries: batchSettings.subBatchMaxEntries,
     maxChars: batchSettings.subBatchMaxChars
@@ -109,6 +119,8 @@ export async function runServerBatch(batchId, {
       segment.error = "";
       await saveRun(run);
       const position = run.segments.indexOf(segment);
+      // 用途按语境档案的区间继承；档案没覆盖到的段落回落文件级用途。
+      const segmentPurpose = purposeForIndex(brief, position, contentType || "general");
       const context = {
         ...(segment.context || {}),
         previous: segment.context?.previous || run.segments[position - 1]?.source || "",
@@ -129,8 +141,10 @@ export async function runServerBatch(batchId, {
           projectId: run.projectId,
           source: segment.source,
           locale: run.locale,
-          contentType: run.contentType,
+          contentType: segmentPurpose,
+          segmentPurpose,
           domain: run.domain,
+          documentBrief: contextBriefSlice(brief, position, segment.id),
           neighborContext: context,
           batchId: run.batchId,
           segmentId: segment.id,
@@ -142,7 +156,7 @@ export async function runServerBatch(batchId, {
           nextSource: context.next,
           batchReferences,
           batchGroupEntries: (groupById.get(segment.id) || []).map((item) => ({ id: item.id, source: item.source, context: item.context })),
-          route: options.route || "auto",
+          qualityTier: options.qualityTier || "auto",
           reflect: options.reflect !== false,
           useModelClassification: false
         });
@@ -163,6 +177,9 @@ export async function runServerBatch(batchId, {
   run.runState = failed ? "needs_attention" : "completed";
   run.subBatches = checkpointSubBatches(subBatches, run.segments);
   await saveRun(run);
+  // 交付前闭环先跑：一致性核对 + 质量报告是用户翻完立刻要看的结论；
+  // 风格学习与复盘（review）会调多次模型，排在后面免得把报告拖到几分钟后。
+  if (!failed) await finalize(run);
   if (!failed) await review(run);
   return run;
 }

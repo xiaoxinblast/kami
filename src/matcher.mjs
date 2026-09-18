@@ -57,6 +57,53 @@ function couldFuzzyMatch(sourceCharacters, normalizedVariant) {
 }
 
 /**
+ * 日语形态归一：片假名/平假名互写、长音符脱落、动词活用语尾。
+ *
+ * 术语库登记的是辞书形（`リミットブレイク`、`解放する`），正文里却常写作
+ * `リミットブレーク`、`解放して`。旧实现只做 NFKC + 全半角，这几个变化全都
+ * 得靠编辑距离兜底，长的专名往往刚好压在线下。这里先把它们折叠成同一个形态，
+ * 再走原有的精确/模糊/智能三级匹配。
+ */
+const KATAKANA_START = 0x30a1;
+const KATAKANA_END = 0x30f6;
+const KANA_FOLD_MIN_LENGTH = 4;
+
+function katakanaToHiragana(value = "") {
+  let output = "";
+  for (const character of String(value)) {
+    const code = character.codePointAt(0);
+    output += code >= KATAKANA_START && code <= KATAKANA_END ? String.fromCodePoint(code - 0x60) : character;
+  }
+  return output;
+}
+
+const JAPANESE_VERB_TAILS = ["している", "してい", "します", "しました", "しない", "される", "された", "する", "した", "して"];
+
+export function japaneseMatchForms(value = "") {
+  const base = normalizeSource(value);
+  const forms = new Set();
+  if (!base) return [];
+  forms.add(base);
+  const folded = katakanaToHiragana(base).replace(/[\u30fc]/gu, "");
+  if ([...folded].length >= KANA_FOLD_MIN_LENGTH) forms.add(folded);
+  for (const tail of JAPANESE_VERB_TAILS) {
+    if (!base.endsWith(tail)) continue;
+    const stem = base.slice(0, base.length - tail.length);
+    if ([...stem].length >= 2) forms.add(stem);
+    const foldedStem = katakanaToHiragana(stem).replace(/[\u30fc]/gu, "");
+    if ([...foldedStem].length >= KANA_FOLD_MIN_LENGTH) forms.add(foldedStem);
+  }
+  return [...forms];
+}
+
+/**
+ * 长段落往往命中十几条术语：默认上限会把排在最后的正式术语整条截掉，
+ * 模型看不到就等于没登记。这里按长度放宽，并且保留原文的术语永不被截断。
+ */
+const LONG_TEXT_THRESHOLD = 350;
+const LONG_TEXT_LIMIT = 30;
+
+/**
  * @param options.project/channel/platform/region  投放上下文。术语上标注的适用
  *   项目、渠道、平台和地区据此生效；调用方不传就等于不限定，与旧行为一致。
  * @param options.now  判定术语有效期的时点。过期、未生效和已废弃的术语不再参与
@@ -79,6 +126,7 @@ export function matchTerms(text, assets, {
   const normalizedText = normalizeSource(text);
   const caseSensitiveText = foldPreservingCase(text);
   const sourceCharacters = new Set([...normalizedText]);
+  const textForms = japaneseMatchForms(text);
   const matches = [];
   // 治理准入：只保留已批准、正式层级、当前有效且投放范围命中的术语版本。
   const governedTerms = filterEffectiveTerms(assets.terms ?? [], {
@@ -91,13 +139,19 @@ export function matchTerms(text, assets, {
     for (const variant of variants) {
       const normalizedVariant = normalizeSource(variant);
       if (!normalizedVariant) continue;
-      if (normalizedText.includes(normalizedVariant)) {
+      const variantForms = japaneseMatchForms(variant);
+      const foldedHit = variantForms.find((form) => form !== normalizedVariant && textForms.some((textForm) => textForm.includes(form)));
+      if (normalizedText.includes(normalizedVariant) || foldedHit) {
         // 区分大小写的术语只有大小写也一致才算精确命中；仅拼写相同的，降级成
         // 待确认提示，让人工决定 iOS / ios 是不是同一个东西。
         const caseMatched = !caseSensitive || caseSensitiveText.includes(foldPreservingCase(variant));
-        const exactness = normalizedVariant === normalizedText ? 1 : 0.92;
+        // 形态差异（片假名长短音、活用尾）只是写法不同，按精确命中处理，
+        // 但分数略低于字面完全一致，方便排序时把完全一致的排前面。
+        const exactness = normalizedVariant === normalizedText ? 1 : (foldedHit && !normalizedText.includes(normalizedVariant) ? 0.9 : 0.92);
+        // 形态折叠命中时 matchPhrase 仍然给登记源词：折叠形态（片假名转平假名、
+        // 去掉长音符）不是原文里真实存在的字符串，不能当作"命中的片段"展示或核对。
         const candidate = caseMatched
-          ? { mode: "exact", variant, matchPhrase: variant, score: exactness }
+          ? { mode: "exact", variant, matchPhrase: variant, score: exactness, ...(foldedHit ? { variantForm: foldedHit } : {}) }
           : { mode: "fuzzy", variant, matchPhrase: variant, score: exactness * 0.82, caseMismatch: true };
         if (!best || candidate.score > best.score) best = candidate;
         continue;
@@ -143,9 +197,30 @@ export function matchTerms(text, assets, {
     if (!current || priority < current.priority) winners.set(key, { priority, matches: [match] });
     else if (priority === current.priority) current.matches.push(match);
   }
-  return [...winners.values()].flatMap((item) => item.matches).sort((a, b) => {
+  const sorted = [...winners.values()].flatMap((item) => item.matches).sort((a, b) => {
     const aPriority = Number.isFinite(Number(a.term.libraryPriority)) ? Number(a.term.libraryPriority) : 100;
     const bPriority = Number.isFinite(Number(b.term.libraryPriority)) ? Number(b.term.libraryPriority) : 100;
     return aPriority - bPriority || b.score - a.score;
-  }).slice(0, limit);
+  });
+  // 最长匹配优先：短术语落在更长命中里时不再单独下发。
+  // 「パス→帕斯」嵌在「プレミアムパス→高级通行证」里、单字「運→运气」嵌在「運営」里，
+  // 两条一起送进提示词就是在诱导模型把长词拆成短词的译法，也会让术语采用率虚低。
+  const phraseOf = (match) => normalizeSource(match.matchPhrase || match.term?.source || "");
+  const effective = sorted.filter((match) => {
+    const phrase = phraseOf(match);
+    if (!phrase) return true;
+    return !sorted.some((other) => {
+      if (other === match) return false;
+      const otherPhrase = phraseOf(other);
+      return otherPhrase.length > phrase.length && otherPhrase.includes(phrase) && other.score >= match.score - 0.05;
+    });
+  });
+  const targetLimit = [...normalizedText].length > LONG_TEXT_THRESHOLD ? Math.max(limit, LONG_TEXT_LIMIT) : limit;
+  if (effective.length <= targetLimit) return effective;
+  const kept = new Set(effective.filter((match) => match.preserveOriginal || match.term?.preserveOriginal));
+  for (const match of effective) {
+    if (kept.size >= targetLimit) break;
+    kept.add(match);
+  }
+  return effective.filter((match) => kept.has(match));
 }

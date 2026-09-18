@@ -10,7 +10,7 @@ import { classifyContent, descriptorFromContext, inferContentTags, resolveDomain
 import { buildContextPack } from "./src/context-pack.mjs";
 import { refineCorpus } from "./src/corpus.mjs";
 import { matchTerms } from "./src/matcher.mjs";
-import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, classifyWithModel, costPricingConfigured, embed, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, glossTranslationWithModel, isEmbeddingConfigured, probeModelAvailability, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig } from "./src/provider.mjs";
+import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, glossTranslationWithModel, isEmbeddingConfigured, probeModelAvailability, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig } from "./src/provider.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
@@ -43,6 +43,9 @@ import { buildAdoptedStyleEvidence, buildKnownIssueFeedbackRequest, presentKnown
 import { checkFactSchema, detectDeliveryContext, extractFactSchema } from "./src/fact-schema.mjs";
 import { applyProjectQaPolicy, projectRuleMetadata } from "./src/project-config.mjs";
 import { assessTranslationRisk, decideQualityRoute, qualityThresholdForRisk, selectTranslationRoute, TRANSLATION_ROUTES } from "./src/translation-routing.mjs";
+import { QUALITY_TIERS, describeTierStrength, planQualityTier, resolveManualTier, selectQualityTier } from "./src/quality-tier.mjs";
+import { CONTEXT_BRIEF_MIN_SEGMENTS, contextBriefEntries, mergeContextBrief, purposeForIndex, splitContextChunks, summarizeContextBrief } from "./src/context-brief.mjs";
+import { buildQualityReport, deterministicConsistencyFindings, mergeConsistencyFindings, splitConsistencyChunks } from "./src/consistency-check.mjs";
 import { deriveTermCandidatesFromHumanFinal, MEMORY_PURPOSES } from "./src/asset-governance.mjs";
 import { buildReviewReceipt, normalizeReviewDecision } from "./src/review-receipt.mjs";
 import { createRegressionCandidateFromQaCase, decideRegressionCandidate, normalizeGoldSet, normalizeRegressionSuite } from "./src/gold-regression.mjs";
@@ -1719,6 +1722,214 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
   };
 }
 
+/** 语境分析与一致性核对都是"整份文件"级任务：同一批次同时只允许跑一个。 */
+const contextAnalysisTasks = new Map();
+const consistencyCheckTasks = new Map();
+const CONTEXT_ANALYSIS_CONCURRENCY = 3;
+const CONSISTENCY_CHECK_CONCURRENCY = 3;
+
+function taskProgressReporter(taskId) {
+  return (update) => { if (taskId) updateBackgroundTaskProgress(taskId, { progress: update }).catch(() => {}); };
+}
+
+/**
+ * 通读整份文件，产出语境档案。
+ *
+ * 分片并行（每片 ≤300 条且 ≤40000 字），片内失败只丢这一片，最后合并成一份档案；
+ * 全部分片都失败时档案标记为 failed，翻译路径自动回落通用口径。
+ */
+async function runContextAnalysis(batchId, { taskId = "" } = {}) {
+  const run = await getBatchRun(batchId);
+  if (!run) throw new Error("未找到这条翻译任务");
+  const segments = Array.isArray(run.segments) ? run.segments : [];
+  if (!segments.length) throw new Error("这条任务还没有分段，无法做语境分析");
+  const chunks = splitContextChunks(segments);
+  const report = taskProgressReporter(taskId);
+  const provider = getProviderConfig();
+  const declaredLabel = CONTENT_TYPES[run.contentType]?.label || "";
+  report({ phase: "analyzing", message: `正在通读全文：0 / ${chunks.length} 片`, percent: 5, completed: 0, total: chunks.length });
+  let completed = 0;
+  const failures = [];
+  const results = await runTaskPool(chunks, async (chunk) => analyzeDocumentContextWithModel({
+    filename: run.filename,
+    format: run.format,
+    locale: run.locale,
+    declaredPurpose: run.contentType && run.contentType !== "general" ? declaredLabel : "",
+    entries: contextBriefEntries(segments, chunk.indices),
+    part: { index: chunk.index, total: chunks.length }
+  }), {
+    concurrency: CONTEXT_ANALYSIS_CONCURRENCY,
+    onSettled: (result) => {
+      completed += 1;
+      if (result.status === "rejected") failures.push(String(result.reason?.message || result.reason));
+      report({
+        phase: "analyzing",
+        message: `正在通读全文：${completed} / ${chunks.length} 片`,
+        percent: 5 + Math.round((completed / chunks.length) * 80),
+        completed,
+        total: chunks.length
+      });
+    }
+  });
+  const parts = [];
+  const dropped = [];
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    parts.push(result.value.part);
+    dropped.push(...(result.value.dropped || []));
+  }
+  const brief = mergeContextBrief(parts, { filename: run.filename, total: segments.length, model: provider.model });
+  brief.dropped = dropped.slice(0, 50);
+  if (failures.length && !parts.length) brief.status = "failed";
+  if (failures.length) brief.warning = `${failures.length} 片分析失败：${failures[0]}`;
+  const latest = await getBatchRun(batchId);
+  await saveBatchRun({ ...(latest || run), contextBrief: brief });
+  return brief;
+}
+
+/** 起一个语境分析后台任务；同一批次已在跑时直接复用。 */
+function startContextAnalysis(batchId) {
+  const running = contextAnalysisTasks.get(batchId);
+  if (running) return running;
+  const tracked = (async () => {
+    const run = await getBatchRun(batchId);
+    if (!run) return { batchId, taskId: "", failed: "未找到这条翻译任务" };
+    const task = await createBackgroundTask({
+      type: "context_analysis",
+      title: `语境分析 · ${run.filename}`,
+      locale: run.locale,
+      projectId: run.projectId,
+      progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length }
+    });
+    try {
+      const brief = await runContextAnalysis(batchId, { taskId: task.id });
+      await updateBackgroundTaskProgress(task.id, {
+        status: brief.status === "ready" ? "completed" : "failed",
+        progress: {
+          phase: brief.status === "ready" ? "completed" : "failed",
+          message: brief.status === "ready"
+            ? `语境分析完成：${brief.sections.length} 个区间，覆盖 ${brief.coverage.covered} / ${brief.coverage.total} 条`
+            : "语境分析失败，翻译将按通用口径继续",
+          percent: 100,
+          completed: brief.coverage.covered,
+          total: brief.coverage.total
+        },
+        payload: {
+          batchId,
+          documentPurpose: brief.documentType?.purpose || "general",
+          sections: brief.sections.length,
+          coverage: brief.coverage,
+          warning: brief.warning || ""
+        }
+      });
+      return { batchId, taskId: task.id, brief };
+    } catch (error) {
+      await updateBackgroundTaskProgress(task.id, {
+        status: "failed",
+        progress: { phase: "failed", message: error.message, percent: 100 }
+      }).catch(() => {});
+      return { batchId, taskId: task.id, failed: error.message };
+    }
+  })().finally(() => contextAnalysisTasks.delete(batchId));
+  contextAnalysisTasks.set(batchId, tracked);
+  return tracked;
+}
+
+/**
+ * 交付前一致性核对 + 质量报告。确定性部分（同原文不同译文、术语登记译法未采用）
+ * 不花额度先算；语义漂移分片交给模型。结果写回批次记录，供批次页与任务中心查看。
+ */
+async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
+  const run = await getBatchRun(batchId);
+  if (!run) throw new Error("未找到这条翻译任务");
+  const segments = Array.isArray(run.segments) ? run.segments : [];
+  const translated = segments.filter((segment) => segment.selected !== false && String(segment.translation || "").trim());
+  if (!translated.length) throw new Error("这条任务还没有译文，无法核对一致性");
+  const report = taskProgressReporter(taskId);
+  const pairs = translated.map((segment) => ({
+    id: String(segment.id || ""),
+    source: String(segment.source || ""),
+    translation: String(segment.translation || "")
+  }));
+  const findings = deterministicConsistencyFindings(segments);
+  const chunks = splitConsistencyChunks(pairs);
+  report({ phase: "checking", message: `正在核对跨条目一致性：0 / ${chunks.length} 片`, percent: 10, completed: 0, total: chunks.length });
+  let completed = 0;
+  const failures = [];
+  const byId = new Map(pairs.map((pair) => [pair.id, pair]));
+  const results = await runTaskPool(chunks, async (chunk) => checkBatchConsistencyWithModel({
+    filename: run.filename,
+    locale: run.locale,
+    purpose: run.contentType || "general",
+    pairs: chunk.ids.map((id) => byId.get(id)).filter(Boolean),
+    part: { index: chunk.index, total: chunks.length }
+  }), {
+    concurrency: CONSISTENCY_CHECK_CONCURRENCY,
+    onSettled: (result) => {
+      completed += 1;
+      if (result.status === "rejected") failures.push(String(result.reason?.message || result.reason));
+      report({
+        phase: "checking",
+        message: `正在核对跨条目一致性：${completed} / ${chunks.length} 片`,
+        percent: 10 + Math.round((completed / chunks.length) * 70),
+        completed,
+        total: chunks.length
+      });
+    }
+  });
+  const modelFindings = mergeConsistencyFindings(results.filter((result) => result.status === "fulfilled").map((result) => result.value));
+  const merged = [...findings, ...modelFindings];
+  const provider = getProviderConfig();
+  const styleProfile = await getStyleProfile(run.locale, run.contentType || "general", run.domain || "general", { projectId: run.projectId, scopeFallback: true }).catch(() => null);
+  const qualityReport = buildQualityReport({
+    segments, brief: run.contextBrief || null, findings: merged, provider, styleProfile,
+    batchId: run.batchId, filename: run.filename, locale: run.locale
+  });
+  const latest = await getBatchRun(batchId);
+  await saveBatchRun({ ...(latest || run), qualityReport: { report: qualityReport, findings: merged, warning: failures[0] || "" } });
+  return { report: qualityReport, findings: merged, failures };
+}
+
+/** 起一个一致性核对后台任务；同一批次已在跑时直接复用。 */
+function startConsistencyCheck(batchId) {
+  const running = consistencyCheckTasks.get(batchId);
+  if (running) return running;
+  const tracked = (async () => {
+    const run = await getBatchRun(batchId);
+    if (!run) return { batchId, taskId: "", failed: "未找到这条翻译任务" };
+    const task = await createBackgroundTask({
+      type: "consistency_check",
+      title: `一致性核对 · ${run.filename}`,
+      locale: run.locale,
+      projectId: run.projectId,
+      progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length }
+    });
+    try {
+      const outcome = await runConsistencyCheck(batchId, { taskId: task.id });
+      await updateBackgroundTaskProgress(task.id, {
+        status: "completed",
+        progress: {
+          phase: "completed",
+          message: `一致性核对完成：${outcome.findings.length} 条待核对，质检覆盖率 ${outcome.report.coverage.percent}%`,
+          percent: 100,
+          completed: outcome.findings.length,
+          total: outcome.findings.length
+        },
+        payload: { batchId, findings: outcome.findings.length, report: outcome.report, warning: outcome.failures[0] || "" }
+      });
+      return { batchId, taskId: task.id, ...outcome };
+    } catch (error) {
+      await updateBackgroundTaskProgress(task.id, {
+        status: "failed",
+        progress: { phase: "failed", message: error.message, percent: 100 }
+      }).catch(() => {});
+      return { batchId, taskId: task.id, failed: error.message };
+    }
+  })().finally(() => consistencyCheckTasks.delete(batchId));
+  consistencyCheckTasks.set(batchId, tracked);
+  return tracked;
+}
+
 function startBatchWorker(batchId, backgroundTaskId = "") {
   const existing = batchWorkers.get(batchId);
   if (existing) return existing;
@@ -1767,7 +1978,15 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
       positiveLimit: getSettings().learning.distillPositiveSamples,
       negativeLimit: getSettings().learning.distillNegativeSamples,
       staleRounds: getSettings().learning.ruleStaleRounds
-    })
+    }),
+    // 整批翻完之后自动跑一次交付前闭环：一致性核对 + 质量报告。
+    // 这一步失败不影响批次完成状态，批次页可以手动重跑。
+    finalize: async (run) => {
+      if (getSettings().quality?.autoConsistencyCheck === false) return;
+      await runConsistencyCheck(run.batchId).catch((error) => {
+        console.error(`[Kami] 批次 ${run.batchId} 一致性核对失败：${error.message}`);
+      });
+    }
   }).catch(async (error) => {
     const run = await getBatchRun(batchId).catch(() => null);
     if (run) await saveBatchRun({ ...run, runState: "needs_attention" }).catch(() => {});
@@ -3562,7 +3781,11 @@ async function apiHandler(req, res, url) {
         console.error(`[Kami] 原文件存档失败（批次 ${batchId}）：${error.message}`);
       }
     }
-    return json(res, 200, { ...prepared, batchId, originalFile });
+    // 解析完就让后台通读全文做语境分析（不阻塞上传响应）：翻译开始前必须有用途标注，
+    // 否则就会回落到"读前 8000 字猜一次"。进度在任务中心与批次页都能看到。
+    const contextBriefPending = prepared.segments.length >= CONTEXT_BRIEF_MIN_SEGMENTS;
+    if (contextBriefPending) startContextAnalysis(batchId).catch((error) => console.error("[Kami] 语境分析启动失败", error));
+    return json(res, 200, { ...prepared, batchId, originalFile, contextBriefPending });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
     const body = await readJsonBody(req);
@@ -3632,9 +3855,29 @@ async function apiHandler(req, res, url) {
     const run = await getBatchRun(batchId);
     if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
     if (batchWorkers.has(batchId)) return json(res, 200, { batchId, runState: "running", alreadyRunning: true });
+    // 语境分析是翻译的前置条件：还没跑完就先把分析跑起来，让前端等在原地，
+    // 而不是用"猜出来的语体"先把整批翻掉。
+    const briefReady = run.contextBrief?.status === "ready";
+    if (!briefReady && (run.segments || []).length >= CONTEXT_BRIEF_MIN_SEGMENTS) {
+      const pending = contextAnalysisTasks.has(batchId);
+      if (!pending) startContextAnalysis(batchId).catch((error) => console.error("[Kami] 语境分析启动失败", error));
+      return json(res, 409, {
+        code: "context_brief_pending",
+        batchId,
+        error: pending ? "语境分析还在进行，完成后翻译会自动开始" : "已开始语境分析，完成后翻译会自动开始"
+      });
+    }
     const segments = run.segments.map((segment) => segment.status === "error" || segment.status === "running" ? { ...segment, status: "pending", error: "" } : segment);
     // 保留 runnerOptions 里的原文件存档路径：写回原文件靠它。
-    await saveBatchRun({ ...run, segments, runnerOptions: { ...(run.runnerOptions || {}), route: body.route || run.runnerOptions?.route || "auto", reflect: body.reflect !== false }, runState: "queued" });
+    await saveBatchRun({
+      ...run,
+      segments,
+      runnerOptions: {
+        ...(run.runnerOptions || {}),
+        qualityTier: resolveManualTier({ qualityTier: body.qualityTier, route: body.route || run.runnerOptions?.route })
+      },
+      runState: "queued"
+    });
     const task = await createBackgroundTask({
       type: "batch_translation",
       title: `批次翻译 · ${run.filename}`,
@@ -3645,6 +3888,82 @@ async function apiHandler(req, res, url) {
     });
     startBatchWorker(batchId, task.id);
     return json(res, 202, { batchId, runState: "queued", backgroundTaskId: task.id });
+  }
+  if (/^\/api\/batch\/run\/[^/]+\/context-brief$/u.test(url.pathname)) {
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const run = await getBatchRun(batchId);
+    if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
+    if (req.method === "GET") {
+      return json(res, 200, {
+        batchId,
+        pending: contextAnalysisTasks.has(batchId),
+        brief: run.contextBrief || null,
+        summary: summarizeContextBrief(run.contextBrief || null)
+      });
+    }
+    if (req.method === "POST") {
+      // 手动（重新）分析：立即返回，进度走 GET 轮询与任务中心；
+      // 已在跑时服务端会复用同一次任务，不重复烧额度。
+      const alreadyRunning = contextAnalysisTasks.has(batchId);
+      if (!alreadyRunning) startContextAnalysis(batchId).catch((error) => console.error("[Kami] 语境分析任务异常", error));
+      return json(res, 202, { batchId, pending: true, alreadyRunning });
+    }
+    if (req.method === "PATCH") {
+      // 人工修正：用途区间、注意点与整体结论都可以改，改完立即对后续翻译生效。
+      const body = await readJsonBody(req);
+      const current = run.contextBrief || { version: 1, status: "ready", generatedAt: new Date().toISOString() };
+      const next = { ...current };
+      if (body.documentType && typeof body.documentType === "object") {
+        next.documentType = { ...(current.documentType || {}), ...body.documentType };
+      }
+      if (Array.isArray(body.sections)) {
+        const total = (run.segments || []).length;
+        const sections = [];
+        for (const section of body.sections) {
+          const from = Math.trunc(Number(section?.from));
+          const to = Math.trunc(Number(section?.to));
+          if (!Number.isFinite(from) || !Number.isFinite(to) || to < from || from < 1) continue;
+          const purpose = Object.hasOwn(CONTENT_TYPES, String(section?.purpose || "")) ? String(section.purpose) : "general";
+          sections.push({
+            from: Math.min(from, total),
+            to: Math.min(to, total),
+            purpose,
+            tone: String(section?.tone || "").slice(0, 80),
+            note: String(section?.note || "").slice(0, 300)
+          });
+        }
+        next.sections = sections;
+      }
+      if (Array.isArray(body.notes)) {
+        next.notes = body.notes
+          .map((note) => ({ text: String(note?.text || "").slice(0, 300), ids: Array.isArray(note?.ids) ? note.ids.map(String).slice(0, 20) : [] }))
+          .filter((note) => note.text)
+          .slice(0, 40);
+      }
+      next.status = "ready";
+      next.editedAt = new Date().toISOString();
+      const covered = new Set();
+      for (const section of next.sections || []) for (let index = section.from; index <= section.to; index += 1) covered.add(index);
+      next.coverage = { ...(current.coverage || {}), covered: covered.size, total: (run.segments || []).length, percent: run.segments?.length ? Math.round((covered.size / run.segments.length) * 100) : 0 };
+      await saveBatchRun({ ...run, contextBrief: next });
+      return json(res, 200, { batchId, summary: summarizeContextBrief(next) });
+    }
+    return json(res, 405, { error: "不支持的方法" });
+  }
+  if (/^\/api\/batch\/run\/[^/]+\/consistency-check$/u.test(url.pathname)) {
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const run = await getBatchRun(batchId);
+    if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
+    if (req.method === "GET") {
+      return json(res, 200, { batchId, pending: consistencyCheckTasks.has(batchId), ...(run.qualityReport || { report: null, findings: [] }) });
+    }
+    if (req.method === "POST") {
+      // 同上：核对要跑几十次模型调用，不能挂在请求上等。
+      const alreadyRunning = consistencyCheckTasks.has(batchId);
+      if (!alreadyRunning) startConsistencyCheck(batchId).catch((error) => console.error("[Kami] 一致性核对任务异常", error));
+      return json(res, 202, { batchId, pending: true, alreadyRunning });
+    }
+    return json(res, 405, { error: "不支持的方法" });
   }
   if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/pause$/u.test(url.pathname)) {
     const batchId = decodeURIComponent(url.pathname.split("/")[4]);
@@ -4852,7 +5171,20 @@ async function evaluateQaBatch(batchId, projectId = "") {
       error.statusCode = 400;
       throw error;
     }
-    const classification = await classify({ text: body.source, hint: body.contentType, useModel: body.useModelClassification, neighborContext: body.neighborContext });
+    // 用途优先来自语境档案（整份文件通读后的区间标注），其次才是调用方指定的语体，
+    // 最后才逐句猜。档案标注是"读到过上下文"的结论，比单句启发式可靠得多。
+    const briefPurpose = Object.hasOwn(CONTENT_TYPES, String(body.segmentPurpose || "").trim()) ? String(body.segmentPurpose).trim() : "";
+    const classification = await classify({
+      text: body.source,
+      hint: briefPurpose || body.contentType,
+      useModel: body.useModelClassification && !briefPurpose,
+      neighborContext: body.neighborContext
+    });
+    if (briefPurpose) {
+      classification.source = "context-brief";
+      classification.confidence = Math.max(Number(classification.confidence) || 0, 0.9);
+      classification.evidence = [`语境档案标注用途：${CONTENT_TYPES[briefPurpose].label}`];
+    }
     const projectId = String(body.projectId || "").trim();
     const assets = (await getProjectAssets(locale, projectId)).assets;
     const projectRecord = projectId ? await getProject(projectId) : null;
@@ -4992,14 +5324,25 @@ async function evaluateQaBatch(batchId, projectId = "") {
       metadata: neighborMetadata,
       protectedTokens: contextPack.protectedTokens
     });
-    let routing = selectTranslationRoute({
+    // 质量档取代了"生成路线"：逐段判定流程强度（是否模型质检、几轮修订、几候选），
+    // 模型与思考强度在同一批次内保持统一，只有升级时才换。
+    const manualTier = resolveManualTier({ qualityTier: body.qualityTier, route: body.route });
+    const tierDecision = selectQualityTier({
       source: body.source,
-      contentType: classification.contentType,
+      purpose: classification.contentType,
       risk,
-      manualRoute: body.route || "auto",
-      candidateCount: body.candidateCount,
-      provider
+      factCount: factSchema.summary?.translationFacts || 0,
+      protectedTokens: contextPack.protectedTokens,
+      termConflicts: (contextPack.preferredTerms || []).filter((term) => term.conflict === true).length,
+      metadata: neighborMetadata,
+      manualTier
     });
+    const tierPlanFor = (tier) => planQualityTier({ tier, purpose: classification.contentType, provider, risk });
+    let routing = tierPlanFor(tierDecision.tier);
+    let qualityTier = routing.tier;
+    let qualityUpgradeFrom = "";
+    const tierStrength = describeTierStrength({ tier: routing.tier, provider });
+    let routingDescription = `${QUALITY_TIERS[routing.tier].description}${tierStrength ? ` ${tierStrength}` : ""}`;
     const startedAt = Date.now();
     let trajectory = null;
     let learningCaptureError = translationSkill.persistenceError || "";
@@ -5028,52 +5371,76 @@ async function evaluateQaBatch(batchId, projectId = "") {
     try {
       const aiQaEnabled = body.aiQa !== false;
       const routedPassScore = Math.max(passScore, qualityThresholdForRisk(risk.tier));
-      let result = await translateWithRoute(contextPack, { routePlan: routing, reflect: !aiQaEnabled && body.reflect !== false });
-      let aiQa = aiQaEnabled
-        ? await runAiQaLoop({
-          contextPack, initialTranslation: result.translation, matches, locale,
-          contentType: classification.contentType, domain, batchId: body.batchId || "",
-          providedReferences: translationReferences, passScore: routedPassScore, maxRevisions, projectSettings, projectId
-        })
-        : { translation: result.translation, issues: [
-          ...runQa({ source: body.source, translation: result.translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
-          ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation: result.translation, locale }), projectSettings || undefined)
-        ], score: null, status: "disabled", iterations: 0, used: false, fallbackReason: "", references: [] };
+      const hardErrorCount = (list) => (list || []).filter((issue) => issue.severity === "error").length;
+      const deterministicIssues = (translation) => [
+        ...runQa({ source: body.source, translation, matches, translationReferences: contextPack.translationReferences, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType: classification.contentType, registerPolicy: contextPack.styleProfile?.reviewRubric?.registerPolicy || null, projectSettings }),
+        ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation, locale }), projectSettings || undefined)
+      ];
+      // 一次执行 = 一次初译 + 本档允许的质检强度。快速档不跑模型质检，只跑确定性检查。
+      const executePlan = async (plan) => {
+        const useModelQa = aiQaEnabled && plan.modelQa;
+        const translationResult = await translateWithRoute(contextPack, { routePlan: plan, reflect: plan.reflect === true });
+        if (useModelQa) {
+          const loop = await runAiQaLoop({
+            contextPack, initialTranslation: translationResult.translation, matches, locale,
+            contentType: classification.contentType, domain, batchId: body.batchId || "",
+            providedReferences: translationReferences, passScore: routedPassScore,
+            maxRevisions: Math.min(maxRevisions, Number.isFinite(plan.maxRevisions) ? plan.maxRevisions : maxRevisions),
+            projectSettings, projectId
+          });
+          return { translation: translationResult, aiQa: loop };
+        }
+        return {
+          translation: translationResult,
+          aiQa: {
+            translation: translationResult.translation,
+            issues: deterministicIssues(translationResult.translation),
+            score: null, status: "deterministic_only", iterations: 0, used: false,
+            fallbackReason: "", references: [], qaCases: []
+          }
+        };
+      };
+      const executed = await executePlan(routing);
+      let result = executed.translation;
+      let aiQa = executed.aiQa;
       let qualityRoute = decideQualityRoute({
         qaScore: aiQa.score,
-        hardErrorCount: (aiQa.issues || []).filter((issue) => issue.severity === "error").length,
+        hardErrorCount: hardErrorCount(aiQa.issues),
         riskTier: risk.tier,
-        hasQualityUpgrade: Boolean(provider.qualityModel) && routing.model !== provider.qualityModel,
+        hasQualityUpgrade: Boolean(routing.upgradeTier),
         aiQaUsed: aiQa.used
       });
-      if (qualityRoute.decision === "escalate_model") {
+      if (!aiQa.used) {
+        // 没跑模型质检时"AIQA 未完成"不构成阻断：确定性检查干净就放行，
+        // 出现阻断问题则升档重做，而不是把整批快速档段落都推给人工。
+        qualityRoute = hardErrorCount(aiQa.issues)
+          ? {
+            decision: routing.upgradeTier ? "escalate_model" : "human_review",
+            threshold: routedPassScore,
+            reason: `确定性检查发现 ${hardErrorCount(aiQa.issues)} 个阻断问题`
+          }
+          : { decision: "auto_pass", threshold: routedPassScore, reason: "确定性检查通过（本档不做模型质检）" };
+      }
+      if (qualityRoute.decision === "escalate_model" && routing.upgradeTier) {
         const previousResult = result;
-        const escalationPlan = {
-          ...routing,
-          route: "fact_guarded",
-          label: "质量升级修订",
-          description: "低于当前风险门槛，已自动升级高质量模型并重新执行完整 QA。",
-          model: provider.qualityModel,
-          modelRole: "quality",
-          candidateCount: 1,
-          escalated: true
-        };
-        result = await translateWithRoute(contextPack, { routePlan: escalationPlan, reflect: true });
-        aiQa = await runAiQaLoop({
-          contextPack, initialTranslation: result.translation, matches, locale,
-          contentType: classification.contentType, domain, batchId: body.batchId || "",
-          providedReferences: translationReferences, passScore: routedPassScore, maxRevisions, projectSettings, projectId
-        });
+        const previousTier = routing.tier;
+        const escalationPlan = { ...tierPlanFor(routing.upgradeTier), escalated: true };
+        const rerun = await executePlan(escalationPlan);
+        result = rerun.translation;
+        aiQa = rerun.aiQa;
         const combinedCandidates = [...(result.candidates || []), ...(previousResult.candidates || [])]
           .filter((item, index, list) => list.findIndex((other) => other.translation === item.translation) === index)
           .slice(0, 4);
         result = { ...result, candidates: combinedCandidates };
-        routing = { ...escalationPlan, previousRoute: routing.route };
+        qualityUpgradeFrom = previousTier;
+        routing = escalationPlan;
+        qualityTier = escalationPlan.tier;
+        routingDescription = `${qualityRoute.reason}，已自动升级到${QUALITY_TIERS[qualityTier]?.label || qualityTier}档重做。`;
         qualityRoute = decideQualityRoute({
           qaScore: aiQa.score,
-          hardErrorCount: (aiQa.issues || []).filter((issue) => issue.severity === "error").length,
+          hardErrorCount: hardErrorCount(aiQa.issues),
           riskTier: risk.tier,
-          hasQualityUpgrade: true,
+          hasQualityUpgrade: false,
           alreadyEscalated: true,
           aiQaUsed: aiQa.used
         });
@@ -5158,7 +5525,22 @@ async function evaluateQaBatch(batchId, projectId = "") {
         qaScore: aiQa.score,
         aiQa,
         factSchema,
-        routing,
+        // 质量档是给用户看的结论；routing 保留 route/model 等执行细节供排查。
+        qualityTier,
+        qualityTierLabel: QUALITY_TIERS[qualityTier]?.label || "",
+        qualityTierSource: tierDecision.manual ? "manual" : "auto",
+        tierReason: tierDecision.reason,
+        tierSignals: tierDecision.signals,
+        qualityUpgradeFrom,
+        routing: {
+          ...routing,
+          label: `${QUALITY_TIERS[qualityTier]?.label || qualityTier}档`,
+          description: routingDescription,
+          tierReason: tierDecision.reason,
+          signals: tierDecision.signals,
+          manual: tierDecision.manual,
+          risk
+        },
         qualityRoute,
         scopeUsage,
         styleProfile: contextPack.styleProfile,

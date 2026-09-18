@@ -15,6 +15,11 @@ test("出厂值覆盖每一个声明字段，且都落在自己的区间内", ()
   for (const [path, spec] of Object.entries(SETTING_SPECS)) {
     const value = path.split(".").reduce((carry, key) => carry?.[key], settings);
     assert.equal(value, spec.default, `${path} 缺少出厂值`);
+    // 布尔开关没有数值区间，只校验出厂值本身。
+    if (spec.type === "boolean") {
+      assert.equal(typeof value, "boolean", `${path} 的出厂值必须是布尔值`);
+      continue;
+    }
     assert.ok(value >= spec.min && value <= spec.max, `${path} 的出厂值不在区间内`);
   }
   assert.ok(settings.orthography.titleBrackets["ja-JP"]);

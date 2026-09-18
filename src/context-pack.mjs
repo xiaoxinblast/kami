@@ -1,6 +1,6 @@
 import { CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { punctuationGuidance } from "./orthography.mjs";
-import { detectRhymeLike, extractProtectedTokens } from "./text.mjs";
+import { detectRhymeLike, extractProtectedTokens, normalizeSource } from "./text.mjs";
 import { normalizeBatchReferences } from "./batch-verse.mjs";
 import { contentTypeDirective, registerPolicyFor } from "./register-classifier.mjs";
 
@@ -26,11 +26,21 @@ function normalizeNeighborContext(neighborContext) {
   };
 }
 
-export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], batchGroupEntries = [], factSchema = null, titleOverrides = null, entryId = "", entryKey = "" }) {
+export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], batchGroupEntries = [], factSchema = null, titleOverrides = null, entryId = "", entryKey = "", documentBrief = null }) {
   // 字符串精确命中只能证明字面相同，不能证明当前句子使用的是术语义。
   // 仅“保留原文”属于可确定执行的硬约束；普通正式术语交给翻译器结合上下文判断。
   const required = matches.filter((item) => item.mode === "exact" && !item.scopeMismatch && (item.preserveOriginal ?? item.term?.preserveOriginal));
   const preferred = matches.filter((item) => !required.includes(item));
+  // 同一个原文登记了多个译法时，必须让模型知道"只能选一个"：否则它会在同一句里
+  // 混用两种译法，或者自己造第三种。
+  const targetsBySource = new Map();
+  for (const item of matches) {
+    const key = normalizeSource(item.term?.source || item.matchPhrase || "");
+    if (!key) continue;
+    if (!targetsBySource.has(key)) targetsBySource.set(key, new Set());
+    targetsBySource.get(key).add(String(item.term?.target || "").trim());
+  }
+  const conflictedSources = new Set([...targetsBySource.entries()].filter(([, targets]) => [...targets].filter(Boolean).length > 1).map(([key]) => key));
   const defaultRegister = CONTENT_TYPES[classification.contentType].register;
   return {
     sourceLanguage: "Japanese",
@@ -44,6 +54,8 @@ export function buildContextPack({ source, locale, classification, matches, doma
     contentTypeLabel: CONTENT_TYPES[classification.contentType].label,
     contentTags: Array.isArray(classification.contentTags) ? classification.contentTags.slice(0, 8) : [],
     register: defaultRegister,
+    // 文件级语境分析的切片：本段用途、所属区间、跨条目一致性与格式注意点。
+    documentBrief: documentBrief || null,
     translationReferences: Array.isArray(translationReferences) ? translationReferences.slice(0, 5).map((item) => ({
       source: item.source,
       target: item.target,
@@ -124,6 +136,7 @@ export function buildContextPack({ source, locale, classification, matches, doma
       libraryName: term.libraryName || "",
       libraryPriority: Number.isFinite(Number(term.libraryPriority)) ? Number(term.libraryPriority) : null,
       forbidden: term.forbidden || [],
+      ...(conflictedSources.has(normalizeSource(term.source || matchPhrase || "")) ? { conflict: true } : {}),
       note: scopeMismatch
         ? `该术语不属于当前主分类，仅作跨场景参考，不得强制采用。${term.note || ""}`
         : (mode === "exact"

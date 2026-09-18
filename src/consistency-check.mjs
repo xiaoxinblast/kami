@@ -1,0 +1,287 @@
+import { extractProtectedTokens, normalizeSource, parseModelJsonObject } from "./text.mjs";
+
+/**
+ * 批次级闭环：逐段 QA 看不见跨段问题——同一句话和同一个专名在不同段落里被译成
+ * 两种说法，逐段看每一段都是"合格"的。这里在整批翻完之后做一次全文核对，
+ * 并把可量化的部分用确定性规则先算一遍（同原文不同译文、术语登记译法未被采用），
+ * 再把语义类漂移交给模型，最后合并成一份待核对清单。
+ */
+export const CONSISTENCY_CHUNK_MAX_CHARS = 8_000;
+export const CONSISTENCY_FINDING_TYPES = Object.freeze([
+  "duplicate_source",
+  "term_usage_gap",
+  "term_drift",
+  "name_drift",
+  "voice_drift",
+  "style_conflict",
+  "format_risk"
+]);
+
+const MAX_FINDINGS_PER_CHUNK = 40;
+const MAX_TEXT = 300;
+
+function clip(value, limit = MAX_TEXT) {
+  const text = String(value ?? "").replace(/\s+/gu, " ").trim();
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+/** 分片按字符数：一次核对要能看完整段对照，不能只送半边。 */
+export function splitConsistencyChunks(pairs = [], { maxChars = CONSISTENCY_CHUNK_MAX_CHARS } = {}) {
+  const chunks = [];
+  let current = null;
+  pairs.forEach((pair) => {
+    const size = String(pair.source || "").length + String(pair.translation || "").length + 32;
+    if (!current) current = { ids: [], chars: 0 };
+    const overflow = current.ids.length && current.chars + size > maxChars;
+    if (overflow) {
+      chunks.push(current);
+      current = { ids: [], chars: 0 };
+    }
+    current.ids.push(String(pair.id));
+    current.chars += size;
+  });
+  if (current) chunks.push(current);
+  return chunks.map((chunk, index) => ({ index, ids: chunk.ids, chars: chunk.chars }));
+}
+
+export function consistencyMessages({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null } = {}) {
+  const partLine = part ? `这是整份文件的第 ${part.index + 1} / ${part.total} 片，id 沿用文件里的条目 id。\n` : "";
+  const system = [
+    "你是日语到简体中文本地化项目的交付前一致性审核员。你只看**跨条目的不一致**，不重复逐条 QA 已经查过的问题。",
+    "只报这两类：① 同一角色、同一专名、同一术语或同一固定说法在不同条目里出现了不一致的译法；② 同一角色的口吻、敬语级别在不同条目里明显漂移。",
+    "不要报单条问题（漏译、错译、标点、术语未采用），也不要给主观润色建议。没有发现就返回空数组。",
+    `type 只能是：${CONSISTENCY_FINDING_TYPES.join(" / ")}。`,
+    "ids 必须逐字引用输入里的条目 id，至少两个；detail 与 suggestion 用简体中文。",
+    '只输出严格 JSON：{"findings":[{"type":"term_drift","ids":["seg-3","seg-88"],"detail":"同一个专名在两条里译法不同","suggestion":"统一为其中一种并复核术语库"}]}',
+    "整个回答只能是一个 JSON 对象：禁止拆成多段、禁止 Markdown、解释或代码围栏。"
+  ].join("\n");
+  const user = [
+    `文件名：${filename || "未命名"}`,
+    `目标语言：${locale}`,
+    `文件整体用途：${purpose}`,
+    partLine,
+    "条目对照：",
+    JSON.stringify(pairs.map((pair) => ({ id: pair.id, source: clip(pair.source, 400), translation: clip(pair.translation, 400) })))
+  ].filter(Boolean).join("\n");
+  return [
+    { role: "system", content: system },
+    { role: "user", content: user }
+  ];
+}
+
+function extractJsonObject(content) {
+  try {
+    return parseModelJsonObject(content);
+  } catch (error) {
+    throw new Error(`一致性检查模型未返回 JSON（${error.message}）`);
+  }
+}
+
+/** 解析一片结论；引用了本片之外条目 id 的发现整条丢弃，宁可少报也不误报。 */
+export function parseConsistencyFindings(content, { validIds = [] } = {}) {
+  const payload = extractJsonObject(content);
+  const allowed = new Set((Array.isArray(validIds) ? validIds : []).map(String));
+  const findings = [];
+  const dropped = [];
+  for (const item of Array.isArray(payload.findings) ? payload.findings : []) {
+    const ids = [...new Set((Array.isArray(item?.ids) ? item.ids : []).map(String).filter((id) => allowed.has(id)))];
+    const detail = clip(item?.detail);
+    if (!detail || ids.length < 2) {
+      dropped.push({ reason: "缺少有效条目引用", value: item });
+      continue;
+    }
+    const type = CONSISTENCY_FINDING_TYPES.includes(String(item?.type)) ? String(item.type) : "term_drift";
+    findings.push({ type, ids, detail, suggestion: clip(item?.suggestion), source: "model" });
+    if (findings.length >= MAX_FINDINGS_PER_CHUNK) break;
+  }
+  return { findings, dropped };
+}
+
+export function mergeConsistencyFindings(parts = []) {
+  const merged = [];
+  for (const part of Array.isArray(parts) ? parts : []) {
+    for (const finding of part.findings || []) {
+      if (merged.some((item) => item.type === finding.type && item.detail === finding.detail)) continue;
+      merged.push(finding);
+    }
+  }
+  return merged;
+}
+
+/**
+ * 确定性部分：不花模型额度就能证明的不一致。
+ *  ① 同一原文在同一文件里出现多次却给了不同译文；
+ *  ② 术语库已登记译法在同一文件里有的段落采用、有的没有（术语允许语境判断，
+ *     所以这里报"待确认"，不判错）。
+ */
+export function deterministicConsistencyFindings(segments = []) {
+  const findings = [];
+  const bySource = new Map();
+  segments.forEach((segment) => {
+    const translation = String(segment.translation || "").trim();
+    if (!translation || segment.selected === false) return;
+    const key = normalizeSource(segment.source);
+    if (!key) return;
+    if (!bySource.has(key)) bySource.set(key, []);
+    bySource.get(key).push(segment);
+  });
+  for (const [, list] of bySource) {
+    if (list.length < 2) continue;
+    const variants = new Map();
+    for (const segment of list) variants.set(String(segment.translation || "").trim(), segment);
+    if (variants.size < 2) continue;
+    findings.push({
+      type: "duplicate_source",
+      ids: list.map((segment) => String(segment.id)),
+      detail: `同一原文出现 ${list.length} 次，却有 ${variants.size} 种不同译文：${[...variants.keys()].map((value) => clip(value, 60)).join(" / ")}`,
+      suggestion: "确认这几处是否应保持一致，或原文本身一字多义需要区分。",
+      source: "rule"
+    });
+  }
+  const termUsage = new Map();
+  for (const segment of segments) {
+    const translation = String(segment.translation || "").trim();
+    if (!translation || segment.selected === false) continue;
+    for (const match of Array.isArray(segment.result?.matches) ? segment.result.matches : []) {
+      const expected = String(match?.expectedTarget || match?.term?.target || "").trim();
+      if (!expected || match?.mode !== "exact") continue;
+      const key = `${match.term?.source || match.matchPhrase || ""}\u0000${expected}`;
+      if (!termUsage.has(key)) termUsage.set(key, { expected, hits: [], misses: [] });
+      const bucket = termUsage.get(key);
+      if (normalizeSource(translation).includes(normalizeSource(expected))) bucket.hits.push(segment);
+      else bucket.misses.push(segment);
+    }
+  }
+  for (const [key, bucket] of termUsage) {
+    if (!bucket.hits.length || !bucket.misses.length) continue;
+    const [source] = key.split("\u0000");
+    findings.push({
+      type: "term_usage_gap",
+      ids: [...bucket.hits, ...bucket.misses].map((segment) => String(segment.id)).slice(0, 12),
+      detail: `术语「${source}」的登记译法「${bucket.expected}」在 ${bucket.hits.length} 条里采用、在 ${bucket.misses.length} 条里未采用`,
+      suggestion: "逐条确认未采用的地方是语境判断，还是漏用；确认后统一。",
+      source: "rule"
+    });
+  }
+  return findings;
+}
+
+function isFactIssue(issue) {
+  const type = String(issue?.type || "");
+  return type.startsWith("fact_") || type === "length_limit_exceeded" || type === "number_drift";
+}
+
+/**
+ * 批次质量报告：全部指标来自批次记录本身（可复算、可追溯），不额外调模型。
+ */
+export function buildQualityReport({ segments = [], brief = null, findings = [], provider = {}, styleProfile = null, batchId = "", filename = "", locale = "" } = {}) {
+  const selected = segments.filter((segment) => segment.selected !== false);
+  const done = selected.filter((segment) => segment.translation);
+  const failed = selected.filter((segment) => segment.status === "error");
+  const tiers = { fast: 0, standard: 0, strict: 0, unknown: 0 };
+  const purposes = new Map();
+  let modelQa = 0;
+  let upgrades = 0;
+  let review = 0;
+  let protectedTotal = 0;
+  let protectedKept = 0;
+  let termExpected = 0;
+  let termHit = 0;
+  let forbiddenHits = 0;
+  let factIssueCount = 0;
+  let factIssueSegments = 0;
+  const scores = [];
+  const reviewReasons = new Map();
+  for (const segment of selected) {
+    const result = segment.result || {};
+    const tier = String(result.qualityTier || "");
+    tiers[Object.hasOwn(tiers, tier) ? tier : "unknown"] += 1;
+    const purpose = String(result.segmentPurpose || "general");
+    purposes.set(purpose, (purposes.get(purpose) || 0) + 1);
+    if (result.qualityUpgradeFrom) upgrades += 1;
+    // 快速档不跑模型质检，qaScore 是 null：不能因为 Number(null) === 0 就把它当成
+    // "0 分段落"——那会让平均分与覆盖率同时失真（真实发生过）。
+    const hasScore = result.qaScore !== null && result.qaScore !== undefined && result.qaScore !== ""
+      && Number.isFinite(Number(result.qaScore));
+    if (hasScore) {
+      scores.push(Number(result.qaScore));
+      modelQa += 1;
+    }
+    const issues = Array.isArray(result.issues) ? result.issues : [];
+    if (issues.some((issue) => issue?.type === "forbidden_term")) forbiddenHits += 1;
+    const factIssues = issues.filter(isFactIssue);
+    if (factIssues.length) {
+      factIssueCount += factIssues.length;
+      factIssueSegments += 1;
+    }
+    const translation = String(segment.translation || "");
+    const tokens = extractProtectedTokens(segment.source);
+    if (tokens.length) {
+      protectedTotal += tokens.length;
+      protectedKept += tokens.filter((token) => translation.includes(token)).length;
+    }
+    for (const match of Array.isArray(result.matches) ? result.matches : []) {
+      const expected = String(match?.expectedTarget || match?.term?.target || "").trim();
+      if (!expected) continue;
+      termExpected += 1;
+      if (normalizeSource(translation).includes(normalizeSource(expected))) termHit += 1;
+    }
+    const reasons = [];
+    if (segment.status === "error") reasons.push("翻译失败");
+    if (result.aiQa?.fallbackReason) reasons.push("AIQA 未完成");
+    if (hasScore && Number(result.qaScore) < 90) reasons.push("质量分低于 90");
+    if (issues.some((issue) => ["error", "critical"].includes(String(issue?.severity)))) reasons.push("存在阻断级问题");
+    if (reasons.length) {
+      review += 1;
+      for (const reason of reasons) reviewReasons.set(reason, (reviewReasons.get(reason) || 0) + 1);
+    }
+  }
+  const sorted = [...scores].sort((a, b) => a - b);
+  const average = sorted.length ? Math.round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length) : null;
+  const byType = new Map();
+  for (const finding of findings) byType.set(finding.type, (byType.get(finding.type) || 0) + 1);
+  return {
+    version: 1,
+    batchId,
+    filename,
+    locale,
+    generatedAt: new Date().toISOString(),
+    totals: { selected: selected.length, translated: done.length, failed: failed.length },
+    tiers,
+    upgrades,
+    purposes: [...purposes.entries()].map(([purpose, count]) => ({ purpose, count })).sort((a, b) => b.count - a.count),
+    coverage: {
+      modelQa,
+      deterministicOnly: Math.max(0, done.length - modelQa),
+      percent: done.length ? Math.round((modelQa / done.length) * 100) : 0
+    },
+    scores: {
+      average,
+      distribution: {
+        ">=95": sorted.filter((value) => value >= 95).length,
+        "90-94": sorted.filter((value) => value >= 90 && value < 95).length,
+        "<90": sorted.filter((value) => value < 90).length,
+        unscored: Math.max(0, done.length - sorted.length)
+      }
+    },
+    terms: {
+      expectedUses: termExpected,
+      applied: termHit,
+      adoptionRate: termExpected ? Math.round((termHit / termExpected) * 100) : null,
+      basis: "recorded-matches"
+    },
+    facts: { issueCount: factIssueCount, segments: factIssueSegments },
+    protectedTokens: { total: protectedTotal, preserved: protectedKept },
+    forbiddenTermSegments: forbiddenHits,
+    humanReview: { suggested: review, reasons: [...reviewReasons.entries()].map(([reason, count]) => ({ reason, count })) },
+    consistency: { findings: findings.length, byType: [...byType.entries()].map(([type, count]) => ({ type, count })) },
+    contextBrief: brief ? {
+      status: brief.status || "ready",
+      documentPurpose: brief.documentType?.purpose || "general",
+      sections: (brief.sections || []).length,
+      coverage: brief.coverage || null
+    } : null,
+    model: String(provider.model || ""),
+    styleProfile: styleProfile ? { id: styleProfile.id || "", name: styleProfile.name || "", version: styleProfile.version || 1 } : null
+  };
+}

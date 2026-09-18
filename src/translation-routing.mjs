@@ -13,6 +13,15 @@ const CREATIVE_TYPES = new Set(["marketing", "social"]);
 const CONTEXT_HEAVY_TYPES = new Set(["dialogue", "narrative", "codex", "verse", "item_description"]);
 const DIRECT_TYPES = new Set(["item_name", "ui"]);
 
+/**
+ * 承诺、法务与硬约束措辞。
+ *
+ * 旧实现写成 `\b(?:必须|严禁|…)\b`：JS 的 `\b` 只认 ASCII 词字符，中日文两侧
+ * 都不构成边界，于是这半条规则永远不会命中——公告里最该提高警惕的措辞被判成
+ * 低风险。中文词直接匹配，日语侧补上同样的语义词。
+ */
+export const COMMITMENT_PATTERN = /必须|严禁|不得|仅限|截止|最终解释权|务必|法律|合规|赔偿|退款|必ず|厳禁|禁止|締切|締め切|返金|規約|補償|免責|契約|同意事項/;
+
 function factCount(facts) {
   if (Number.isFinite(Number(facts?.count))) return Number(facts.count);
   const groups = facts?.groups || facts || {};
@@ -66,7 +75,7 @@ export function assessTranslationRisk({ source = "", contentType = "general", fa
     points += 1;
     reasons.push("单元文本包含较多信息");
   }
-  if (/\b(?:必须|严禁|不得|仅限|截止|最终解释权)\b|务必|法律|合规|赔偿|退款/.test(normalizedSource)) {
+  if (COMMITMENT_PATTERN.test(normalizedSource)) {
     points += 2;
     reasons.push("原文含强约束或承诺表达");
   }

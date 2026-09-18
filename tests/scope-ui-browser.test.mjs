@@ -7,12 +7,12 @@ import { CONTENT_TYPES, CONTENT_TAGS, LOCALES } from "../src/config.mjs";
 import { createDefaultProjectSettings } from "../src/project-config.mjs";
 
 /**
- * 真实浏览器回归：作用域智能化后的界面
- *   ① 语体 / 领域收进「高级」，默认自动识别；
- *   ② 翻译结果说清"本次参考"吃到了哪一档规范与译例；
+ * 真实浏览器回归：语体退居内部信号后的界面
+ *   ① 翻译页只留「质量档」，不再有语体 / 领域下拉；
+ *   ② 翻译结果说清"本段用途 / 质量档 / 本次参考"；
  *   ③ 证据池默认只给"全部证据"总进度，细分按作用域折起来。
  */
-test("语体领域收进高级，结果里能看到本次命中的作用域", { skip: !process.env.KAMI_BROWSER_TEST_MODULE, timeout: 120000 }, async () => {
+test("翻译页只留质量档，结果里能看到用途与本次命中的作用域", { skip: !process.env.KAMI_BROWSER_TEST_MODULE, timeout: 120000 }, async () => {
   const { chromium } = createRequire(import.meta.url)(process.env.KAMI_BROWSER_TEST_MODULE);
   const browser = await chromium.launch({ headless: true, ...(process.env.KAMI_BROWSER_EXECUTABLE ? { executablePath: process.env.KAMI_BROWSER_EXECUTABLE } : {}) });
   const server = createServer(async (req, res) => {
@@ -47,6 +47,11 @@ test("语体领域收进高级，结果里能看到本次命中的作用域", { 
             qaScore: 94,
             aiQa: { translation: "走吧。", score: 94, issues: [], references: [], iterations: 0 },
             styleProfile: { id: "sp-general", name: "通用规范", contentType: "general", domain: "general" },
+            qualityTier: "standard",
+            qualityTierLabel: "标准",
+            qualityTierSource: "auto",
+            tierReason: "常规句段，走标准流程",
+            routing: { tier: "standard", label: "标准档", description: "初译 + 模型质检，最多一轮修订。", risk: { tier: "medium", reasons: [] } },
             scopeUsage: {
               contentType: "dialogue",
               domain: "game",
@@ -100,34 +105,32 @@ test("语体领域收进高级，结果里能看到本次命中的作用域", { 
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForSelector(".nav-item");
 
-    // ① 翻译页：语体 / 领域默认收在「高级」里
-    const workspaceScope = page.locator("#view-workbench details.advanced-scope").first();
-    assert.equal(await workspaceScope.count(), 1);
-    assert.equal(await workspaceScope.evaluate((node) => node.open), false, "默认应该是收起的");
-    assert.equal(await workspaceScope.locator("#contentType").count(), 1);
-    assert.equal(await workspaceScope.locator("#domain").count(), 1);
-    assert.match(await workspaceScope.locator("summary").textContent(), /高级：语体与领域（默认自动识别）/u);
+    // ① 翻译页：只剩质量档，语体 / 领域下拉已经删除
+    assert.equal(await page.locator("#view-workbench #qualityTier").count(), 1);
+    assert.equal(await page.locator("#view-workbench #contentType").count(), 0, "语体下拉必须消失");
+    assert.equal(await page.locator("#view-workbench #domain").count(), 0, "领域下拉必须消失");
+    assert.equal(await page.locator("#view-workbench #translationRoute").count(), 0, "生成路线下拉必须消失");
 
     // ② 翻译一句：结果里要说清本次命中的作用域
     await page.locator("#sourceText").fill("行こう。");
     await page.locator("#primaryAction").click();
     await page.waitForFunction(() => document.querySelector("#targetOutput")?.textContent?.includes("走吧"));
+    // 预检与翻译结果都会写这一行：等它稳定到带"本次参考"再断言，避免读到中间态。
+    await page.waitForFunction(() => /本次参考：/.test(document.querySelector("#classificationPreview")?.textContent || ""), null, { timeout: 15_000 });
     const previewText = await page.locator("#classificationPreview").textContent();
     assert.match(previewText, /语体/u);
     assert.match(previewText, /本次参考：规范（待分类文本 × 通用，通用兜底） · 译例 5 条（同作用域 2 \/ 通用 3）/u, `结果要写清作用域：${previewText}`);
+    const qaPanel = await page.locator("#qaList").textContent();
+    assert.match(qaPanel, /本段用途与质量档/u, "结果要写清本段用途与质量档");
+    assert.match(qaPanel, /标准档/u);
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/scope-advanced-collapsed.png`, animations: "disabled" });
     }
-    await workspaceScope.locator("summary").click();
-    assert.equal(await workspaceScope.evaluate((node) => node.open), true, "需要时仍可手动指定");
-
-    // ③ 译文质检页同样收进「高级」
+    // ③ 译文质检页也不再有语体 / 领域下拉
     await page.locator('.nav-item[data-view="autoqa"]').click();
-    const qaScope = page.locator("#view-autoqa details.advanced-scope").first();
-    assert.equal(await qaScope.evaluate((node) => node.open), false);
-    assert.equal(await qaScope.locator("#autoQaContentType").count(), 1);
-    assert.equal(await qaScope.locator("#autoQaDomain").count(), 1);
+    assert.equal(await page.locator("#view-autoqa #autoQaContentType").count(), 0);
+    assert.equal(await page.locator("#view-autoqa #autoQaDomain").count(), 0);
 
     // ④ 证据池：默认只看总进度，细分折起来
     await page.locator('.nav-item[data-view="styles"]').click();

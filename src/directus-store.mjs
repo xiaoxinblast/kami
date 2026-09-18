@@ -1466,6 +1466,9 @@ export async function saveDirectusBatchRun(input) {
     segments: input.segments || [],
     ...(Object.hasOwn(input, "subBatches") ? { sub_batches: input.subBatches || [] } : {}),
     ...(Object.hasOwn(input, "runnerOptions") ? { runner_options: input.runnerOptions || {} } : {}),
+    // 语境档案与质量报告是整份文件级结论：批次记录本身就带，刷新页面不用重算。
+    ...(Object.hasOwn(input, "contextBrief") ? { context_brief: input.contextBrief ?? null } : {}),
+    ...(Object.hasOwn(input, "qualityReport") ? { quality_report: input.qualityReport ?? null } : {}),
     ...(runState ? { run_state: runState } : {}),
     task_status: metrics.status,
     total_segments: metrics.totalSegments,
@@ -1483,7 +1486,7 @@ export async function saveDirectusBatchRun(input) {
 
 export async function getDirectusBatchRun(batchId) {
   try {
-    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,structure,segments,sub_batches,runner_options,run_state,date_updated`);
+    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,structure,segments,sub_batches,runner_options,context_brief,quality_report,run_state,date_updated`);
     return {
       batchId: item.id,
       filename: item.filename || "",
@@ -1497,6 +1500,8 @@ export async function getDirectusBatchRun(batchId) {
       segments: arrayValue(item.segments),
       subBatches: arrayValue(item.sub_batches),
       runnerOptions: item.runner_options || {},
+      contextBrief: item.context_brief ?? null,
+      qualityReport: item.quality_report ?? null,
       runState: item.run_state || "ready",
       updatedAt: item.date_updated || null
     };

@@ -257,6 +257,9 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
       const edited = draft ? readPath(draft, field.path) : undefined;
       const value = edited ?? readPath(payload.settings, field.path) ?? field.default;
       const extra = `data-path="${escape(field.path)}" ${override ? "disabled" : ""}`;
+      if (field.type === "boolean") {
+        return `<label class="sp-field${override ? " overridden" : ""}"><span><strong>${escape(field.label)}</strong><small>${escape(field.hint)}</small>${override ? `<em>由环境变量 ${escape(override.variable)} 接管</em>` : ""}</span><div class="sp-input"><label class="sp-switch"><input type="checkbox" data-boolean-path="${escape(field.path)}"${value ? " checked" : ""} ${override ? "disabled" : ""} /><span>启用</span></label></div></label>`;
+      }
       return `<label class="sp-field${override ? " overridden" : ""}"><span><strong>${escape(field.label)}</strong><small>${escape(field.hint)}</small>${override ? `<em>由环境变量 ${escape(override.variable)} 接管</em>` : ""}</span><div class="sp-input"><input type="number" ${extra} value="${escape(String(value))}" min="${field.min}" max="${field.max}" step="${field.step}" /><small>${field.min} ~ ${field.max}</small></div></label>`;
     }).join("");
     const body = parameterTabs.map((tab) => {
@@ -288,6 +291,10 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
     for (const input of dialog.querySelectorAll("input[data-path]")) {
       if (input.disabled) continue;
       writePath(settings, input.dataset.path, Number(input.value));
+    }
+    for (const input of dialog.querySelectorAll("input[data-boolean-path]")) {
+      if (input.disabled) continue;
+      writePath(settings, input.dataset.booleanPath, input.checked);
     }
     for (const select of dialog.querySelectorAll("select[data-bracket]")) settings.orthography.titleBrackets[select.dataset.bracket] = select.value;
     return settings;
