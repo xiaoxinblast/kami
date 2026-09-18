@@ -80,10 +80,19 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
             id: "up-1", name: "风格指南 · 品牌语气", instruction: guideInstruction,
             examples: [], version: 1, evidenceCount: 0, status: guideStatus, updatedAt: "2026-09-18T12:00:00Z"
           }],
-          // 蒸馏出来的才是"一条一条的规则"，这里给 30 条验证不再被截断到 24 条。
+          // 蒸馏结果同样是"带小节的文档"：小节标题不算规则，规则以 ・ 起头。
+          // 这里给两节共 30 条，验证标题不被编号、规则不再被截断、含「；」的行不拆条。
           styleProfiles: [{
             id: "sp-1", name: "简体中文 marketing 风格", contentType: "marketing", domain: "game",
-            instruction: Array.from({ length: 30 }, (_, index) => `规则 ${index + 1}`).join("\n"),
+            instruction: [
+              "【用词】",
+              ...Array.from({ length: 24 }, (_, index) => `・用词规则 ${index + 1}`),
+              "【句式】",
+              "・日文「はじめて〜する」一律译为「首次〜」；不使用「第一次」「初次」等说法。",
+              ...Array.from({ length: 4 }, (_, index) => `・句式规则 ${index + 2}`),
+              "【格式】",
+              "・任务名用书名号《》而非日文引号「」。"
+            ].join("\n"),
             examples: [], version: 1, evidenceCount: 12, status: "draft"
           }],
           evidencePools: [], learningRuns: []
@@ -116,8 +125,15 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
     assert.match(await page.locator("#styleGuideImportNote").textContent(), /已启用：品牌语气\.md · 1234 字/u);
     // 蒸馏出来的规则是 draft：这里等规则卡片渲染出来（人工指南不在这个列表里）。
     await page.waitForSelector("#styleGuidanceList .style-guidance-card");
-    assert.match(await page.locator("#styleGuidanceList .style-guidance-card").first().textContent(), /共 30 条规则/u, "蒸馏规则不再被截断到 24 条");
-    assert.equal(await page.locator("#styleGuidanceList .style-rule-list > div").count(), 30, "30 条规则要全部渲染");
+    const rulesCard = page.locator("#styleGuidanceList .style-guidance-card").first();
+    assert.match(await rulesCard.locator(".style-rule-count").textContent(), /3 个小节 · 共 30 条规则/u, "小节标题不算规则，规则也不该被截断");
+    assert.equal(await rulesCard.locator(".style-rule-section").count(), 3, "【用词】【句式】【格式】要作为小节标题显示");
+    assert.equal(await rulesCard.locator(".style-rule-row").count(), 30, "30 条规则要全部渲染");
+    assert.equal(await rulesCard.locator(".style-rule-section", { hasText: "用词" }).count(), 1);
+    // 一条规则里的「；」不能被当成两条
+    const semicolonRow = rulesCard.locator(".style-rule-row", { hasText: "はじめて" });
+    assert.equal(await semicolonRow.count(), 1, "含分号的规则仍是一条");
+    assert.match(await semicolonRow.textContent(), /不使用「第一次」「初次」等说法/u, "分号后面的内容要留在同一条规则里");
 
     // 人工风格指南模块：哪一份、是否启用、多少字、什么时候更新，一眼可见
     await page.waitForSelector("#manualGuideStatus .manual-guide-card.active");

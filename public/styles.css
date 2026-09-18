@@ -636,10 +636,12 @@ select { min-width: 150px; }
 .style-profile-evaluation.warn { color: #805716; background: #fff0d5; }
 .style-profile-evaluation.fail { color: #8a352f; background: #fbe5e2; }
 .style-profile-evaluation.neutral { color: #68716c; background: #eceeeb; }
-.style-rule-list { display: grid; gap: 5px; margin-top: 11px; }
-.style-rule-list > div { display: grid; grid-template-columns: 25px 1fr; gap: 8px; padding: 7px 8px; border-radius: 7px; background: #f2f5f2; }
-.style-rule-list span { color: #7b8a82; font-size: 12px; font-weight: 850; }
-.style-rule-list p { margin: 0; color: #4f5f57; font-size: 11px; line-height: 1.55; }
+.style-rule-list { display: grid; gap: 12px; margin-top: 11px; }
+.style-rule-section-group { display: grid; gap: 5px; }
+.style-rule-section { margin: 0 0 2px; color: #2f4237; font-size: 12px; font-weight: 850; }
+.style-rule-row { display: grid; grid-template-columns: 25px 1fr; gap: 8px; padding: 7px 8px; border-radius: 7px; background: #f2f5f2; }
+.style-rule-row span { color: #7b8a82; font-size: 12px; font-weight: 850; }
+.style-rule-row p { margin: 0; color: #4f5f57; font-size: 11px; line-height: 1.55; }
 .style-examples { margin-top: 9px; border-top: 1px solid #e5e9e5; }
 .style-examples summary { padding: 9px 0 4px; color: #5f7067; cursor: pointer; font-size: 11px; font-weight: 800; }
 .style-examples > div { padding: 8px 0; border-top: 1px solid #edf0ed; }
@@ -1284,9 +1286,10 @@ select { min-width: 170px; }
 .style-section-head > small { font-size: 12px; }
 .style-guidance-list { gap: 13px; margin-top: 14px; }
 .style-guidance-card, .learning-skill-card { padding: 17px; border-radius: 13px; }
-.style-rule-list { gap: 7px; }
-.style-rule-list > div { grid-template-columns: 28px 1fr; padding: 9px 10px; }
-.style-rule-list p, .style-examples p { font-size: 12px; }
+.style-rule-list { gap: 14px; }
+.style-rule-section-group { gap: 6px; }
+.style-rule-row { grid-template-columns: 28px 1fr; padding: 9px 10px; }
+.style-rule-row p, .style-examples p { font-size: 12px; }
 .style-guidance-actions { margin-top: 13px; }
 
 .learning-scope-bar { grid-template-columns: minmax(300px,1fr) 190px 190px; gap: 14px; margin-bottom: 16px; padding: 16px 18px; border-radius: 13px; }

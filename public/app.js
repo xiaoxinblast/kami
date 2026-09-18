@@ -3643,29 +3643,51 @@ async function importStyleGuide() {
 }
 
 function splitStyleRules(instruction) {
-  // 不再截断：规则条数由蒸馏结果决定，界面上少显示几条会让人以为规范只有这些。
-  return String(instruction || "").split(/\r?\n|；/u).map((item) => item.trim()).filter(Boolean);
+  // 历史接口：只返回真正的规则行（小节标题不算规则、也不按「；」拆条）。
+  return parseStyleDocument(instruction).filter((block) => block.type === "rule").map((block) => block.text);
 }
 
 /**
- * 人工导入的风格指南是一整篇文档（可能几千字、带 Markdown 标题），不是"一条一条的规则"。
- * 这里按标题 / 分隔线还原它的结构，正文一行都不丢。
+ * 风格规范（无论人工导入还是自动蒸馏）都是**带小节的文档**：
+ *   【用词】/「# 标题」/「一、」这类是章节标题，`・`/`-`/`1.` 开头的才是规则条目。
+ * 旧实现按换行 + 「；」硬切，于是把标题也算成规则、还把一条规则拆成两条（12 行显示成 14 条）。
+ *
+ * 这里统一解析成块：heading（章节）/ rule（规则，去掉项目符号前缀）/ divider（分隔线）。
+ * 同一段文字给两种界面用：人工指南按文档渲染，蒸馏规范按小节分组列规则。
  */
-function renderStyleGuideDocument(text) {
+function parseStyleDocument(text) {
   const blocks = [];
   for (const raw of String(text || "").split(/\r?\n/u)) {
     const line = raw.trim();
     if (!line) continue;
-    if (/^[=\-*_]{3,}$/u.test(line)) { blocks.push('<hr class="guide-doc-divider" />'); continue; }
+    if (/^[=\-*_]{3,}$/u.test(line)) { blocks.push({ type: "divider", text: "" }); continue; }
     const heading = line.match(/^(#{1,6})\s+(.*)$/u);
     if (heading) {
-      const level = Math.min(4, heading[1].length);
-      blocks.push(`<p class="guide-doc-heading lv${level}">${escapeHtml(heading[2])}</p>`);
+      blocks.push({ type: "heading", level: Math.min(4, heading[1].length), text: heading[2].trim() });
       continue;
     }
-    blocks.push(`<p>${escapeHtml(line)}</p>`);
+    const bracketHeading = line.match(/^【(.+)】$/u);
+    if (bracketHeading) { blocks.push({ type: "heading", level: 2, text: bracketHeading[1].trim() }); continue; }
+    const numberedHeading = line.match(/^[一二三四五六七八九十]+、\s*(.+?)[。.]?$/u);
+    if (numberedHeading && line.length <= 24) { blocks.push({ type: "heading", level: 2, text: numberedHeading[1].trim() }); continue; }
+    const rule = line
+      .replace(/^[・·•*\-]\s*/u, "")
+      .replace(/^\d+[.)、]\s*/u, "")
+      .trim();
+    if (rule) blocks.push({ type: "rule", text: rule });
   }
-  return blocks.length ? blocks.join("") : '<p class="guide-doc-empty">正文为空</p>';
+  return blocks;
+}
+
+/** 人工指南的"查看正文"：按文档结构渲染，一行都不丢。 */
+function renderStyleGuideDocument(text) {
+  const blocks = parseStyleDocument(text);
+  if (!blocks.length) return '<p class="guide-doc-empty">正文为空</p>';
+  return blocks.map((block) => {
+    if (block.type === "divider") return '<hr class="guide-doc-divider" />';
+    if (block.type === "heading") return `<p class="guide-doc-heading lv${block.level || 2}">${escapeHtml(block.text)}</p>`;
+    return `<p>${escapeHtml(block.text)}</p>`;
+  }).join("");
 }
 
 /** 人工指南卡片里的"查看正文"：全文渲染（不截断），并给一个复制入口。 */
@@ -3747,15 +3769,25 @@ function renderStyleGuidance() {
     return `<div class="style-pool"><div><strong>${escapeHtml(contentTypeLabel(pool.contentType))} · ${escapeHtml(pool.domain)}</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 8 条直接证据）</small></div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
   }).join("")}` : '<div class="empty-list compact">还没有完整双语句段进入风格证据池；导入短术语不会产生风格。</div>';
   $("#styleGuidanceList").innerHTML = items.length ? items.map((item) => {
-    const rules = splitStyleRules(item.instruction);
+    // 蒸馏结果同样是带小节的文档：小节标题单独显示，规则在小节内编号，
+    // 标题既不算规则、也不会因为「；」被拆成两条。
+    const sections = [];
+    for (const block of parseStyleDocument(item.instruction)) {
+      if (block.type === "divider") continue;
+      if (block.type === "heading") { sections.push({ title: block.text, rules: [] }); continue; }
+      if (!sections.length) sections.push({ title: "", rules: [] });
+      sections.at(-1).rules.push(block.text);
+    }
+    const ruleCount = sections.reduce((sum, section) => sum + section.rules.length, 0);
+    const sectionCount = sections.filter((section) => section.title).length;
     const examples = (item.examples || []).slice(0, 4);
     const sourceBatchId = item.sourceBatchId || item.source_batch_id || "";
     const learningSummary = item.learningSummary || item.learning_summary || "";
     return `<article class="style-guidance-card ${escapeHtml(item.status)}" data-profile-id="${escapeHtml(item.id)}">
       <div class="style-guidance-head"><div><strong>${escapeHtml(item.name)}</strong><small>适用范围：${escapeHtml(state.bootstrap.locales[state.styleLocale].label)} × ${escapeHtml(item.scopeLabel)} · v${item.version}</small><small>生成方式：${escapeHtml(item.name.startsWith("风格指南 · ") ? "人工上传，正文未被改写" : item.name.includes("复盘修订") ? "AIQA 复盘结合已沉淀语料" : "同类双语语料自动精炼")} · ${item.evidenceCount} 条证据${sourceBatchId ? ` · 来源批次 ${escapeHtml(String(sourceBatchId).slice(0, 8))}` : ""}</small></div><span class="style-state ${escapeHtml(item.status)}">${item.status === "active" ? "已启用" : item.status === "draft" ? "待批准" : "已停用"}</span></div>
       ${learningSummary ? `<p class="style-learning-summary">本批浓缩：${escapeHtml(learningSummary)}</p>` : ""}
-      <p class="style-rule-count">共 ${rules.length} 条规则</p>
-      <div class="style-rule-list">${rules.length ? rules.map((rule, index) => `<div><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}</p></div>`).join("") : '<div class="batch-detail-empty">该版本没有可展示的规则条目</div>'}</div>
+      <p class="style-rule-count">${sectionCount ? `${sectionCount} 个小节 · ` : ""}共 ${ruleCount} 条规则</p>
+      <div class="style-rule-list">${ruleCount ? sections.map((section) => `<div class="style-rule-section-group">${section.title ? `<p class="style-rule-section">${escapeHtml(section.title)}</p>` : ""}${section.rules.map((rule, index) => `<div class="style-rule-row"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}</p></div>`).join("")}</div>`).join("") : '<div class="batch-detail-empty">该版本没有可展示的规则条目</div>'}</div>
       ${examples.length ? `<details class="style-examples"><summary>查看 ${examples.length} 个正反例</summary>${examples.map((example) => `<div><strong>${example.type === "negative" ? "反例" : "正例"}</strong><p>${escapeHtml(example.source || "")}</p><p>${escapeHtml(example.target || "")}</p><small>${escapeHtml(example.reason || "")}</small></div>`).join("")}</details>` : ""}
       <div class="style-guidance-actions"><button class="button ${item.status === "active" ? "ghost" : "secondary"} small" data-action="${item.status === "active" ? "disable" : "activate"}">${item.status === "active" ? "停用（保留历史）" : "批准并启用"}</button></div>
     </article>`;
