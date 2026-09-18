@@ -165,8 +165,8 @@ export function createProjectWizard(dialog, {
         const styleEvidence = tmStyleEvidence;
         if (!tmPreview) tmPreview = await onPreviewTm(tmFile);
         if (tmPreview?.candidates?.length) {
-          await onCommitTm(tmPreview, { styleEvidence });
-          summary.push(`TM 已写入主记忆库：${tmPreview.candidates.length} 条${styleEvidence ? "（含风格证据）" : ""}`);
+          const tmResult = await onCommitTm(tmPreview, { styleEvidence });
+          summary.push(tmResult?.background ? `已提交后台写入：${tmResult.accepted ?? tmPreview.candidates.length} 条 TM，可在任务中心查看` : `TM 已写入主记忆库：${tmPreview.candidates.length} 条${styleEvidence ? "（含风格证据）" : ""}`);
         } else {
           summary.push(`TM 文件没有可写入条目：${tmFile.name}`);
         }
@@ -269,3 +269,4 @@ export function createProjectWizard(dialog, {
     }
   };
 }
+

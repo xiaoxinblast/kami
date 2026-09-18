@@ -759,6 +759,23 @@ function reportImportProgress(id, update) {
   importProgress.set(id, { ...previous, ...update, id, updatedAt: new Date().toISOString() });
 }
 
+/** 把执行体内部的 0~100 进度映射到外层区间（多个阶段拼一条进度条时用）。 */
+function scaleProgressReport(report, from, to) {
+  return (update) => {
+    const inner = Math.max(0, Math.min(100, Number(update?.percent) || 0));
+    report({ ...update, percent: from + Math.round((inner / 100) * (to - from)) });
+  };
+}
+
+/** 按条数报进度：写审核队列这类阶段没有内部百分比，只有"已完成 N / 共 M"。 */
+function countProgressReport(report, from, to) {
+  return (update) => {
+    const total = Number(update?.total) || 0;
+    const completed = Number(update?.completed) || 0;
+    report({ ...update, percent: total ? from + Math.round((completed / total) * (to - from)) : from });
+  };
+}
+
 function scheduleImportProgressCleanup(id) {
   if (!id) return;
   const timer = setTimeout(() => importProgress.delete(id), 5 * 60_000);
@@ -892,18 +909,8 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
       .then(() => updateBackgroundTaskProgress(taskId, { progress: update }))
       .catch(() => {});
   };
-  /** 把 commitTermImport 的 0~100 内部进度映射到指定的外层区间。 */
-  const scaleReport = (from, to) => (update) => {
-    const inner = Math.max(0, Math.min(100, Number(update?.percent) || 0));
-    reportImmediate({ ...update, percent: from + Math.round((inner / 100) * (to - from)) });
-  };
-  /** 按条数报进度（写审核队列这种阶段没有内部百分比）。 */
-  const countReport = (from, to) => (update) => {
-    const total = Number(update?.total) || 0;
-    const completed = Number(update?.completed) || 0;
-    const ratio = total ? completed / total : 0;
-    reportImmediate({ ...update, percent: from + Math.round(ratio * (to - from)) });
-  };
+  const scaleReport = (from, to) => scaleProgressReport(reportImmediate, from, to);
+  const countReport = (from, to) => countProgressReport(reportImmediate, from, to);
   // 批次号在写队列之后才是"真"的：catch 里也要用得到，所以声明在 try 之外。
   let batch = batchId;
   try {
@@ -984,6 +991,71 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
     }).catch(() => {});
     reportImportProgress(taskId, { status: "failed", phase: "failed", message: error.message, error: error.message, percent: 100 });
     console.error(`[Kami] 双语资产导入失败：${filename} · ${error.message}`);
+  } finally {
+    scheduleImportProgressCleanup(taskId);
+  }
+}
+
+/**
+ * 人工 TM 导入的后台执行体：先写审核队列，再分库写入主 TM 与风格学习。
+ * 9332 条的导入要跑好几分钟，同步请求会让界面一直只有一句静止提示，
+ * 所以走后台任务，进度写进任务记录（任务中心）与内存进度表（页面轮询）。
+ */
+async function runTmImportInBackground({ taskId, projectId, filename, batchId, candidates, styleEvidence, sourceFileType }) {
+  let progressWrites = Promise.resolve();
+  const report = (update) => {
+    reportImportProgress(taskId, { status: "running", ...update });
+    progressWrites = progressWrites
+      .then(() => updateBackgroundTaskProgress(taskId, { progress: update }))
+      .catch(() => {});
+  };
+  try {
+    report({ phase: "queueing", message: `正在写入审核队列：0 / ${candidates.length}`, percent: 2, completed: 0, total: candidates.length });
+    const persisted = await saveImportPreview({
+      filename,
+      fileType: sourceFileType || "tm",
+      requestedLocale: "zh-CN",
+      projectId,
+      candidates,
+      statistics: { rowsScanned: candidates.length, pairedRows: candidates.length },
+      fileMode: "tm",
+      ai: { used: false, requested: false }
+    }, { onProgress: countProgressReport(report, 2, 10) });
+    report({ phase: "importing", message: `审核队列就绪（${persisted.candidates.length} 条），开始写入主 TM`, percent: 10, completed: 0, total: persisted.candidates.length });
+    const result = await commitTermImport(
+      { projectId, batchId: persisted.batchId, filename, candidates: persisted.candidates, styleEvidence },
+      scaleProgressReport(report, 10, 92)
+    );
+    await progressWrites;
+    const summary = result.summary;
+    await updateBackgroundTaskProgress(taskId, {
+      status: "completed",
+      progress: {
+        phase: "completed",
+        message: `导入完成：术语 ${summary.terms} 条、主 TM ${summary.memories} 条、跳过 ${summary.skipped} 条`,
+        percent: 100,
+        completed: summary.imported,
+        total: persisted.candidates.length
+      },
+      payload: {
+        batchId: persisted.batchId,
+        filename,
+        summary,
+        skippedDetails: summary.skippedDetails || [],
+        styleProfiles: (result.styleProfiles || []).length
+      }
+    });
+    reportImportProgress(taskId, { status: "completed", phase: "completed", message: "导入完成", percent: 100, completed: summary.imported, total: persisted.candidates.length });
+    console.log(`[Kami] 人工 TM 导入完成：${filename} · 主 TM ${summary.memories} 条 · 跳过 ${summary.skipped} 条`);
+  } catch (error) {
+    await progressWrites.catch(() => {});
+    await updateBackgroundTaskProgress(taskId, {
+      status: "failed",
+      progress: { phase: "failed", message: error.message, percent: 100, completed: 0, total: candidates.length },
+      payload: { batchId, filename, error: error.message, resumable: Boolean(batchId) }
+    }).catch(() => {});
+    reportImportProgress(taskId, { status: "failed", phase: "failed", message: error.message, error: error.message, percent: 100 });
+    console.error(`[Kami] 人工 TM 导入失败：${filename} · ${error.message}`);
   } finally {
     scheduleImportProgressCleanup(taskId);
   }
@@ -1784,6 +1856,26 @@ async function apiHandler(req, res, url) {
     if (!body.batchId || !Array.isArray(body.candidates)) return json(res, 400, { error: "TM 导入批次或候选无效" });
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    const filename = String(body.filename || "人工 TM 导入").slice(0, 120);
+    // 页面要进度条时走后台任务：9332 条要跑好几分钟，同步请求期间界面只能干等。
+    if (body.background === true) {
+      const task = await createBackgroundTask({
+        type: "term_import",
+        title: `TM 导入 · ${filename}`,
+        projectId,
+        progress: { phase: "queued", message: "已排队：正在写入审核队列", total: body.candidates.length }
+      });
+      runTmImportInBackground({
+        taskId: task.id,
+        projectId,
+        filename,
+        batchId: String(body.batchId),
+        candidates: body.candidates,
+        styleEvidence: body.styleEvidence !== false,
+        sourceFileType: body.sourceFileType
+      }).catch((error) => console.error("[Kami] 人工 TM 导入后台任务异常", error));
+      return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: String(body.batchId), accepted: body.candidates.length, background: true });
+    }
     const persisted = await saveImportPreview({
       filename: body.filename || "人工 TM 导入",
       fileType: body.sourceFileType || "tm",

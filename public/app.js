@@ -194,9 +194,8 @@ async function previewWizardTm(file) {
 
 async function commitWizardTm(preview, { styleEvidence = true } = {}) {
   const candidates = (preview.candidates || []).map((candidate) => ({ ...candidate, selected: true }));
-  const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence }) });
-  await loadMemories(state.memoryLocale);
-  return result;
+  // 向导的这一步只负责提交：写入走后台任务，免得卡在"下一步"上几分钟。
+  return api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence, background: true }) });
 }
 
 async function importWizardStyleGuide(file) {
@@ -3082,18 +3081,43 @@ async function commitMemoryImport() {
   if (!candidates.some((candidate) => candidate.selected)) return toast("请至少选择一条 TM");
   try {
     $("#memoryImportConfirm").disabled = true;
-    const result = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: state.memoryStyleEvidence }) });
-    const skippedText = Number(result.summary?.skipped) ? `；跳过 ${result.summary.skipped} 条` : "";
+    // 写入改为后台任务：几千条要跑几分钟，界面得有进度、也要允许关页面。
+    const started = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: state.memoryStyleEvidence, background: true }) });
+    const taskId = started.taskId || started.backgroundTaskId;
+    $("#memoryImportProgress").hidden = false;
+    $("#memoryImportProgressText").textContent = `已提交后台写入 ${started.accepted ?? candidates.length} 条…`;
+    const startedAt = Date.now();
+    let task = null;
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      task = await api(`/api/background-tasks/${encodeURIComponent(taskId)}`).catch(() => null);
+      if (!task) break;
+      const percent = Math.max(0, Math.min(100, Number(task.progress?.percent) || 0));
+      const done = task.status === "completed" || task.status === "failed";
+      $("#memoryImportProgressText").textContent = `${task.progress?.message || "正在写入"}${done ? "" : ` · 已用时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒`}`;
+      $("#memoryImportProgressMeta").textContent = `${percent}%`;
+      $("#memoryImportProgressBar").style.width = `${percent}%`;
+      $("#memoryImportNote").textContent = "写入在后台执行：可以关掉这个页面，进度与结果都能在任务中心查到。";
+      if (done) break;
+    }
+    const summary = task?.payload?.summary;
+    const skippedText = Number(summary?.skipped) ? `；跳过 ${summary.skipped} 条` : "";
     const evidenceText = state.memoryStyleEvidence ? "，并已写入风格学习证据池" : "";
-    $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${result.summary?.memories ?? result.imported?.length ?? 0} 条${evidenceText}；接回原翻译轨迹 ${result.summary?.trajectoriesLinked || 0} 条${result.summary?.trajectoryAmbiguous ? `，${result.summary.trajectoryAmbiguous} 条需人工确认归属` : ""}${skippedText}。`;
+    if (task?.status === "completed") {
+      $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${summary?.memories ?? 0} 条${evidenceText}；接回原翻译轨迹 ${summary?.trajectoriesLinked || 0} 条${skippedText}。`;
+      toast("人工 TM 导入完成");
+    } else {
+      $("#memoryImportNote").textContent = `后台写入未完成：${task?.progress?.message || "请到任务中心查看"}。可在任务中心点「继续导入」补齐。`;
+      toast("后台写入未完成，可在任务中心继续");
+    }
     $("#memoryImportPreview").hidden = true;
     state.memoryImportPreview = null;
     await loadMemories(state.memoryLocale);
-    toast("人工 TM 导入完成");
   } catch (error) {
-    $("#memoryImportConfirm").disabled = false;
     $("#memoryImportNote").textContent = error.message;
     toast(error.message);
+  } finally {
+    $("#memoryImportConfirm").disabled = false;
   }
 }
 
@@ -4345,6 +4369,21 @@ async function commitImport() {
   if (!state.importPreview) return;
   if (!selectedCandidates().length) return toast("请至少选择一组候选资产");
   setBusy(true, "正在分库写入…");
+  // 几千条的分库写入要跑几分钟：预检批次已经建了后台任务，这里跟着它的进度走，
+  // 不要只让按钮变成"正在分库写入…"然后就静止不动。
+  const backgroundTaskId = state.importPreview.backgroundTaskId || "";
+  let watching = Boolean(backgroundTaskId);
+  const watcher = (async () => {
+    const startedAt = Date.now();
+    while (watching) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      if (!watching) return;
+      const task = await api(`/api/background-tasks/${encodeURIComponent(backgroundTaskId)}`).catch(() => null);
+      if (!task) return;
+      updateImportProgress({ ...(task.progress || {}), message: `${task.progress?.message || "正在分库写入"} · 已用时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒` });
+      if (["completed", "failed", "needs_attention"].includes(task.status)) return;
+    }
+  })();
   try {
     const result = await api("/api/term-import/commit", { method: "POST", body: JSON.stringify({
       ...projectPayload(),
@@ -4369,7 +4408,11 @@ async function commitImport() {
     await Promise.all([...new Set(result.imported.filter((item) => item.assetType === "term").map((item) => item.locale))].map((locale) => loadAssets(locale)));
     toast(`已导入 ${result.summary.terms || 0} 条术语和 ${result.summary.memories || 0} 条翻译记忆`);
   } catch (error) { toast(error.message); }
-  finally { setBusy(false); }
+  finally {
+    watching = false;
+    await watcher;
+    setBusy(false);
+  }
 }
 
 function populateSelects() {
@@ -4637,3 +4680,4 @@ async function initialize() {
 }
 
 initialize();
+

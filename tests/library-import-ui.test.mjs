@@ -54,7 +54,9 @@ test("记忆库支持批量选择文件导入，并可选择是否写入风格�
   // 逐文件预检：进度按文件推进，单个文件坏了不影响其余文件。
   assert.match(script, /for \(const \[index, file\] of files\.entries\(\)\)/u);
   assert.match(script, /本地预检识别 \$\{preview\.candidates\.length\} 条双语 TM（来自 \$\{files\.length - failures\.length\} \/ \$\{files\.length\} 个文件/u);
-  assert.match(script, /candidates, styleEvidence: state\.memoryStyleEvidence \}\)/u);
+  // 提交走后台任务，页面按任务进度显示进度条。
+  assert.match(script, /candidates, styleEvidence: state\.memoryStyleEvidence, background: true \}\)/u);
+  assert.match(html, /id="memoryImportProgress"/u);
 });
 
 test("术语库列表显示原表注释", async () => {

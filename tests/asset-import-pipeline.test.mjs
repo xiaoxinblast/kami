@@ -119,3 +119,33 @@ test("导入体积规则各入口统一：单文件 20MB、只限文件个数", 
   const batchDocument = await read("../src/batch-document.mjs");
   assert.match(batchDocument, /const MAX_FILE_BYTES = 20 \* 1024 \* 1024;/u);
 });
+
+test("人工 TM 导入支持后台任务：接口立刻返回任务号，页面跟进度", async () => {
+  const server = await read("../server.mjs");
+  const routeIndex = server.indexOf('url.pathname === "/api/tm-import/commit"');
+  assert.ok(routeIndex > 0);
+  const route = server.slice(routeIndex, routeIndex + 1400);
+  assert.match(route, /if \(body\.background === true\) \{/u);
+  assert.match(route, /type: "term_import"/u);
+  assert.match(route, /runTmImportInBackground\(/u);
+  assert.match(route, /return json\(res, 202, \{ taskId: task\.id/u);
+  // 后台执行体自带进度：写审核队列按条数报，入库沿用 commitTermImport 的内部百分比。
+  const job = server.slice(server.indexOf("async function runTmImportInBackground"), server.indexOf("async function previewTermImport"));
+  assert.match(job, /正在写入审核队列：0 \/ \$\{candidates\.length\}/u);
+  assert.match(job, /countProgressReport\(report, 2, 10\)/u);
+  assert.match(job, /scaleProgressReport\(report, 10, 92\)/u);
+  assert.match(job, /payload: \{\s*\n\s*batchId: persisted\.batchId,/u);
+  // 进度辅助函数与资产导入共用一份实现。
+  assert.match(server, /function scaleProgressReport\(report, from, to\)/u);
+  assert.match(server, /function countProgressReport\(report, from, to\)/u);
+
+  const app = await read("../public/app.js");
+  assert.match(app, /styleEvidence: state\.memoryStyleEvidence, background: true/u);
+  assert.match(app, /#memoryImportProgressText/u);
+  // 复核确认那条路径也跟同一批次的进度，不再只有按钮文字。
+  assert.match(app, /const backgroundTaskId = state\.importPreview\.backgroundTaskId \|\| "";/u);
+  const html = await read("../public/index.html");
+  assert.match(html, /id="memoryImportProgress"/u);
+  const wizard = await read("../public/project-wizard.js");
+  assert.match(wizard, /已提交后台写入：\$\{tmResult\.accepted/u);
+});
