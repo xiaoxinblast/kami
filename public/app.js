@@ -1765,9 +1765,9 @@ function renderBackgroundTaskRow(task) {
     ? `术语 ${summary.terms ?? 0} · 译例 ${summary.memories ?? 0} · 风格草稿 ${summary.styleProfiles ?? 0} · 跳过 ${summary.skipped ?? 0}${summary.skippedByReason ? `（${Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join("；")}）` : ""}`
     : task.payload?.error ? `错误：${task.payload.error}` : "";
   return `<article class="task-row" data-task-id="${escapeHtml(task.id)}">
-    <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="task-status ${escapeHtml(statusClass)}">${escapeHtml(statusLabel)}</span><span class="task-type-chip">${escapeHtml(BACKGROUND_TASK_LABELS[task.taskType] || "后台")}</span></div><small>${locale ? `${escapeHtml(locale.label)} · ` : ""}${escapeHtml(message || payloadText || contentTypeLabel(task.contentType))} · ${formatTaskTime(task.updatedAt)}</small></div>
+    <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="task-status ${escapeHtml(statusClass)}">${escapeHtml(statusLabel)}</span><span class="task-type-chip">${escapeHtml(BACKGROUND_TASK_LABELS[task.taskType] || "后台")}</span></div><small title="${escapeHtml(message || payloadText || "")}">${locale ? `${escapeHtml(locale.label)} · ` : ""}${escapeHtml(message || payloadText || contentTypeLabel(task.contentType))} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${percent}%"></i></div><span>${task.totalSegments ? `${task.completedSegments} / ${task.totalSegments}` : `${percent}%`}</span></div>
-    <div class="task-qa"><strong>${payloadText || (canResumeImport ? `${task.payload.candidateCount || 0} 条候选` : "—")}</strong><small>${task.status === "in_progress" ? "后台执行中" : canResumeImport ? "识别完成，等待人工确认" : formatTaskTime(task.updatedAt)}</small></div>
+    <div class="task-qa"><strong title="${escapeHtml(payloadText || "")}">${payloadText || (canResumeImport ? `${task.payload.candidateCount || 0} 条候选` : "—")}</strong><small>${task.status === "in_progress" ? "后台执行中" : canResumeImport ? "识别完成，等待人工确认" : formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-actions">${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${canContinueImport ? `<button class="button secondary small" data-action="continue-import">继续导入</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
   </article>`;
 }
@@ -2712,7 +2712,11 @@ async function setImportFiles(files = [], {
   const supported = /\.(xlsx|csv|xliff|mqxliff)$/iu;
   const invalid = selected.find((file) => !supported.test(file.name));
   if (invalid) return toast(`${invalid.name} 不是支持的双语资产格式`);
-  if (selected.some((file) => file.size > 10 * 1024 * 1024)) return toast("单个导入文件不能超过 10MB");
+  // 与记忆库、批次入口统一：单文件 10MB，一次最多 200 个文件；不再限制单次总量
+  //（预检是逐文件请求，请求体积不随文件数量增长）。
+  const oversize = selected.find((file) => file.size > MEMORY_IMPORT_FILE_BYTES);
+  if (oversize) return toast(`${oversize.name} 超过单文件 10MB 上限（${formatBytes(oversize.size)}）`);
+  if (selected.length > IMPORT_MAX_FILES) return toast(`一次最多选择 ${IMPORT_MAX_FILES} 个文件，当前 ${selected.length} 个`);
   const resolvedPurpose = purpose || (intent === "terms" ? "term" : readImportPurpose());
   state.importFiles = selected;
   state.importFile = selected[0];
@@ -2995,14 +2999,13 @@ function formatBytes(bytes = 0) {
 }
 
 const MEMORY_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
-/** base64 会放大约 1/3，服务端导入类请求额度 48MB，这里按 24MB 原始体积设闸。 */
-const MEMORY_IMPORT_TOTAL_BYTES = 24 * 1024 * 1024;
+/** 一次最多选多少个文件：预检是逐文件的，这里只是防止误拖几百个文件把界面卡住。 */
+const IMPORT_MAX_FILES = 200;
 
 function validateMemoryImportFiles(files) {
   const tooBig = files.find((file) => file.size > MEMORY_IMPORT_FILE_BYTES);
-  if (tooBig) return `${tooBig.name} 超过单文件 10MB 上限`;
-  const total = files.reduce((sum, file) => sum + file.size, 0);
-  if (total > MEMORY_IMPORT_TOTAL_BYTES) return `本次合计 ${formatBytes(total)} 超过 24MB 上限，请分批导入`;
+  if (tooBig) return `${tooBig.name} 超过单文件 10MB 上限（${formatBytes(tooBig.size)}）`;
+  if (files.length > IMPORT_MAX_FILES) return `一次最多选择 ${IMPORT_MAX_FILES} 个文件，当前 ${files.length} 个`;
   return "";
 }
 
@@ -3159,7 +3162,7 @@ function resetImport() {
   state.importBatchLearning = [];
   $("#termFile").value = "";
   $("#filePrompt").textContent = "拖入或点击选择双语资产文件";
-  $("#fileMeta").textContent = "支持多选 .xlsx / .csv / .xliff / .mqxliff；先本地预检，再确认导入";
+  $("#fileMeta").textContent = "支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 10MB；先本地预检，再确认导入";
   $("#dropZone").classList.remove("has-file");
   renderImportFileList($("#importFileList"), [], new Map());
   $("#mappingNote").textContent = "拖入表格后会自动识别结构并生成审核队列。";

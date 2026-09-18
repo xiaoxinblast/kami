@@ -399,6 +399,14 @@ select { min-width: 150px; }
 .task-summary span { padding: 5px 8px; border-radius: 7px; color: #5d6962; background: #eef1ed; font-size: 11px; font-weight: 750; }
 .task-list { border-top: 1px solid var(--line); }
 .task-row { display: grid; grid-template-columns: minmax(240px,1fr) 180px 110px auto; gap: 18px; align-items: center; padding: 14px 4px; border-bottom: 1px solid #e9ebe6; }
+/* 任务行里会放进度消息和错误原因，可能是很长的 URL / 过滤条件：一律允许收缩并截断，
+   否则一列会把整行撑成几屏高（曾经的 431 报错就是这样把任务中心顶爆的）。 */
+.task-row > * { min-width: 0; }
+.task-main, .task-qa { overflow: hidden; }
+.task-main small, .task-qa small, .task-qa strong {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere;
+}
 .task-title { display: flex; align-items: center; gap: 8px; }
 .task-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .task-main small, .task-qa small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }

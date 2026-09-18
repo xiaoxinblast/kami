@@ -69,3 +69,41 @@ test("页面中途关闭不会让长任务抛未捕获异常", async () => {
   assert.match(server, /if \(res\.destroyed \|\| res\.writableEnded\) return;/u);
   assert.match(server, /res\.on\("error", \(\) => \{\}\);/u);
 });
+
+test("按原文查重改走哈希，长句不再把查询串撑爆（431）", async () => {
+  const directus = await read("../src/directus-store.mjs");
+  // 旧写法把整句原文/译文塞进 URL，几百字的句段直接触发 431 并让候选被跳过。
+  assert.doesNotMatch(directus, /params\.set\("filter\[source\]\[_eq\]"/u);
+  assert.doesNotMatch(directus, /params\.set\("filter\[target\]\[_eq\]"/u);
+  assert.match(directus, /pairParams\.set\("filter\[source_hash\]\[_eq\]", memorySourceHash\(attempt\.source\)\)/u);
+  assert.match(directus, /params\.set\("filter\[source_hash\]\[_eq\]", memorySourceHash\(source\)\)/u);
+  assert.match(directus, /source_hash: memorySourceHash\(source\),/u);
+  const memory = await read("../src/translation-memory.mjs");
+  assert.match(memory, /export function memorySourceHash\(source = ""\)/u);
+  // 报错信息会进任务记录并显示在界面上：必须去掉查询串并截断。
+  assert.match(directus, /const plainPath = String\(path\)\.split\("\?"\)\[0\]\.slice\(0, 80\);/u);
+  assert.match(directus, /失败（\$\{response\.status\}/u);
+});
+
+test("跳过原因与任务文案都做了截断，界面不会被长报错撑爆", async () => {
+  const server = await read("../server.mjs");
+  assert.match(server, /const reason = String\(entry\?\.reason \|\| "未知原因"\)\.slice\(0, 120\);/u);
+  const styles = await read("../public/styles.css");
+  assert.match(styles, /\.task-row > \* \{ min-width: 0; \}/u);
+  assert.match(styles, /\.task-main small, \.task-qa small, \.task-qa strong \{/u);
+  assert.match(styles, /-webkit-line-clamp: 2;/u);
+  const app = await read("../public/app.js");
+  assert.match(app, /<strong title="\$\{escapeHtml\(payloadText \|\| ""\)\}">/u);
+});
+
+test("导入体积规则三条路径统一：单文件 10MB、只限文件个数", async () => {
+  const app = await read("../public/app.js");
+  assert.doesNotMatch(app, /MEMORY_IMPORT_TOTAL_BYTES/u);
+  assert.match(app, /const MEMORY_IMPORT_FILE_BYTES = 10 \* 1024 \* 1024;/u);
+  assert.match(app, /const IMPORT_MAX_FILES = 200;/u);
+  const server = await read("../server.mjs");
+  assert.match(server, /const IMPORT_FILE_BYTES = 10 \* 1024 \* 1024;/u);
+  assert.match(server, /const tooLarge = files\.find\(\(file\) => Buffer\.byteLength\(String\(file\.base64 \|\| ""\), "base64"\) > IMPORT_FILE_BYTES\);/u);
+  const html = await read("../public/index.html");
+  assert.match(html, /单个文件不超过 10MB/u);
+});

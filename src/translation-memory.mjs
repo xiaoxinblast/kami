@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { normalizeSource, similarity } from "./text.mjs";
 import { MEMORY_PURPOSES, partitionTranslationMemories } from "./asset-governance.mjs";
 
@@ -39,6 +40,19 @@ export function styleEvidenceMatch({ entryKey = "", locale = "", contentType = "
     domain: String(domain || "general"),
     projectId: String(projectId || "").trim()
   };
+}
+
+/**
+ * TM 原文的稳定哈希。
+ *
+ * 之前按 `filter[source][_eq]` 查"这条原文是否已在库"，几百字的句段会把查询串撑爆，
+ * Directus 直接回 `431 Request Header Fields Too Large`，那条候选就被跳过。改成哈希后
+ * 查询长度恒定：先按哈希取出同一原文的行，再在内存里精确比对目标译文。
+ */
+export function memorySourceHash(source = "") {
+  const text = String(source || "").trim();
+  if (!text) return "";
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32);
 }
 
 function tokenOverlap(left, right) {

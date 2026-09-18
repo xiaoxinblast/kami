@@ -34,13 +34,14 @@ function uuidField() {
   };
 }
 
-function textField(field, translation, { required = false, width = "full", note = null, multiline = false, sort } = {}) {
+function textField(field, translation, { required = false, width = "full", note = null, multiline = false, sort, readonly = false } = {}) {
   return {
     field,
     type: multiline ? "text" : "string",
     meta: {
       interface: multiline ? "input-multiline" : "input",
       required,
+      readonly,
       width,
       note,
       sort,
@@ -175,6 +176,7 @@ function memoryFields() {
     textField("batch_id", "批次 ID", { width: "half", sort: 12 }),
     textField("entry_id", "来源条目 ID", { width: "half", sort: 12 }),
     textField("entry_key", "条目身份键", { width: "half", note: "memoQ x-mmq-context 等稳定条目 ID：改稿重导时按它覆盖原行，不再堆新译文。", sort: 12 }),
+    textField("source_hash", "原文哈希", { width: "half", readonly: true, note: "原文的稳定哈希：按原文查重时用它查询，避免长句把查询串撑爆（431）。", sort: 12 }),
     textField("previous_source", "上一条原文", { multiline: true, sort: 13 }),
     textField("next_source", "下一条原文", { multiline: true, sort: 14 }),
     { field: "source_row", type: "integer", meta: { interface: "input", width: "half", sort: 13, translations: label("来源行号") }, schema: { is_nullable: true } },

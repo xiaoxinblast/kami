@@ -57,6 +57,8 @@ const AUTO_QA_MODEL_ALIGNMENT_SEGMENT_LIMIT = 24;
 const MAX_BODY_BYTES = 15 * 1024 * 1024;
 /** 导入类请求要把多个文件按 base64 塞进一个 JSON，额度单独放宽。 */
 const IMPORT_BODY_BYTES = 48 * 1024 * 1024;
+/** 所有导入入口统一的单文件上限（前端同值，两边都要有）。 */
+const IMPORT_FILE_BYTES = 10 * 1024 * 1024;
 const TERM_AI_CONCURRENCY = 5;
 const TERM_AI_BATCH_SIZE = 24;
 /** 术语批量写入的分块大小；导入 5000+ 条时逐条写会拖到分钟级。 */
@@ -1130,7 +1132,8 @@ async function commitTermImport(body, onProgress = null) {
   const skipped = [];
   const skipCounts = new Map();
   const recordSkip = (entry) => {
-    const reason = String(entry?.reason || "未知原因");
+    // 跳过原因会写进任务记录并显示在界面上：长的（比如 Directus 报错）截断，避免把任务行撑爆。
+    const reason = String(entry?.reason || "未知原因").slice(0, 120);
     skipCounts.set(reason, (skipCounts.get(reason) || 0) + 1);
     if (skipped.length < SKIPPED_DETAIL_LIMIT) skipped.push({ ...entry, reason });
   };
@@ -1654,6 +1657,9 @@ async function apiHandler(req, res, url) {
     if (!files.length) return json(res, 400, { error: "没有待导入的人工 TM 文件" });
     const unsupported = files.find((file) => !/\.(xlsx|csv|xliff|mqxliff)$/iu.test(file.filename));
     if (unsupported) return json(res, 400, { error: `人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff：${unsupported.filename}` });
+    // 统一单文件上限：xlsx/csv 在解析器里也有同样的闸门，这里补上 XLIFF 这一路。
+    const tooLarge = files.find((file) => Buffer.byteLength(String(file.base64 || ""), "base64") > IMPORT_FILE_BYTES);
+    if (tooLarge) return json(res, 400, { error: `${tooLarge.filename} 超过单文件 10MB 上限` });
     const candidates = [];
     let rowsScanned = 0;
     const fileTypes = new Set();

@@ -3,7 +3,7 @@ import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { fetchWithTimeout } from "./provider.mjs";
 import { sanitizeProjectSettings } from "./project-config.mjs";
-import { memoryMatchAttempts, styleEvidenceMatch } from "./translation-memory.mjs";
+import { memoryMatchAttempts, memorySourceHash, styleEvidenceMatch } from "./translation-memory.mjs";
 
 export const LOCALE_COLLECTIONS = Object.freeze({
   "zh-CN": "terms_zh_cn",
@@ -80,7 +80,10 @@ async function request(path, { method = "GET", body, timeoutMs = 10_000 } = {}) 
   }
   if (!response.ok) {
     const details = payload?.errors?.map((error) => error.message).join("; ") || response.statusText;
-    const error = new Error(`Directus ${method} ${path} failed (${response.status}): ${details}`);
+    // 报错信息会被写进任务记录并显示在界面上：去掉查询串、截断长度，
+    // 否则一条 431 里那几 KB 的过滤条件会把任务行撑爆。
+    const plainPath = String(path).split("?")[0].slice(0, 80);
+    const error = new Error(`Directus ${method} ${plainPath} 失败（${response.status}${details ? ` ${details.slice(0, 120)}` : ""}）`);
     error.statusCode = response.status >= 500 ? 503 : response.status;
     throw error;
   }
@@ -299,16 +302,20 @@ export async function saveDirectusMemory(locale, input) {
     return params;
   };
   // 先按条目 ID（memoQ x-mmq-context）找，命中就覆盖原行；再退回 (原文, 译文) 去重。
+  // 原文用哈希查：整句塞进查询串会撞 Directus 的 431。
   let existing = [];
   for (const attempt of memoryMatchAttempts({ source, target, entryKey: input.entryKey })) {
     const params = scope(new URLSearchParams({ limit: "1", fields: "id,quality_status,qa_score" }));
     if (attempt.kind === "entry") {
       params.set("filter[entry_key][_eq]", attempt.entryKey);
+      existing = await request(`/items/${collection}?${params}`);
     } else {
-      params.set("filter[source][_eq]", attempt.source);
-      params.set("filter[target][_eq]", attempt.target);
+      const pairParams = scope(new URLSearchParams({ limit: "50", fields: "id,quality_status,qa_score,source,target" }));
+      pairParams.set("filter[source_hash][_eq]", memorySourceHash(attempt.source));
+      const candidates = await request(`/items/${collection}?${pairParams}`);
+      const matched = candidates.find((item) => item.source === attempt.source && item.target === attempt.target);
+      existing = matched ? [matched] : [];
     }
-    existing = await request(`/items/${collection}?${params}`);
     if (existing[0]) break;
   }
   const body = {
@@ -317,6 +324,8 @@ export async function saveDirectusMemory(locale, input) {
     entry_id: String(input.entryId || ""),
     // 条目身份：memoQ 的 x-mmq-context 等稳定 ID，用于"改稿重导覆盖原行"。
     entry_key: String(input.entryKey || ""),
+    // 原文哈希：按"原文 + 译文"去重时用它查询，长度恒定，不受句段长短影响。
+    source_hash: memorySourceHash(source),
     previous_source: String(input.previousSource || ""),
     next_source: String(input.nextSource || ""),
     domain: input.domain || "general",
@@ -978,7 +987,8 @@ export async function rebuildDirectusEmbeddings(locale, { forceLocal = false } =
 export async function demoteDirectusMemories(locale, source, exceptId, { projectId = "" } = {}) {
   const collection = memoryCollectionFor(locale);
   const params = new URLSearchParams({ limit: "-1", fields: "id,quality_status" });
-  params.set("filter[source][_eq]", source);
+  // 同样用哈希查：采纳长句译文时，整句原文塞进查询串会报 431。
+  params.set("filter[source_hash][_eq]", memorySourceHash(source));
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   const items = await request(`/items/${collection}?${params}`);
   const updates = items
