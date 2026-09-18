@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { normalizeSource, similarity } from "./text.mjs";
 import { MEMORY_PURPOSES, partitionTranslationMemories } from "./asset-governance.mjs";
+import { scopeRankOf } from "./scope-fallback.mjs";
 
 const QUALITY_RANK = Object.freeze({ human_approved: 2, machine_verified: 1, provisional: 0, rejected: -1 });
+// 作用域加成：同语体+同领域最优先，其次同其一，通用垫底。量级与 CONTEXT_RANK_WEIGHT
+// 同档（0.12），只影响排序、不参与阈值判定。
+const SCOPE_RANK_BONUS = Object.freeze([0.06, 0.03, 0.03, 0]);
 
 /**
  * 比较用归一化：去掉 MQXLIFF 的内联标签占位符（`<tag id='tag-1' type='inline' desc='ph'/>`），
@@ -199,6 +203,10 @@ export function rankTranslationMemories(source, memories = [], {
       const tags = tagOverlap(contentTags, memory.contentTags);
       const score = Math.min(1, Math.max(lexical, blended) + tags * 0.06);
       const affinity = contextAffinity(memory, { platform, region, channel, campaign, project }, nowMs);
+      // 作用域相近的资产排在前面；通用资产仍在池子里，只是没有加成。
+      const scopeRank = Number.isInteger(memory.scopeRank)
+        ? memory.scopeRank
+        : scopeRankOf(memory, { contentType, domain });
       return {
         ...memory,
         catMatchRate: cat.rate,
@@ -208,9 +216,10 @@ export function rankTranslationMemories(source, memories = [], {
         semantic: cosine === null ? null : Number(cosine.toFixed(3)),
         tagMatch: Number(tags.toFixed(3)),
         contextAffinity: Number(affinity.toFixed(3)),
+        scopeRank,
         // 相关度单独保留：投放亲和度只参与排序，绝不把不相关的译例推过检索门槛。
         // 排序分不封顶——原文完全一致时相关度本就是 1，封顶会把投放差异抹平。
-        rankScore: Number((score + affinity * CONTEXT_RANK_WEIGHT).toFixed(4))
+        rankScore: Number((score + affinity * CONTEXT_RANK_WEIGHT + (SCOPE_RANK_BONUS[scopeRank] ?? 0)).toFixed(4))
       };
     })
     .filter((memory) => memory.similarity >= 0.28)
@@ -264,7 +273,7 @@ export function classifyCatMatch(source, memory, { entryId = "", entryKey = "", 
   return { rate: 100, kind: "exact", idMatch: false, contextMatch: false };
 }
 
-export function rankQaCases(source, cases = [], { limit = 3, queryEmbedding = null } = {}) {
+export function rankQaCases(source, cases = [], { limit = 3, queryEmbedding = null, contentType = "", domain = "" } = {}) {
   const normalized = normalizeSource(source);
   return cases.map((item) => {
     const edit = similarity(normalized, normalizeSource(item.source));
@@ -273,8 +282,18 @@ export function rankQaCases(source, cases = [], { limit = 3, queryEmbedding = nu
     const cosine = cosineScore(item, queryEmbedding);
     const blended = cosine === null ? lexical : 0.45 * lexical + 0.55 * cosine;
     const score = Math.max(lexical, blended);
-    return { ...item, similarity: Number(score.toFixed(3)), semantic: cosine === null ? null : Number(cosine.toFixed(3)) };
-  }).filter((item) => item.similarity >= 0.3).sort((a, b) => b.similarity - a.similarity || b.scoreAfter - a.scoreAfter).slice(0, limit);
+    // 作用域只影响同分附近的取舍：相关度门槛仍按 similarity 判，不被加成推过线。
+    const scopeRank = Number.isInteger(item.scopeRank)
+      ? item.scopeRank
+      : (contentType || domain ? scopeRankOf(item, { contentType, domain }) : 0);
+    return {
+      ...item,
+      similarity: Number(score.toFixed(3)),
+      semantic: cosine === null ? null : Number(cosine.toFixed(3)),
+      scopeRank,
+      rankScore: Number((score + (SCOPE_RANK_BONUS[scopeRank] ?? 0)).toFixed(4))
+    };
+  }).filter((item) => item.similarity >= 0.3).sort((a, b) => b.rankScore - a.rankScore || b.similarity - a.similarity || b.scoreAfter - a.scoreAfter).slice(0, limit);
 }
 
 /**

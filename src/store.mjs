@@ -6,6 +6,7 @@ import { assertLocale, LOCALES } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { createDefaultProjectSettings, sanitizeProjectSettings } from "./project-config.mjs";
 import { memoryMatchAttempts, normalizeMemoryText, styleEvidenceMatch } from "./translation-memory.mjs";
+import { scopeFallbackChain, scopeRankOf } from "./scope-fallback.mjs";
 import {
   deleteDirectusAsset,
   deleteDirectusLibraryEntries,
@@ -333,10 +334,14 @@ async function getJsonMemories(locale, options = {}) {
   const projectId = String(options.projectId || "").trim();
   const matched = items.filter((item) =>
     (!projectId || item.projectId === projectId)
-    && (!options.contentType || (options.exactContentType ? item.contentType === options.contentType : options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general"))
+    && (options.scopeFallback
+      ? (!options.contentType || options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")
+      : (!options.contentType || (options.exactContentType ? item.contentType === options.contentType : options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")))
     && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
     && (!String(options.search || "").trim() || [item.source, item.target].some((value) => String(value || "").toLowerCase().includes(String(options.search).trim().toLowerCase())))
-  );
+  ).map((item) => (options.scopeFallback
+    ? { ...item, scopeRank: scopeRankOf(item, { contentType: options.contentType || "general", domain: options.domain || "general" }) }
+    : item));
   // 与 Directus 实现保持同一口径：最新在前，支持 offset/limit 分页（limit<=0 表示全量）。
   const sorted = [...matched].sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")));
   const offset = Math.max(0, Math.trunc(Number(options.offset)) || 0);
@@ -373,8 +378,17 @@ async function saveJsonMemory(locale, input) {
   return item;
 }
 
-async function getJsonStyleProfile(locale, contentType, domain = "general", { projectId = "" } = {}) {
+async function getJsonStyleProfile(locale, contentType, domain = "general", { projectId = "", scopeFallback = false } = {}) {
   const profiles = await readJson(join(ROOT, "styles", `${assertLocale(locale)}.json`), []);
+  if (scopeFallback) {
+    // 与 Directus 实现同一套降级链：按链位挑第一份命中的规范。
+    const scoped = profiles.filter((item) => item.status === "active" && String(item.projectId || "") === String(projectId || "")).sort((a, b) => b.version - a.version);
+    for (const entry of scopeFallbackChain(contentType, domain)) {
+      const hit = scoped.find((item) => (item.contentType || "general") === entry.contentType && (item.domain || "general") === entry.domain);
+      if (hit) return { ...hit, scopeRank: entry.rank };
+    }
+    return null;
+  }
   const candidates = profiles.filter((item) => item.status === "active" && item.contentType === contentType && String(item.projectId || "") === String(projectId || "")).sort((a, b) => b.version - a.version);
   return candidates.find((item) => item.domain === domain) || candidates.find((item) => item.domain === "general") || candidates[0] || null;
 }
@@ -621,7 +635,17 @@ async function appendJsonQa(kind, input) {
 
 async function getJsonQaCases(locale, options = {}) {
   const items = await readJson(join(ROOT, "qa", "cases.json"), []);
-  return items.filter((item) => item.locale === assertLocale(locale) && item.status === "human_approved" && (!options.projectId || item.projectId === options.projectId) && (!options.contentType || item.contentType === options.contentType) && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general"));
+  return items.filter((item) =>
+    item.locale === assertLocale(locale)
+    && item.status === "human_approved"
+    && (!options.projectId || item.projectId === options.projectId)
+    && (options.scopeFallback
+      ? (!options.contentType || options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")
+      : (!options.contentType || item.contentType === options.contentType))
+    && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
+  ).map((item) => (options.scopeFallback
+    ? { ...item, scopeRank: scopeRankOf(item, { contentType: options.contentType || "general", domain: options.domain || "general" }) }
+    : item));
 }
 
 async function getJsonAssets(locale, options = {}) {

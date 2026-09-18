@@ -357,6 +357,15 @@ select { min-width: 150px; }
 .guide-doc-footer small { color: var(--muted); font-size: 11px; }
 .style-rule-count { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
 .batch-learning-actions { display: flex; align-items: center; gap: 8px; }
+/* 语体 / 领域收进「高级」：默认自动识别，平时不占视觉重量。 */
+.advanced-scope { margin: 10px 0 4px; padding: 9px 12px; border: 1px dashed #dfe5da; border-radius: 10px; background: #fbfcfa; }
+.advanced-scope > summary { color: #5f7067; cursor: pointer; font-size: 12px; font-weight: 800; }
+.advanced-scope[open] > summary { margin-bottom: 8px; }
+.advanced-scope-note { flex: 1 1 260px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.qa-advanced-scope { flex: 1 1 100%; }
+.qa-scope-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.style-pool.is-total { padding: 12px 0; border-bottom: 1px solid #e8ece8; }
+.style-pool.is-total strong { font-size: 13px; }
 /* 审校回填结果：匹配/未匹配/歧义逐条列出来，不让用户猜是哪几条 */
 .review-import-details { display: grid; gap: 10px; max-height: 48vh; overflow-y: auto; margin: 4px 0 12px; }
 .review-import-details > div { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; }

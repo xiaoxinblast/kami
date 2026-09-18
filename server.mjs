@@ -651,7 +651,7 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   let references = providedReferences;
   if (!references) {
     const [memories, libraries] = await Promise.all([
-      getMemories(locale, { contentType, domain, limit: -1, exactContentType: true, projectId }),
+      getMemories(locale, { contentType, domain, limit: -1, scopeFallback: true, projectId }),
       projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
     ]);
     const librariesById = new Map(libraries.map((library) => [library.id, library]));
@@ -3937,7 +3937,7 @@ async function apiHandler(req, res, url) {
     const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
     const matches = matchTerms(source, assets, { contentType, domain, ...deliveryContext(body, source) });
     const classification = await classify({ text: source, hint: contentType, useModel: false });
-    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId: project });
+    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId: project, scopeFallback: true });
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project }));
     const qaGuidance = rankQaCases(source, await getQaCases(locale, { projectId: project, contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(source) });
     const contextPack = buildContextPack({
@@ -4045,9 +4045,9 @@ async function apiHandler(req, res, url) {
     if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings }) });
     const classification = await classify({ text: body.source || "", hint: contentType, useModel: false });
     const projectId = String(body.projectId || body.project || "default");
-    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId });
+    const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId, scopeFallback: true });
     const translationSkill = await ensureChampionTranslationSkill(learningScope({ locale, contentType, domain, project: projectId }));
-    const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { projectId, contentType, domain, limit: -1 }), { limit: 3, queryEmbedding: await embedSource(body.source || "") });
+    const qaGuidance = rankQaCases(body.source || "", await getQaCases(locale, { projectId, contentType, domain, limit: -1, scopeFallback: true }), { limit: 3, queryEmbedding: await embedSource(body.source || ""), contentType, domain });
     const contextPack = buildContextPack({
       titleOverrides: getSettings().orthography.titleBrackets, source: body.source || "", locale, classification, matches, domain, styleProfile, translationSkill, qaGuidance });
     const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", projectSettings, projectId: body.projectId || "" });
@@ -4123,7 +4123,7 @@ async function evaluateQaFile(body = {}) {
   const assets = (await getProjectAssets(locale, projectId)).assets;
   const contentType = body.contentType && body.contentType !== "auto" ? body.contentType : "general";
   const domain = concreteDomain(body.domain, { contentType });
-  const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId });
+  const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId, scopeFallback: true });
   const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { projectId, contentType, domain, limit: 12 })).slice(0, 6);
   const evaluated = await evaluateQaPairList({
     pairs, assets, locale, contentType, domain, projectSettings, styleProfile,
@@ -4252,13 +4252,13 @@ async function evaluateQaBatch(batchId, projectId = "") {
     // 术语匹配放在识别之后，用真正生效的语体与领域加权，而不是界面提交的原始值。
     const matches = matchTerms(cleanSource, assets, { contentType: scopeContentType, domain, ...deliveryContext(body, cleanSource) });
     const projectId = String(body.projectId || "");
-    const styleProfile = await getStyleProfile(locale, scopeContentType, domain, { projectId });
+    const styleProfile = await getStyleProfile(locale, scopeContentType, domain, { projectId, scopeFallback: true });
     const queryEmbedding = await embedSource(cleanSource);
-    const narrowedMemories = narrowByDomain(await getMemories(locale, { projectId, contentType: scopeContentType, domain: "general", limit: -1, exactContentType: true }), domain);
-    const narrowedQaCases = narrowByDomain(await getQaCases(locale, { projectId, contentType: scopeContentType, domain: "general", limit: -1 }), domain);
+    const narrowedMemories = narrowByDomain(await getMemories(locale, { projectId, contentType: scopeContentType, domain, limit: -1, scopeFallback: true }), domain);
+    const narrowedQaCases = narrowByDomain(await getQaCases(locale, { projectId, contentType: scopeContentType, domain, limit: -1, scopeFallback: true }), domain);
     domainResolution.relaxedRetrieval = narrowedMemories.relaxed || narrowedQaCases.relaxed;
     const references = rankTranslationMemories(cleanSource, narrowedMemories.items, { limit: 5, queryEmbedding, contentTags: classification.contentTags || [], locale, contentType: scopeContentType, domain, projectId, campaign: String(body.campaign || ""), ...deliveryContext(body, cleanSource) });
-    const qaCases = rankQaCases(cleanSource, narrowedQaCases.items, { limit: 3, queryEmbedding });
+    const qaCases = rankQaCases(cleanSource, narrowedQaCases.items, { limit: 3, queryEmbedding, contentType: scopeContentType, domain });
     const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { projectId, contentType: scopeContentType, domain, limit: 12 })).slice(0, 6);
     // 只有人工批准的译例能充当"标准"；机器译文另开一档，仅供一致性参考。
     const { approved: approvedReferences, machineDrafts } = splitReferenceAuthority(references);
@@ -4840,9 +4840,10 @@ async function evaluateQaBatch(batchId, projectId = "") {
     });
     const queryEmbedding = await embedSource(body.source);
     const [storedStyleProfile, localeQaCases, localeMemories, userProfile, projectLibraries] = await Promise.all([
-      getStyleProfile(locale, classification.contentType, domain, { projectId }),
-      getQaCases(locale, { projectId, contentType: classification.contentType, domain: "general", limit: -1 }),
-      getMemories(locale, { contentType: classification.contentType, domain: "general", limit: -1, exactContentType: true, projectId }),
+      // 统一降级链：同语体同领域 → 同语体通用 → 通用同领域 → 通用×通用。
+      getStyleProfile(locale, classification.contentType, domain, { projectId, scopeFallback: true }),
+      getQaCases(locale, { projectId, contentType: classification.contentType, domain, limit: -1, scopeFallback: true }),
+      getMemories(locale, { contentType: classification.contentType, domain, limit: -1, scopeFallback: true, projectId }),
       getUserProfile(locale, { projectId }),
       projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
     ]);
@@ -4860,7 +4861,12 @@ async function evaluateQaBatch(batchId, projectId = "") {
       batchId: body.batchId || ""
     });
     domainResolution.relaxedRetrieval = narrowedMemories.relaxed || narrowedQaCases.relaxed;
-    const qaGuidance = rankQaCases(body.source, narrowedQaCases.items, { limit: qaCaseLimit, queryEmbedding });
+    const qaGuidance = rankQaCases(body.source, narrowedQaCases.items, {
+      limit: qaCaseLimit,
+      queryEmbedding,
+      contentType: classification.contentType,
+      domain
+    });
     const translationReferences = rankTranslationMemories(body.source, fileScopedMemories, {
       limit: memoryLimit,
       queryEmbedding,
@@ -4878,6 +4884,26 @@ async function evaluateQaBatch(batchId, projectId = "") {
       llmMinRelevance: projectSettings?.tm?.llmMinRelevance || 60,
       ...delivery
     });
+    // 透明化：这一次到底吃到了哪一档作用域（规范按链位、记忆按档位计数）。
+    const scopeUsage = {
+      contentType: classification.contentType,
+      domain,
+      styleProfile: storedStyleProfile
+        ? {
+          name: storedStyleProfile.name,
+          contentType: storedStyleProfile.contentType,
+          domain: storedStyleProfile.domain,
+          rank: Number(storedStyleProfile.scopeRank) || 0
+        }
+        : null,
+      memoryScopes: translationReferences.reduce((counts, item) => {
+        const rank = Number.isInteger(item.scopeRank) ? item.scopeRank : 0;
+        if (rank === 0) counts.exact += 1;
+        else if (rank >= 3) counts.general += 1;
+        else counts.partial += 1;
+        return counts;
+      }, { exact: 0, partial: 0, general: 0 })
+    };
     // 批次排比/韵文检测：同一批次的多行共用一种句式时，注入模板约束；
     // 客户端顺序翻译时还会带上本批已定稿译文作为风格锚点。
     let batchVerse = null;
@@ -5090,6 +5116,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
         factSchema,
         routing,
         qualityRoute,
+        scopeUsage,
         styleProfile: contextPack.styleProfile,
         translationSkill: { id: translationSkill.id, name: translationSkill.name, version: translationSkill.version, status: translationSkill.status },
         trajectoryId: completedTrajectory?.id || "",

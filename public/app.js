@@ -1185,6 +1185,36 @@ function resolutionSummary(classification, domainResolution) {
   return parts.join(" · ");
 }
 
+/**
+ * 作用域透明化：这次翻译到底吃到了哪一档规范、译例分别来自哪一档。
+ * 降级链是「同语体同领域 → 同语体通用 → 通用同领域 → 通用×通用」，这里把命中结果说清楚，
+ * 用户不必再去猜"我配的语体到底起没起作用"。
+ */
+function scopeUsageText(scopeUsage) {
+  if (!scopeUsage) return "";
+  const parts = [];
+  const profile = scopeUsage.styleProfile;
+  if (profile) {
+    const typeLabel = state.bootstrap?.contentTypes?.[profile.contentType]?.label || profile.contentType;
+    const domainLabel = DOMAIN_LABELS[profile.domain] || profile.domain;
+    const fallbackNote = Number(profile.rank) > 0 ? "，通用兜底" : "";
+    parts.push(`规范（${typeLabel} × ${domainLabel}${fallbackNote}）`);
+  } else {
+    parts.push("无匹配规范");
+  }
+  const counts = scopeUsage.memoryScopes || {};
+  const total = (counts.exact || 0) + (counts.partial || 0) + (counts.general || 0);
+  if (total) {
+    const detail = [
+      counts.exact ? `同作用域 ${counts.exact}` : "",
+      counts.partial ? `相邻作用域 ${counts.partial}` : "",
+      counts.general ? `通用 ${counts.general}` : ""
+    ].filter(Boolean).join(" / ");
+    parts.push(`译例 ${total} 条（${detail}）`);
+  }
+  return `本次参考：${parts.join(" · ")}`;
+}
+
 function renderTranslationOutput() {
   const result = state.lastResult;
   if (!result) return;
@@ -1363,7 +1393,9 @@ async function translate() {
     }) });
     state.lastResult = result;
     renderTranslationOutput();
-    $("#classificationPreview").innerHTML = `<span class="pulse-dot"></span><span>${resolutionSummary(result.classification, result.domainResolution)}</span>`;
+    // 透明化：除了语体/领域判定，还要说清这次到底吃到了哪一档作用域的规范与译例。
+    const scopeNote = scopeUsageText(result.scopeUsage);
+    $("#classificationPreview").innerHTML = `<span class="pulse-dot"></span><span>${resolutionSummary(result.classification, result.domainResolution)}${scopeNote ? ` · ${escapeHtml(scopeNote)}` : ""}</span>`;
     renderMatches(result.matches);
     renderQa(result);
     setResultStatus(result.issues, result.aiQa);
@@ -1662,7 +1694,10 @@ function renderBatchDetails(segment) {
     `${references.length} 条译例`,
     `${aiQa.iterations || 0} 次修订`,
     issues.length ? `${issues.length} 条建议` : "无问题"
-  ].join(" · ");
+  ];
+  const scopeNote = scopeUsageText(result.scopeUsage);
+  if (scopeNote) summary.push(scopeNote);
+  const summaryText = summary.join(" · ");
   const termsHtml = matches.length ? matches.map((match) => `<div class="batch-detail-item"><strong>${escapeHtml(match.term?.source)} → ${escapeHtml(match.term?.target)}</strong><small>${match.mode === "exact" ? "正式/别名命中" : `疑似命中：${escapeHtml(match.matchPhrase || "")}`} · ${Math.round((match.score || 0) * 100)}%</small></div>`).join("") : '<div class="batch-detail-empty">本段没有命中术语</div>';
   const issuesHtml = issues.length ? issues.map((issue, index) => batchIssueHtml(issue, index, segment.id)).join("") : `<div class="batch-detail-empty">${aiQa.fallbackReason ? "硬规则通过；AIQA 尚待重试" : "硬规则与 AIQA 均未发现问题"}</div>`;
   const referencesHtml = references.length ? references.map((item) => {
@@ -1679,7 +1714,7 @@ function renderBatchDetails(segment) {
   const receiptHtml = result.reviewReceipt?.textZh ? `<section><h5>处理回执</h5><div class="reflection-box review-receipt">${escapeHtml(result.reviewReceipt.textZh)}</div></section>` : "";
   const fallback = aiQa.fallbackReason ? `<div class="batch-qa-fallback"><strong>AIQA 未完成</strong><span>${escapeHtml(aiQa.fallbackReason)}</span><button type="button" class="button ghost small retry-segment-qa" data-id="${escapeHtml(segment.id)}">仅重跑本段 QA</button></div>` : "";
   return `<details class="batch-segment-details${aiQa.fallbackReason ? " has-warning" : ""}">
-    <summary>${escapeHtml(summary)}<span>查看术语、译例与 QA 意见</span></summary>
+    <summary>${escapeHtml(summaryText)}<span>查看术语、译例与 QA 意见</span></summary>
     ${fallback}
     <div class="batch-detail-grid">
       <section><h5>术语命中</h5>${termsHtml}</section>
@@ -3765,14 +3800,24 @@ function renderStyleGuidance() {
   // 渲染完要挂事件：这一块的卡片里有"重跑模型浓缩"这类按记录操作的按钮。
   bindStyleLearningLinks($("#styleLearningRuns"));
   const pools = profiles.evidencePools || [];
-  $("#styleEvidencePools").innerHTML = pools.length ? `<div class="style-pool-heading"><strong>正在积累的证据池</strong><small>每个分类独立累计，达到 8 条才生成风格草稿</small></div>${pools.map((pool) => {
+  // 默认只显示"全部证据"的总进度（用户不需要理解作用域就能判断够不够），
+  // 细分作用域折起来，需要区分时再展开。
+  const poolTotal = pools.reduce((sum, pool) => sum + (Number(pool.evidenceCount) || 0), 0);
+  const poolThreshold = Number(pools[0]?.threshold) || 8;
+  const poolPercent = Math.min(100, Math.round((poolTotal / Math.max(1, poolThreshold)) * 100));
+  const poolDetail = pools.map((pool) => {
     const percent = Math.min(100, Math.round((pool.evidenceCount / Math.max(1, pool.threshold)) * 100));
     const sources = pool.sources || {};
     const sampledNote = Number(pool.sampled) && Number(pool.sampled) < Number(pool.evidenceCount)
       ? `<small>分析取样：${pool.sampled} 条（改写 / 负例按取样统计）</small>`
       : "";
     return `<div class="style-pool"><div><strong>${escapeHtml(contentTypeLabel(pool.contentType))} · ${escapeHtml(pool.domain)}</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 8 条直接证据）</small>${sampledNote}</div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
-  }).join("")}` : '<div class="empty-list compact">还没有完整双语句段进入风格证据池；导入短术语不会产生风格。</div>';
+  }).join("");
+  $("#styleEvidencePools").innerHTML = pools.length
+    ? `<div class="style-pool-heading"><strong>正在积累的证据池</strong><small>同一作用域累计达到 ${poolThreshold} 条才生成专用风格草稿；通用规范对所有语体生效</small></div>
+      <div class="style-pool is-total"><div><strong>全部证据</strong><small>覆盖 ${pools.length} 个作用域 · 翻译时按"同语体同领域 → 通用"自动取用</small></div><div class="style-pool-progress"><i style="width:${poolPercent}%"></i></div><span>${poolTotal} / ${poolThreshold}</span></div>
+      <details class="advanced-scope"><summary>按作用域查看（${pools.length} 个）</summary>${poolDetail}</details>`
+    : '<div class="empty-list compact">还没有完整双语句段进入风格证据池；导入短术语不会产生风格。</div>';
   $("#styleGuidanceList").innerHTML = items.length ? items.map((item) => {
     // 蒸馏结果同样是带小节的文档：小节标题单独显示，规则在小节内编号，
     // 标题既不算规则、也不会因为「；」被拆成两条。
