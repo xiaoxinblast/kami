@@ -17,7 +17,7 @@
         <div class="brand"><img class="brand-logo" src="/assets/kami-sidebar-logo-v2.png" alt="Kami 本地化语言工作台" /></div>
         <nav class="nav" aria-label="主导航">
           <button class="nav-item active" data-view="workbench"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5h9M7.5 3v2c0 4-1.8 7-4.5 9M5 9c1.4 2.1 3.2 3.7 5.5 5M14 20l4-10 4 10M15.5 16h5" /></svg></span><span>翻译</span></button>
-          <button class="nav-item" data-view="autoqa"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z" /><path d="M8.5 12l2.2 2.2 4.8-5" /></svg></span><span>Auto QA</span></button>
+          <button class="nav-item" data-view="autoqa"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z" /><path d="M8.5 12l2.2 2.2 4.8-5" /></svg></span><span>译文质检</span></button>
           <button class="nav-item" data-view="tasks"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 4h6M9 3h6v3H9zM7 5H5.5A1.5 1.5 0 0 0 4 6.5v13A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 18.5 5H17M8 11l1.5 1.5L12 10M14 12h3M8 16l1.5 1.5L12 15M14 17h3" /></svg></span><span>任务中心</span></button>
           <button class="nav-item" data-view="feedback"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4V5zM9 10h6M9 13h4" /></svg></span><span>反馈中心</span><span class="nav-badge" id="feedbackNavBadge" hidden>0</span></button>
           <button class="nav-item" data-view="import"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5h18l-7 8v6l-4 2v-8L3 5zM17.5 2v5M15.5 5l2 2 2-2" /></svg></span><span>双语资产导入</span></button>
@@ -88,7 +88,7 @@
               <label class="context-field" for="neighborContext"><span>可选上下文</span><input id="neighborContext" placeholder="活动背景、角色关系或上一段内容" /></label>
             </article>
             <article class="editor-card target-card">
-              <div class="card-head"><div><span class="card-kicker" id="targetKicker">TARGET · ZH-CN</span><h2 id="targetTitle">简体中文译文</h2></div><div class="target-status"><span class="term-legends" id="targetLegend" hidden><span class="term-legend official" id="officialLegend"><i></i><span id="officialCount">0 处正式术语</span></span><span class="term-legend suggestion" id="suggestionLegend"><i></i><span id="suggestionCount">0 处疑似术语</span></span></span><button class="button ghost small" id="toggleTargetEdit" hidden>编辑译文</button><button class="button ghost small" id="sendToAutoQa" hidden>转 Auto QA</button><button class="button ghost small" id="acceptTranslation" disabled>采纳为正式译法</button><span class="badge neutral" id="translationState">等待翻译</span></div></div>
+              <div class="card-head"><div><span class="card-kicker" id="targetKicker">TARGET · ZH-CN</span><h2 id="targetTitle">简体中文译文</h2></div><div class="target-status"><span class="term-legends" id="targetLegend" hidden><span class="term-legend official" id="officialLegend"><i></i><span id="officialCount">0 处正式术语</span></span><span class="term-legend suggestion" id="suggestionLegend"><i></i><span id="suggestionCount">0 处疑似术语</span></span></span><button class="button ghost small" id="toggleTargetEdit" hidden>编辑译文</button><button class="button ghost small" id="sendToAutoQa" hidden>转译文质检</button><button class="button ghost small" id="acceptTranslation" disabled>采纳为正式译法</button><span class="badge neutral" id="translationState">等待翻译</span></div></div>
               <div class="target-output empty" id="targetOutput">译文将在这里显示</div>
               <div class="translation-candidates" id="translationCandidates" hidden></div>
             </article>
@@ -126,7 +126,7 @@
             <article class="panel batch-queue-panel">
               <div class="panel-head">
                 <div><span class="card-kicker">TRANSLATION QUEUE</span><h2>分段队列</h2></div>
-                <div class="batch-progress-summary"><strong id="batchProgressText">等待解析</strong><span id="batchProgressMeta">0 / 0</span><button class="button ghost small" id="batchToAutoQa" hidden>转 Auto QA</button><button class="button ghost small" id="acceptAllSegments" hidden>全部采纳</button></div>
+                <div class="batch-progress-summary"><strong id="batchProgressText">等待解析</strong><span id="batchProgressMeta">0 / 0</span><button class="button ghost small" id="batchToAutoQa" hidden>转译文质检</button><button class="button ghost small" id="acceptAllSegments" hidden>全部采纳</button></div>
               </div>
               <div class="batch-progress-track"><i id="batchProgressBar"></i></div>
               <div class="batch-segments" id="batchSegments"><div class="empty-list batch-empty">粘贴文本或拖入文件后，会自动识别正文并生成分句队列。</div></div>
@@ -135,24 +135,57 @@
         </section>
 
         <section class="view" id="view-autoqa">
-          <div class="locale-strip" id="autoQaLocales" aria-label="质检语言"></div>
-          <div class="control-row compact-controls">
-            <label><span>内容语体</span><select id="autoQaContentType"><option value="auto">自动识别</option></select></label>
-            <label><span>业务领域</span><select id="autoQaDomain"><option value="auto">自动识别</option><option value="game">游戏</option><option value="general">通用</option><option value="marketing">市场营销</option><option value="community">社区运营</option></select></label>
-            <p class="autoqa-scope-note">逐句切分、语义对齐后分层审查；只检查，不修改译文、不写入学习轨迹。</p>
-          </div>
-          <div class="translation-grid autoqa-grid">
-            <article class="editor-card source-card">
-              <div class="card-head"><div><span class="card-kicker">SOURCE · JA-JP</span><h2>日语原文</h2></div><span class="count" id="autoQaSourceCount">0 字</span></div>
-              <textarea id="autoQaSource" placeholder="粘贴日语原文，例如：新しいプレミアムパスが登場！"></textarea>
-            </article>
-            <article class="editor-card target-card">
-              <div class="card-head"><div><span class="card-kicker" id="autoQaTargetKicker">TARGET · ZH-CN</span><h2 id="autoQaTargetTitle">简体中文译文</h2></div><span class="badge neutral" id="autoQaState">等待质检</span></div>
-              <textarea id="autoQaTarget" placeholder="粘贴简体中文译文，Ctrl + Enter 运行质检"></textarea>
-            </article>
-          </div>
+          <article class="panel qa-source-panel">
+            <div class="panel-head"><div><span class="card-kicker">TRANSLATION QA</span><h2>译文质检</h2><p class="panel-caption">检查已有译文的硬问题（术语、占位符、数字、标点、未翻译）与语体、忠实度、nuance；只检查，不改译文、不写学习轨迹。</p></div></div>
+            <div class="qa-source-bar">
+              <div class="qa-source-tabs" id="qaSourceTabs" role="tablist" aria-label="质检来源">
+                <button class="qa-source-tab active" type="button" data-qa-source="batch">已有批次</button>
+                <button class="qa-source-tab" type="button" data-qa-source="file">上传双语文件</button>
+                <button class="qa-source-tab" type="button" data-qa-source="paste">粘贴文本</button>
+              </div>
+              <label class="qa-scope"><span>内容语体</span><select id="autoQaContentType"><option value="auto">自动识别</option></select></label>
+              <label class="qa-scope"><span>业务领域</span><select id="autoQaDomain"><option value="auto">自动识别</option><option value="game">游戏</option><option value="general">通用</option><option value="marketing">市场营销</option><option value="community">社区运营</option></select></label>
+            </div>
+
+            <div class="qa-source-body" data-qa-panel="batch">
+              <label class="qa-field"><span>选择翻译批次</span><select id="qaBatchSelect"><option value="">正在读取批次……</option></select></label>
+              <button class="button primary" id="qaBatchLoad" type="button">查看质检结果</button>
+              <p class="qa-hint">批次翻译时已经逐段跑过检查（硬规则 + 语法 + 三层模型），这里直接回放，不重复花钱。</p>
+            </div>
+
+            <div class="qa-source-body" data-qa-panel="file" hidden>
+              <label class="drop-zone compact"><input id="qaFile" type="file" accept=".mqxliff,.xliff,.xlsx,.csv" hidden /><strong id="qaFilePrompt">上传双语文件</strong><small>mqxliff / xliff / xlsx / csv，单文件 ≤ 20MB</small></label>
+              <label class="log-autorefresh"><input type="checkbox" id="qaDeepCheck" /><span class="log-switch" aria-hidden="true"></span><span>同时跑 AI 深度检查（逐条调模型，慢且花额度）</span></label>
+              <button class="button primary" id="qaFileRun" type="button" disabled>开始质检</button>
+              <p class="qa-hint">表格一行一条、XLIFF 一个 trans-unit 一条，本身就是逐句的，所以直接按原生句段检查，不再切句与对齐。</p>
+            </div>
+
+            <div class="qa-source-body" data-qa-panel="paste" hidden>
+              <div class="translation-grid autoqa-grid">
+                <article class="editor-card source-card">
+                  <div class="card-head"><div><span class="card-kicker">SOURCE · JA-JP</span><h2>日语原文</h2></div><span class="count" id="autoQaSourceCount">0 字</span></div>
+                  <textarea id="autoQaSource" placeholder="粘贴日语原文，例如：新しいプレミアムパスが登場！"></textarea>
+                </article>
+                <article class="editor-card target-card">
+                  <div class="card-head"><div><span class="card-kicker" id="autoQaTargetKicker">TARGET · ZH-CN</span><h2 id="autoQaTargetTitle">简体中文译文</h2></div><span class="badge neutral" id="autoQaState">等待质检</span></div>
+                  <textarea id="autoQaTarget" placeholder="粘贴简体中文译文，Ctrl + Enter 运行质检"></textarea>
+                </article>
+              </div>
+              <p class="qa-hint">只有粘贴纯文本时没有句段边界，才需要"逐句切分 + 语义向量对齐"；对齐不上的句子会单独标出来，不计入分数。</p>
+            </div>
+          </article>
+
           <article class="panel autoqa-report" id="autoQaReport" hidden>
+            <p class="qa-alignment-note" id="qaAlignmentNote"></p>
             <div class="autoqa-score-row" id="autoQaScores"></div>
+            <div class="qa-result-toolbar">
+              <div class="qa-filters" id="qaFilters" role="group" aria-label="按状态筛选段落"></div>
+              <div class="qa-result-actions">
+                <button class="button ghost small" id="qaJumpNext" type="button">跳到下一条待处理</button>
+                <button class="button ghost small" id="qaDownload" type="button">下载报告</button>
+              </div>
+            </div>
+            <div class="qa-segments" id="qaSegments"></div>
             <div id="autoQaIssues"></div>
           </article>
         </section>
@@ -161,7 +194,7 @@
           <article class="panel task-center-panel">
             <div class="panel-head"><div><span class="card-kicker">PERSISTENT WORK QUEUE</span><h2>历史翻译任务</h2></div><div class="asset-count" id="taskCount">0 个任务</div></div>
             <div class="task-toolbar">
-              <label><span>任务类型</span><select id="taskType"><option value="">全部类型</option><option value="batch">翻译批次</option><option value="autoqa">Auto QA 报告</option><option value="share">分享验证</option><option value="background">后台任务</option></select></label>
+              <label><span>任务类型</span><select id="taskType"><option value="">全部类型</option><option value="batch">翻译批次</option><option value="autoqa">译文质检报告</option><option value="share">分享验证</option><option value="background">后台任务</option></select></label>
               <label><span>语言对</span><select id="taskLocale"><option value="zh-CN">日语→简体中文</option></select></label>
               <label><span>任务状态</span><select id="taskStatus"><option value="">全部状态</option><option value="in_progress">进行中</option><option value="review">QA 待处理</option><option value="needs_attention">存在失败</option><option value="completed">已完成</option></select></label>
               <label class="task-search"><span>搜索任务</span><input id="taskSearch" placeholder="文件名或任务名称" /></label>

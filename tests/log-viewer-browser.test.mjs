@@ -91,7 +91,13 @@ test("日志页面：等级筛选、搜索、记录等级、清空，并记录�
     assert.equal(await logNav.textContent().then((text) => text.includes("日志")), true);
 
     await logNav.click();
-    await page.waitForSelector("#logList .log-row");
+    try {
+      await page.waitForSelector("#logList .log-row", { timeout: 8_000 });
+    } catch (error) {
+      const toastText = await page.locator("#toast").textContent().catch(() => "");
+      const countText = await page.locator("#logCount").textContent().catch(() => "");
+      throw new Error(`日志行没渲染：${error.message}；页面异常：${errors.join(" | ") || "无"}；toast：${toastText}；计数：${countText}`);
+    }
     assert.equal(await page.locator("#logCount").textContent(), "4 条");
     assert.equal(await page.locator("#logList .log-row.error").count(), 2, "错误行要标红");
     assert.match(await page.locator("#logList .log-row").first().textContent(), /Directus 写入失败 431/u);

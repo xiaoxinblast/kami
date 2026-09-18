@@ -3684,6 +3684,142 @@ async function apiHandler(req, res, url) {
     const aiQa = await runAiQaLoop({ contextPack, initialTranslation: body.translation || "", matches, locale, contentType, domain, batchId: body.batchId || "manual-recheck", projectSettings, projectId: body.projectId || "" });
     return json(res, 200, { matches, translation: aiQa.translation, issues: aiQa.issues, qaScore: aiQa.score, aiQa, styleProfile: contextPack.styleProfile });
   }
+/**
+ * 质检一组已经按句段对齐好的双语条目（文件原生句段，或批次里已存的段落）。
+ *
+ * 规则层永远跑（免费、秒级）；只有 deepCheck 打开时才追加语法专项与三层模型检查，
+ * 因为那是逐条调模型，几千条会很贵。
+ */
+async function evaluateQaPairList({ pairs, assets, locale, contentType, domain, projectSettings, styleProfile, references, machineDrafts, qaCases, evidence, deepCheck = false }) {
+  const tasks = pairs.map((pair, index) => async () => {
+    const source = String(pair.source || "");
+    const translation = String(pair.target || pair.translation || "");
+    const matches = matchTerms(source, assets, { contentType, domain, ...deliveryContext({}, source) });
+    let issues = runBasicQa({ source, translation, matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings });
+    if (deepCheck) {
+      const [grammarResult, aiResult] = await Promise.allSettled([
+        evaluateGrammarWithModel({ translation, locale, contentType }),
+        evaluateAutoQaWithModel({ source, translation, locale, contentType, domain, styleProfile, references, machineDrafts, qaCases, evidence })
+      ]);
+      const extra = [];
+      if (grammarResult.status === "fulfilled") extra.push(...grammarResult.value);
+      if (aiResult.status === "fulfilled") extra.push(...aiResult.value);
+      issues = dedupeIssues([...issues, ...extra]);
+    }
+    return {
+      index: index + 1,
+      source,
+      translation,
+      entryId: pair.entryId || "",
+      entryKey: pair.entryKey || "",
+      sourceRow: pair.sourceRow || null,
+      sheet: pair.sheet || "",
+      issues,
+      qaScore: calculateAutoQaScores(issues, { segmentCount: 1 }).overall
+    };
+  });
+  const settled = await runTaskPool(tasks, (task) => task(), { concurrency: deepCheck ? 2 : 8 });
+  const failed = settled.filter((result) => result.status === "rejected").map((result) => String(result.reason?.message || result.reason));
+  const evaluated = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  const allIssues = evaluated.flatMap((segment) => segment.issues.map((issue) => ({ ...issue, segmentIndex: segment.index })));
+  return {
+    segments: evaluated,
+    scores: calculateAutoQaScores(allIssues, { segmentCount: evaluated.length }),
+    summary: summarizeIssues(allIssues),
+    issues: allIssues,
+    failureReasons: failed
+  };
+}
+
+/** 质检：上传的双语文件按它自己的句段检查（表格一行一条、XLIFF 一个 trans-unit 一条），不切句不对齐。 */
+async function evaluateQaFile(body = {}) {
+  const locale = assertActiveLocale(body.locale || "zh-CN");
+  const filename = String(body.filename || "").trim();
+  const base64 = String(body.base64 || "").replace(/^data:[^;]+;base64,/u, "");
+  if (!filename || !base64) throw Object.assign(new Error("请选择要质检的双语文件"), { statusCode: 400 });
+  if (!/\.(xlsx|csv|xliff|mqxliff)$/iu.test(filename)) throw Object.assign(new Error("质检只支持 xlsx、csv、xliff、mqxliff"), { statusCode: 400 });
+  const buffer = Buffer.from(base64, "base64");
+  if (!buffer.length) throw Object.assign(new Error("文件内容为空"), { statusCode: 400 });
+  if (buffer.length > IMPORT_FILE_BYTES) throw Object.assign(new Error(`文件超过 ${Math.round(IMPORT_FILE_BYTES / (1024 * 1024))}MB 上限`), { statusCode: 400 });
+  const pairs = /\.(xlsx|csv)$/iu.test(filename)
+    ? (await extractTermPairs({ filename, base64, locale })).candidates.map((candidate) => ({
+      source: candidate.source, target: candidate.target, entryId: candidate.entryId || "",
+      sourceRow: candidate.rowNumber || null, sheet: candidate.sheet || ""
+    }))
+    : extractXliffPairs(buffer, filename);
+  if (!pairs.length) throw Object.assign(new Error("文件里没有可质检的双语条目（原文与译文都要非空）"), { statusCode: 400 });
+  const projectId = String(body.projectId || "");
+  const project = projectId ? await getProject(projectId) : null;
+  const projectSettings = project?.settings || null;
+  const assets = (await getProjectAssets(locale, projectId)).assets;
+  const contentType = body.contentType && body.contentType !== "auto" ? body.contentType : "general";
+  const domain = concreteDomain(body.domain, { contentType });
+  const styleProfile = await getStyleProfile(locale, contentType, domain, { projectId });
+  const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { projectId, contentType, domain, limit: 12 })).slice(0, 6);
+  const evaluated = await evaluateQaPairList({
+    pairs, assets, locale, contentType, domain, projectSettings, styleProfile,
+    references: [], machineDrafts: [], qaCases: [], evidence,
+    deepCheck: body.deepCheck === true
+  });
+  logInfo("文件质检完成", { filename, segments: evaluated.segments.length, deepCheck: body.deepCheck === true, issues: evaluated.issues.length });
+  return {
+    sourceKind: "file",
+    filename,
+    segmentCount: evaluated.segments.length,
+    segments: evaluated.segments,
+    scores: evaluated.scores,
+    summary: evaluated.summary,
+    alignmentNote: `按文件原生句段检查（${evaluated.segments.length} 条），未做切句与对齐。`,
+    deepCheck: body.deepCheck === true,
+    fallbackReason: evaluated.failureReasons.join("；")
+  };
+}
+
+/** 质检：直接回放某条批次里翻译时已经算好的逐段结果（不重复调模型）。 */
+async function evaluateQaBatch(batchId, projectId = "") {
+  const run = await getBatchRun(batchId);
+  if (!run) throw Object.assign(new Error("未找到这条翻译批次"), { statusCode: 404 });
+  if (projectId && run.projectId && run.projectId !== String(projectId)) throw Object.assign(new Error("这条批次不属于当前项目"), { statusCode: 404 });
+  const selected = (run.segments || []).filter((segment) => segment.selected !== false);
+  const segments = selected.map((segment, index) => {
+    const result = segment.result || {};
+    return {
+      index: index + 1,
+      source: segment.source || "",
+      translation: segment.translation || "",
+      entryId: segment.locator?.unitId || segment.locator?.entryId || "",
+      entryKey: segment.entryKey || segment.locator?.entryKey || "",
+      sourceRow: segment.locator?.row || null,
+      sheet: segment.locator?.sheet || "",
+      status: segment.status || "pending",
+      accepted: segment.accepted === true,
+      qaScore: Number.isFinite(result.qaScore) ? result.qaScore : null,
+      aiQaStatus: result.aiQa?.status || "",
+      aiQaFallbackReason: result.aiQa?.fallbackReason || "",
+      issues: Array.isArray(result.issues) ? result.issues : []
+    };
+  });
+  const allIssues = segments.flatMap((segment) => segment.issues.map((issue) => ({ ...issue, segmentIndex: segment.index })));
+  return {
+    sourceKind: "batch",
+    batchId: run.batchId,
+    filename: run.filename,
+    runState: run.runState || "ready",
+    segmentCount: segments.length,
+    segments,
+    scores: calculateAutoQaScores(allIssues, { segmentCount: Math.max(1, segments.length) }),
+    summary: summarizeIssues(allIssues),
+    alignmentNote: `直接回放这条批次翻译时的逐段检查结果（${segments.length} 段），没有重新调用模型。`
+  };
+}
+
+  if (req.method === "POST" && url.pathname === "/api/qa/file") {
+    return json(res, 200, await evaluateQaFile(await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES })));
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/qa/batch/")) {
+    const batchId = decodeURIComponent(url.pathname.slice("/api/qa/batch/".length));
+    return json(res, 200, await evaluateQaBatch(batchId, url.searchParams.get("projectId") || ""));
+  }
   if (req.method === "POST" && url.pathname === "/api/auto-qa") {
     const body = await readJsonBody(req);
     const locale = assertActiveLocale(body.locale);

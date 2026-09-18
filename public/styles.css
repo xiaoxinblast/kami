@@ -348,6 +348,50 @@ select { min-width: 150px; }
 .review-import-details em { flex: 0 0 auto; color: #8a7b52; font-style: normal; }
 .export-dialog-card { width: min(720px, 94vw); }
 .batch-segment.is-highlighted { box-shadow: 0 0 0 2px var(--lime-deep), 0 6px 18px rgba(10,35,27,.12); }
+/* 译文质检：来源切换 + 统一段列表（筛选 / 跳到下一条） */
+.qa-source-panel { margin-bottom: 16px; }
+.qa-source-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; row-gap: 8px; margin: 12px 0; }
+.qa-source-tabs { display: flex; gap: 6px; }
+.qa-source-tab { padding: 7px 13px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: #4b5a52; font-size: 12px; font-weight: 700; cursor: pointer; }
+.qa-source-tab:hover { border-color: var(--lime-deep); }
+.qa-source-tab.active { border-color: var(--forest); background: var(--forest); color: #fff; }
+.qa-scope { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.qa-scope select { padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font-size: 12px; }
+.qa-source-body { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
+.qa-source-body .qa-hint { flex: 1 1 100%; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.qa-field { display: flex; align-items: center; gap: 8px; color: #4b5a52; font-size: 12px; }
+.qa-field select { min-width: 320px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.qa-alignment-note { margin: 0 0 10px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.qa-result-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 14px 0 10px; }
+.qa-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.qa-filter-chip { padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: #4b5a52; font-size: 12px; font-weight: 700; cursor: pointer; }
+.qa-filter-chip:hover { border-color: var(--lime-deep); }
+.qa-filter-chip.active { border-color: var(--forest); background: var(--forest); color: #fff; }
+.qa-result-actions { display: flex; gap: 6px; margin-left: auto; }
+.qa-segments { display: grid; gap: 8px; max-height: 64vh; overflow-y: auto; padding-right: 4px; }
+.qa-segment { padding: 11px 13px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfa; scroll-margin: 90px; }
+.qa-segment.attention { border-color: #e7c9c5; background: #fdf6f5; }
+.qa-segment.suggest { border-color: #eddfc0; background: #fffbf2; }
+.qa-segment.is-highlighted { box-shadow: 0 0 0 2px var(--lime-deep); }
+.qa-segment-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.qa-segment-index { min-width: 26px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.qa-segment-state { padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 800; }
+.qa-segment-state.attention { color: #8a352f; background: #fbe5e2; }
+.qa-segment-state.suggest { color: #805716; background: #fff0d5; }
+.qa-segment-state.pass { color: #285843; background: #e1f1e8; }
+.qa-segment-state.pending { color: #68716c; background: #eceeeb; }
+.qa-segment-score { color: #4b5a52; font-size: 11px; font-weight: 700; }
+.qa-segment-meta { color: var(--muted); font-size: 11px; }
+.qa-segment-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.qa-segment-pair p { margin: 0; color: #34483c; font-size: 12px; line-height: 1.7; word-break: break-word; white-space: pre-wrap; }
+.qa-segment-pair p > span { display: block; margin-bottom: 3px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+.qa-segment-issues { display: grid; gap: 6px; margin-top: 9px; }
+.qa-issue { display: grid; gap: 3px; padding: 8px 10px; border: 1px solid #eceee9; border-radius: 9px; background: #fff; }
+.qa-issue.error, .qa-issue.critical { border-color: #e7c9c5; }
+.qa-issue strong { color: #6d5a2a; font-size: 11px; }
+.qa-issue.error strong, .qa-issue.critical strong { color: #8a352f; }
+.qa-issue span { color: #3d4c43; font-size: 12px; line-height: 1.65; }
+.qa-issue em { color: #4b6152; font-size: 11px; font-style: normal; }
 /*
  * 侧边栏底部的日志入口：紧贴在状态块上面那条分隔线之上。
  * 之前它和 .sidebar-status 都写了 margin-top:auto，flex 会把剩余空白平分，

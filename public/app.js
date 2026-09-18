@@ -20,6 +20,12 @@ const state = {
   styleLocale: "zh-CN",
   learningLocale: "zh-CN",
   autoQaLocale: "zh-CN",
+  qaSource: "batch",
+  qaSegments: [],
+  qaFilter: "",
+  qaCursor: -1,
+  qaResult: null,
+  qaFile: null,
   memoryLocale: "zh-CN",
   learningData: null,
   learningLoading: false,
@@ -376,7 +382,7 @@ function pageCopy(view) {
   if (view === "learning") return ["LEARNING CENTER", "学习中心", "将翻译轨迹沉淀为可评测、可批准、可回滚的翻译技能。"];
   return {
     workbench: ["TRANSLATION", "翻译", "使用日语→简体中文专属术语库，并自动识别语体。"],
-    autoqa: ["AUTO QA", "Auto QA", "逐句切分对齐后，按基本检查、语义忠实性（着重）与 nuance 一致性三层独立审查。"],
+    autoqa: ["TRANSLATION QA", "译文质检", "检查已有译文：按文件原生句段（或批次回放）跑硬规则与三层审查；只检查，不改译文。"],
     feedback: ["FEEDBACK CENTER", "反馈中心", "同事在分享验证页提出的要求：逐条批准入风格或忽略。"],
     tasks: ["TASK CENTER", "任务中心", "查看、恢复、审校并导出日语→简体中文翻译任务。"],
     import: ["BILINGUAL ASSET INGESTION", "双语资产导入", "先预检文件类型与资产去向，确认后再写入当前项目。"],
@@ -471,7 +477,7 @@ function refreshActions() {
   } else if (state.view === "styles") {
     primary.textContent = "刷新风格";
   } else if (state.view === "autoqa") {
-    primary.textContent = "运行 Auto QA";
+    primary.textContent = "开始质检";
     primary.disabled = !$("#autoQaSource")?.value.trim() || !$("#autoQaTarget")?.value.trim();
     if ($("#autoQaSource")?.value.trim() || $("#autoQaTarget")?.value.trim()) {
       secondary.hidden = false;
@@ -521,7 +527,7 @@ function switchView(view) {
   if (view === "styles") loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message));
   if (view === "workbench") setTranslationMode(state.translationMode);
   if (view === "learning") loadLearning(state.learningLocale);
-  if (view === "autoqa") updateAutoQaLocale(state.autoQaLocale);
+  if (view === "autoqa") { updateAutoQaLocale(state.autoQaLocale); setQaSource(state.qaSource || "batch"); }
   if (view === "feedback") loadFeedbackPage().catch((error) => toast(error.message));
   if (view === "logs") { loadLogs().catch((error) => toast(error.message)); startLogAutoRefresh(); } else stopLogAutoRefresh();
   refreshActions();
@@ -613,7 +619,8 @@ const AUTO_QA_DIMENSIONS = [
 
 function updateAutoQaLocale(locale) {
   state.autoQaLocale = locale;
-  renderLocaleStrip($("#autoQaLocales"), locale, updateAutoQaLocale);
+  const strip = $("#autoQaLocales");
+  if (strip) renderLocaleStrip(strip, locale, updateAutoQaLocale);
   const details = state.bootstrap.locales[locale];
   $("#autoQaTargetKicker").textContent = `TARGET · ${locale.toUpperCase()}`;
   $("#autoQaTargetTitle").textContent = `${details.label}译文`;
@@ -652,7 +659,10 @@ async function handOffToAutoQa({ source, translation, locale, contentType, domai
 
   if (locale && state.bootstrap?.locales?.[locale]) {
     state.autoQaLocale = locale;
-    renderLocaleStrip($("#autoQaLocales"), state.autoQaLocale, updateAutoQaLocale);
+    // 质检页现在按"来源"分区，不再有语言 chip（只有 zh-CN）；这里必须容错，
+    // 否则 null 会抛错被外层 catch 吞掉，后面的 bindEvents() 全都不会执行。
+    const autoQaStrip = $("#autoQaLocales");
+    if (autoQaStrip) renderLocaleStrip(autoQaStrip, state.autoQaLocale, updateAutoQaLocale);
     $("#autoQaTargetKicker").textContent = `TARGET · ${locale.toUpperCase()}`;
     $("#autoQaTargetTitle").textContent = `${state.bootstrap.locales[locale]?.label || locale}译文`;
   }
@@ -737,6 +747,181 @@ function openParameterSettings() {
   getParameterSettingsPanel().open().catch((error) => toast(error.message));
 }
 
+const QA_STATE_LABELS = { attention: "需要复核", suggest: "建议确认", pass: "通过", pending: "未完成" };
+
+/** 段落的质检状态：分数 <90、AIQA 未完成、或有阻断级问题 → 需要复核；有意见 → 建议确认。 */
+function qaSegmentState(segment) {
+  const issues = segment.issues || [];
+  if (segment.aiQaFallbackReason) return "attention";
+  if (Number.isFinite(segment.qaScore) && segment.qaScore < 90) return "attention";
+  if (issues.some((issue) => ["error", "critical"].includes(issue.severity))) return "attention";
+  if (!segment.translation) return "pending";
+  if (issues.length) return "suggest";
+  return "pass";
+}
+
+function qaSeverityLabel(issue) {
+  if (issue.severity === "critical") return "阻断";
+  if (issue.severity === "error") return "阻断";
+  if (issue.severity === "major") return "主要";
+  return "轻微";
+}
+
+/** 统一段列表：筛选 chips + 跳到下一条待处理，批次/文件两条来源共用。 */
+function renderQaSegments() {
+  const segments = state.qaSegments || [];
+  const container = $("#qaSegments");
+  if (!container) return;
+  const filters = $("#qaFilters");
+  if (!segments.length) {
+    container.innerHTML = "";
+    if (filters) filters.innerHTML = "";
+    return;
+  }
+  const counts = { "": segments.length, attention: 0, suggest: 0, pass: 0, pending: 0 };
+  segments.forEach((segment) => { counts[qaSegmentState(segment)] += 1; });
+  if (filters) {
+    filters.innerHTML = [["", "全部"], ["attention", "需要复核"], ["suggest", "建议确认"], ["pass", "通过"], ["pending", "未完成"]]
+      .map(([value, label]) => `<button class="qa-filter-chip${(state.qaFilter || "") === value ? " active" : ""}" type="button" data-qa-filter="${value}">${label} ${counts[value]}</button>`)
+      .join("");
+  }
+  const filter = state.qaFilter || "";
+  const visible = filter ? segments.filter((segment) => qaSegmentState(segment) === filter) : segments;
+  container.innerHTML = visible.length ? visible.map((segment) => {
+    const status = qaSegmentState(segment);
+    const issues = segment.issues || [];
+    const meta = [segment.entryKey || segment.entryId, segment.sourceRow ? `第 ${segment.sourceRow} 行` : "", segment.sheet].filter(Boolean).join(" · ");
+    return `<article class="qa-segment ${status}" data-qa-index="${segment.index}">
+      <div class="qa-segment-head"><span class="qa-segment-index">${segment.index}</span><span class="qa-segment-state ${status}">${QA_STATE_LABELS[status]}</span>${Number.isFinite(segment.qaScore) ? `<span class="qa-segment-score">${Math.round(segment.qaScore)} 分</span>` : ""}${meta ? `<span class="qa-segment-meta">${escapeHtml(meta)}</span>` : ""}</div>
+      <div class="qa-segment-pair"><p><span>原文</span>${escapeHtml(segment.source || "")}</p><p><span>译文</span>${escapeHtml(segment.translation || "（无译文）")}</p></div>
+      ${issues.length ? `<div class="qa-segment-issues">${issues.map((issue) => `<div class="qa-issue ${escapeHtml(issue.severity || "warning")}"><strong>${escapeHtml(qaSeverityLabel(issue))}${issue.category ? ` · ${escapeHtml(issue.category)}` : ""}</strong><span>${escapeHtml(issue.message || "")}</span>${issue.suggestion ? `<em>建议：${escapeHtml(issue.suggestion)}</em>` : ""}</div>`).join("")}</div>` : ""}
+    </article>`;
+  }).join("") : '<div class="empty-list">当前筛选下没有段落</div>';
+}
+
+/** 跳到下一条待处理（需要复核/建议确认）：在当前筛选结果里循环。 */
+function jumpToNextQaSegment() {
+  const filter = state.qaFilter || "";
+  const list = filter ? (state.qaSegments || []).filter((segment) => qaSegmentState(segment) === filter) : (state.qaSegments || []).filter((segment) => ["attention", "suggest"].includes(qaSegmentState(segment)));
+  if (!list.length) return toast("当前筛选下没有待处理段落");
+  state.qaCursor = (Number(state.qaCursor) + 1) % list.length;
+  const target = list[state.qaCursor];
+  const row = document.querySelector(`.qa-segment[data-qa-index="${CSS.escape(String(target.index))}"]`);
+  if (!row) return;
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  row.classList.add("is-highlighted");
+  setTimeout(() => row.classList.remove("is-highlighted"), 2_000);
+}
+
+/** 把批次/文件质检结果渲染成统一视图（同时把旧粘贴视图收起来）。 */
+function applyQaResult(payload) {
+  state.qaResult = payload;
+  const segments = (payload.segments || []).map((segment, index) => ({
+    index: Number(segment.index) || index + 1,
+    source: segment.source || "",
+    translation: segment.translation || "",
+    qaScore: Number.isFinite(Number(segment.qaScore)) ? Number(segment.qaScore) : null,
+    issues: Array.isArray(segment.issues) ? segment.issues : [],
+    aiQaFallbackReason: segment.aiQaFallbackReason || segment.fallbackReason || "",
+    entryId: segment.entryId || "", entryKey: segment.entryKey || "",
+    sourceRow: segment.sourceRow || null, sheet: segment.sheet || ""
+  }));
+  state.qaSegments = segments;
+  state.qaFilter = "";
+  state.qaCursor = -1;
+  $("#autoQaReport").hidden = false;
+  $("#qaAlignmentNote").textContent = payload.alignmentNote || "";
+  $("#qaSegments").hidden = false;
+  $("#qaFilters").hidden = false;
+  const legacy = $("#autoQaIssues");
+  if (legacy) { legacy.hidden = true; legacy.innerHTML = ""; }
+  const scores = payload.scores || { overall: 0, dimensions: {} };
+  const summary = payload.summary || {};
+  $("#autoQaScores").innerHTML = [["overall", "综合分", "基本 20% · 忠实性 50% · Nuance 30%"], ...AUTO_QA_DIMENSIONS]
+    .map(([key, label, caption]) => {
+      const value = key === "overall" ? scores.overall : scores.dimensions?.[key];
+      const stats = key === "overall" ? null : summary[key];
+      const detail = key === "overall" ? caption : stats?.total ? `${stats.total} 条问题 · 阻断 ${stats.error || 0} · 主要 ${stats.major || 0} · 轻微 ${stats.minor || 0}` : "未发现问题";
+      return `<div class="autoqa-score-card ${autoQaScoreTone(value)}"><strong>${Number.isFinite(Number(value)) ? Math.round(Number(value)) : "—"}</strong><span>${escapeHtml(label)}</span><small>${escapeHtml(detail || "")}</small></div>`;
+    }).join("");
+  renderQaSegments();
+}
+
+/** 质检来源切换：批次 / 文件 / 粘贴。 */
+function setQaSource(source) {
+  state.qaSource = source;
+  $$("#qaSourceTabs .qa-source-tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.qaSource === source));
+  $$("[data-qa-panel]").forEach((panel) => { panel.hidden = panel.dataset.qaPanel !== source; });
+  if (source === "batch") loadQaBatches().catch((error) => toast(error.message));
+}
+
+async function loadQaBatches() {
+  const select = $("#qaBatchSelect");
+  if (!select) return;
+  const query = new URLSearchParams({ type: "batch", limit: "100" });
+  if (state.activeProjectId) query.set("projectId", state.activeProjectId);
+  const tasks = await api(`/api/tasks?${query}`);
+  const batches = (Array.isArray(tasks) ? tasks : [])
+    .filter((task) => task.type === "batch" && task.batchId && Number(task.completedSegments) > 0)
+    .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+  select.innerHTML = batches.length
+    ? batches.map((task) => `<option value="${escapeHtml(task.batchId)}">${escapeHtml(task.filename)} · ${task.completedSegments}/${task.totalSegments}${task.qaPending ? ` · ${task.qaPending} 条待处理` : ""}</option>`).join("")
+    : '<option value="">当前项目还没有可质检的批次</option>';
+  select.disabled = !batches.length;
+  $("#qaBatchLoad").disabled = !batches.length;
+}
+
+async function runQaFromBatch() {
+  const batchId = $("#qaBatchSelect")?.value;
+  if (!batchId) return toast("先选择一个翻译批次");
+  setBusy(true, "正在回放批次质检结果…");
+  try {
+    applyQaResult(await api(`/api/qa/batch/${encodeURIComponent(batchId)}?projectId=${encodeURIComponent(state.activeProjectId || "")}`));
+    toast("已回放这条批次的质检结果（未重新调用模型）");
+  } catch (error) {
+    toast(error.message);
+  } finally { setBusy(false); }
+}
+
+async function runQaFromFile() {
+  const file = state.qaFile;
+  if (!file) return toast("先选择要质检的双语文件");
+  setBusy(true, $("#qaDeepCheck").checked ? "正在按文件句段质检（含 AI 深度检查）…" : "正在按文件句段质检…");
+  try {
+    applyQaResult(await api("/api/qa/file", { method: "POST", body: JSON.stringify({
+      ...projectPayload(),
+      locale: state.autoQaLocale,
+      filename: file.name,
+      base64: await fileToBase64(file),
+      contentType: $("#autoQaContentType").value,
+      domain: $("#autoQaDomain").value,
+      deepCheck: $("#qaDeepCheck").checked
+    }) }));
+    toast("质检完成（按文件原生句段，未做切句对齐）");
+  } catch (error) {
+    toast(error.message);
+  } finally { setBusy(false); }
+}
+
+/** 下载质检报告：CSV，一行一条问题，方便丢给同事或存档。 */
+function downloadQaReport() {
+  const segments = state.qaSegments || [];
+  if (!segments.length) return toast("还没有质检结果");
+  const rows = [["段号", "状态", "分数", "原文", "译文", "级别", "分类", "问题", "建议"]];
+  segments.forEach((segment) => {
+    const status = QA_STATE_LABELS[qaSegmentState(segment)];
+    const issues = segment.issues || [];
+    if (!issues.length) rows.push([segment.index, status, segment.qaScore ?? "", segment.source, segment.translation, "", "", "", ""]);
+    issues.forEach((issue) => rows.push([
+      segment.index, status, segment.qaScore ?? "", segment.source, segment.translation,
+      qaSeverityLabel(issue), issue.category || "", issue.message || "", issue.suggestion || ""
+    ]));
+  });
+  const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  const payload = { filename: `质检报告-${state.qaResult?.filename || "结果"}.csv`, mimeType: "text/csv;charset=utf-8", base64: btoa(unescape(encodeURIComponent(`\uFEFF${csv}`))) };
+  saveExportedFile(payload).then((saved) => toast(saved.message)).catch((error) => toast(error.message));
+}
+
 async function runAutoQa() {
   const source = $("#autoQaSource").value.trim();
   const translation = $("#autoQaTarget").value.trim();
@@ -759,6 +944,11 @@ async function runAutoQa() {
       })
     });
     renderAutoQaReport(payload);
+    state.qaSegments = [];
+    $("#qaSegments").hidden = true;
+    $("#qaFilters").hidden = true;
+    const legacyIssues = $("#autoQaIssues");
+    if (legacyIssues) legacyIssues.hidden = false;
     toast(`质检完成：${payload.scores.overall} 分 · 已保存到任务中心`);
   } catch (error) {
     $("#autoQaState").textContent = "质检失败";
@@ -2265,7 +2455,8 @@ async function openQaTask(id) {
     $("#autoQaTarget").value = task.translationText || "";
     $("#autoQaSourceCount").textContent = `${[...(task.sourceText || "")].length} 字`;
     state.autoQaLocale = task.locale;
-    renderLocaleStrip($("#autoQaLocales"), state.autoQaLocale, updateAutoQaLocale);
+    const strip = $("#autoQaLocales");
+    if (strip) renderLocaleStrip(strip, state.autoQaLocale, updateAutoQaLocale);
     $("#autoQaTargetKicker").textContent = `TARGET · ${task.locale.toUpperCase()}`;
     $("#autoQaTargetTitle").textContent = `${state.bootstrap.locales[task.locale]?.label || task.locale}译文`;
     switchView("autoqa");
@@ -5086,6 +5277,26 @@ function bindEvents() {
   });
   $("#cancelBatchAction")?.addEventListener("click", () => cancelBatchRun().catch((error) => toast(error.message)));
   $("#reviewImportFile").addEventListener("change", (event) => submitReviewImport(event.target.files?.[0]));
+  $("#qaSourceTabs").addEventListener("click", (event) => {
+    const tab = event.target.closest(".qa-source-tab");
+    if (tab) setQaSource(tab.dataset.qaSource);
+  });
+  $("#qaBatchLoad").addEventListener("click", () => runQaFromBatch());
+  $("#qaFile").addEventListener("change", (event) => {
+    state.qaFile = event.target.files?.[0] || null;
+    $("#qaFilePrompt").textContent = state.qaFile ? `已选择：${state.qaFile.name}` : "上传双语文件";
+    $("#qaFileRun").disabled = !state.qaFile;
+  });
+  $("#qaFileRun").addEventListener("click", () => runQaFromFile());
+  $("#qaFilters").addEventListener("click", (event) => {
+    const chip = event.target.closest(".qa-filter-chip");
+    if (!chip) return;
+    state.qaFilter = chip.dataset.qaFilter || "";
+    state.qaCursor = -1;
+    renderQaSegments();
+  });
+  $("#qaJumpNext").addEventListener("click", () => jumpToNextQaSegment());
+  $("#qaDownload").addEventListener("click", () => downloadQaReport());
   $("#sourceText").addEventListener("input", previewClassificationAndMatches);
   $("#sourceText").addEventListener("paste", (event) => {
     const text = event.clipboardData?.getData("text/plain") || "";
@@ -5321,7 +5532,9 @@ async function initialize() {
     renderLocaleStrip($("#memoryLocales"), state.memoryLocale, updateMemoryLocale);
     renderLocaleStrip($("#styleLocales"), state.styleLocale, updateStyleLocale);
     renderLocaleStrip($("#learningLocales"), state.learningLocale, loadLearning);
-    renderLocaleStrip($("#autoQaLocales"), state.autoQaLocale, updateAutoQaLocale);
+    // 质检页改成"来源"分区后没有语言 chip（只有 zh-CN）：必须容错，
+    // 否则这里抛错会被外层 catch 吞掉，后面的 bindEvents() 全都不执行。
+    if ($("#autoQaLocales")) renderLocaleStrip($("#autoQaLocales"), state.autoQaLocale, updateAutoQaLocale);
     bindEvents();
     updateBatchSegmentationOptions("粘贴长文.txt");
     setTranslationMode("single");
