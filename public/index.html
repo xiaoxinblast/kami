@@ -26,6 +26,7 @@
           <button class="nav-item" data-view="styles"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 20c4.5-1 8.5-4.2 11-8.5L19 4l1 1-7.5 4C8.2 11.5 5 15.5 4 20zM9 15l-2-2M17.5 13.5v4M15.5 15.5h4" /></svg></span><span>风格指导</span></button>
           <button class="nav-item" data-view="learning"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 15.5V20h4.5M20 8.5V4h-4.5M6.2 9A7 7 0 0 1 18.7 6M17.8 15A7 7 0 0 1 5.3 18M12 8v8M8 12h8" /></svg></span><span>学习中心</span></button>
         </nav>
+        <button class="nav-item sidebar-log" data-view="logs" title="查看工作台日志（后台报错、任务进度、模型调用）"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5zM8 9h8M8 13h8M8 17h5" /></svg></span><span>日志</span><span class="nav-badge" id="logNavBadge" hidden>0</span></button>
         <div class="sidebar-status">
           <span class="status-dot" id="serverDot"></span>
           <div><strong id="serverStatus">正在连接</strong><span id="providerLabel">模型服务待检查</span></div>
@@ -437,6 +438,36 @@
               <div class="asset-count subtle" id="learningEvidenceCount">0 条证据</div>
             </div>
             <div class="learning-evidence-list" id="learningEvidenceList"><div class="empty-list learning-empty">选定语言暂无学习证据</div></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-logs">
+          <article class="panel log-panel">
+            <div class="panel-head"><div><span class="card-kicker">RUNTIME LOG</span><h2>工作台日志</h2><p class="panel-caption">后台报错、任务进度与模型调用都会记在这里；关闭页面后依然保留，重启工作台也能看到上一次运行的最后 300 行。</p></div><div class="asset-count" id="logCount">0 条</div></div>
+            <div class="log-toolbar">
+              <div class="log-levels" id="logLevels" role="group" aria-label="日志等级筛选">
+                <button class="log-level-chip active" type="button" data-level="">全部</button>
+                <button class="log-level-chip" type="button" data-level="debug">调试</button>
+                <button class="log-level-chip" type="button" data-level="info">信息</button>
+                <button class="log-level-chip" type="button" data-level="warn">警告</button>
+                <button class="log-level-chip" type="button" data-level="error">错误</button>
+              </div>
+              <label class="log-search"><input id="logSearch" placeholder="搜索消息、错误或路径" /></label>
+              <label class="log-verbosity"><span>记录等级</span><select id="logVerbosity" aria-label="记录等级">
+                <option value="debug">调试（最详细）</option>
+                <option value="info">信息（默认）</option>
+                <option value="warn">警告</option>
+                <option value="error">仅错误</option>
+              </select></label>
+              <label class="log-autorefresh"><input type="checkbox" id="logAutoRefresh" checked /><span>自动刷新</span></label>
+              <div class="log-actions">
+                <button class="button ghost small" id="logRefresh" type="button">刷新</button>
+                <button class="button ghost small" id="logDownload" type="button">下载日志</button>
+                <button class="button ghost small" id="logClear" type="button">清空</button>
+              </div>
+            </div>
+            <p class="log-hint" id="logHint">记录等级决定服务端记多少：调到「调试」会记下更多细节，调到「仅错误」只留报错。</p>
+            <div class="log-list" id="logList"><div class="empty-list">正在读取日志……</div></div>
           </article>
         </section>
       </main>

@@ -90,8 +90,11 @@ test("预检逐个文件进行，并在界面上显示清单、进度与失败�
   assert.match(script, /progress\(`预检完成：\$\{selected\.length - failures\.length\} \/ \$\{selected\.length\} 个文件，共 \$\{merged\.statistics\.entries\} 条双语条目`, 100\)/u);
   assert.match(styles, /\.import-file-list, \.memory-import-files \{/u);
   assert.match(styles, /\.import-file-list li\.running em/u);
-  // 请求根本没到服务端时，不能只把浏览器的 Failed to fetch 丢给用户。
-  assert.match(script, /throw new Error\(generic\s*\n\s*\? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"/u);
+  // 请求根本没到服务端时，不能只把浏览器的 Failed to fetch 丢给用户；
+  // 同时要把原始信息写进日志（界面提示只闪 3 秒，事后要能查）。
+  assert.match(script, /const message = generic\s*\n\s*\? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"/u);
+  assert.match(script, /recordClientLog\("error", `请求未送达：\$\{options\.method \|\| "GET"\} \$\{path\}`, detail\)/u);
+  assert.match(script, /throw new Error\(message\);/u);
   // 取文件时不能再用"人工 TM 默认勾选"覆盖用户刚改过的勾选状态。
   assert.match(script, /state\.assetImportStyleEvidence = styleEvidence \?\? readImportStyleEvidence\(\);/u);
   assert.doesNotMatch(script, /styleEvidence \?\? \(resolvedPurpose === "tm" \? true/u);

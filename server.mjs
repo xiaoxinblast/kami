@@ -19,6 +19,7 @@ import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-su
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
 import { countMemories, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
+import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
@@ -1604,6 +1605,42 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
 async function apiHandler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/health") {
     return json(res, 200, { ok: true, version: "0.7.0", locales: ACTIVE_LOCALES, backend: getStoreMetadata() });
+  }
+  if (req.method === "GET" && url.pathname === "/api/logs") {
+    // 日志界面：按"至少这个等级 + 关键词 + 起始时间"过滤，默认最近 300 条（最新在前）。
+    const entries = listLogs({
+      level: String(url.searchParams.get("level") || "").trim(),
+      search: String(url.searchParams.get("search") || "").trim(),
+      since: String(url.searchParams.get("since") || "").trim(),
+      limit: Number(url.searchParams.get("limit")) || 300
+    });
+    return json(res, 200, { entries, settings: getLogSettings() });
+  }
+  if (req.method === "POST" && url.pathname === "/api/logs/settings") {
+    const body = await readJsonBody(req);
+    return json(res, 200, setLogLevel(body.level));
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/logs") {
+    const settings = clearLogs();
+    logInfo("日志已清空");
+    return json(res, 200, settings);
+  }
+  if (req.method === "GET" && url.pathname === "/api/logs/download") {
+    const body = readLogFile();
+    res.writeHead(200, {
+      "content-type": "text/plain; charset=utf-8",
+      "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent("kami.log")}`
+    });
+    res.end(body || "");
+    return true;
+  }
+  if (req.method === "POST" && url.pathname === "/api/logs/client") {
+    // 界面侧的报错（请求失败、未捕获异常）也写进同一份日志，
+    // 这样"提示闪一下就没了"之后还能回来查原因。
+    const body = await readJsonBody(req);
+    const level = ["debug", "info", "warn", "error"].includes(String(body.level)) ? String(body.level) : "error";
+    const entry = writeLog(level, `[界面] ${String(body.message || "").slice(0, 1_000)}`, body.detail ? { detail: body.detail, path: body.path || "" } : { path: body.path || "" });
+    return json(res, 200, { ok: Boolean(entry) });
   }
   if (req.method === "POST" && url.pathname === "/api/workbench-session") {
     const sessionId = readWorkbenchSessionId(await readJsonBody(req));
@@ -4442,6 +4479,10 @@ if (process.env.KAMI_STORE !== "directus") {
 }
 
 try {
+  // 日志先接管 console，再初始化：启动阶段的报错也要留在日志里。
+  installConsoleCapture();
+  loadPreviousRunLogs();
+  logInfo("工作台进程启动", { version: process.env.npm_package_version || "", port: PORT, pid: process.pid });
   await initializeStore();
   await recoverInterruptedBatchWorkers();
   await recoverInterruptedImportTasks();
@@ -4753,6 +4794,7 @@ async function shutdownManagedWorkbench() {
   workbenchShutdownStarted = true;
   workbenchSessionMonitor?.dispose();
   console.log("[Kami] 最后一个工作台页面已关闭，正在停止工作台与 Docker Desktop。");
+  logInfo("工作台收尾：最后一个页面已关闭", { graceMs: WORKBENCH_CLOSE_GRACE_MS });
   await closeServerForAutomaticShutdown();
   try {
     await shutdownDockerDesktop({ cwd: PROJECT_ROOT });

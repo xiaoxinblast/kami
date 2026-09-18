@@ -68,6 +68,10 @@ const state = {
   batchRunning: false,
   batchPaused: false,
   batchCancelling: false,
+  logs: [],
+  logLevel: "",
+  logSearch: "",
+  logErrorCount: 0,
   batchClassification: null,
   batchStyleProfile: null,
   projectSettings: null
@@ -90,12 +94,19 @@ async function api(path, options = {}) {
     // 这时浏览器只会给一句 Failed to fetch，对用户没有任何指导意义。
     const detail = String(error?.message || "");
     const generic = /Failed to fetch|Load failed|NetworkError|network error/iu.test(detail);
-    throw new Error(generic
+    const message = generic
       ? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"
-      : `请求失败（${detail}）：请确认工作台仍在运行`);
+      : `请求失败（${detail}）：请确认工作台仍在运行`;
+    // 界面上只闪一句提示，同时把原始信息写进日志，事后能查。
+    if (!String(path).startsWith("/api/logs")) recordClientLog("error", `请求未送达：${options.method || "GET"} ${path}`, detail);
+    throw new Error(message);
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
+  if (!response.ok) {
+    const message = payload.error || `请求失败：${response.status}`;
+    if (!String(path).startsWith("/api/logs")) recordClientLog("error", `${options.method || "GET"} ${path} → HTTP ${response.status}`, message);
+    throw new Error(message);
+  }
   return payload;
 }
 
@@ -370,9 +381,37 @@ function pageCopy(view) {
     import: ["BILINGUAL ASSET INGESTION", "双语资产导入", "先预检文件类型与资产去向，确认后再写入当前项目。"],
     assets: ["TERM ASSETS", "术语库", "查看日语→简体中文的物理隔离术语集合。"],
     memories: ["PROJECT TM", "记忆库 TM", "查看当前项目的主 TM、工作 TM 与参考 TM。"],
-    styles: ["STYLE GUIDANCE", "风格指导", "查看并控制已沉淀的翻译风格规则。"]
+    styles: ["STYLE GUIDANCE", "风格指导", "查看并控制已沉淀的翻译风格规则。"],
+    logs: ["RUNTIME LOG", "日志", "后台报错、任务进度与模型调用记录；报错不再只闪一下。"]
   }[view];
 }
+
+/**
+ * 界面侧的报错也记进同一份日志：提示只显示 3 秒，日志里能回看。
+ * 走的是 fire-and-forget，日志接口自己失败时不再递归上报。
+ */
+function recordClientLog(level, message, detail = "") {
+  const text = String(message || "").trim();
+  if (!text) return;
+  if (level === "error") {
+    // 界面上提示 3 秒就没了：角标留个痕迹，用户知道有错可查。
+    bumpLogBadge(state.logErrorCount + 1);
+    if (state.view === "logs") loadLogs().catch(() => {});
+  }
+  fetch("/api/logs/client", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ level, message: text.slice(0, 1_000), detail: String(detail || "").slice(0, 2_000), path: location.pathname })
+  }).catch(() => {});
+}
+
+window.addEventListener("error", (event) => {
+  recordClientLog("error", `未捕获异常：${event?.message || "未知错误"}`, `${event?.filename || ""}:${event?.lineno || 0}`);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event?.reason;
+  recordClientLog("error", `未处理的 Promise 拒绝：${reason?.message || String(reason || "未知原因")}`, reason?.stack || "");
+});
 
 function refreshActions() {
   if (state.busy) return;
@@ -483,6 +522,7 @@ function switchView(view) {
   if (view === "learning") loadLearning(state.learningLocale);
   if (view === "autoqa") updateAutoQaLocale(state.autoQaLocale);
   if (view === "feedback") loadFeedbackPage().catch((error) => toast(error.message));
+  if (view === "logs") { loadLogs().catch((error) => toast(error.message)); startLogAutoRefresh(); } else stopLogAutoRefresh();
   refreshActions();
 }
 
@@ -2959,6 +2999,68 @@ function renderStyleGuidance() {
   }));
 }
 
+const LOG_LEVEL_LABELS = { debug: "调试", info: "信息", warn: "警告", error: "错误" };
+const LOG_AUTO_REFRESH_MS = 3_000;
+let logAutoRefreshTimer = null;
+
+function logTimeLabel(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "时间未知";
+  return date.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function renderLogs() {
+  const entries = state.logs || [];
+  $("#logCount").textContent = `${entries.length} 条`;
+  const errors = entries.filter((entry) => entry.level === "error").length;
+  bumpLogBadge(errors);
+  $("#logHint").textContent = errors
+    ? `当前筛选下有 ${errors} 条错误。记录等级决定服务端记多少：调到「调试」会记下更多细节，调到「仅错误」只留报错。`
+    : "记录等级决定服务端记多少：调到「调试」会记下更多细节，调到「仅错误」只留报错。";
+  $("#logList").innerHTML = entries.length ? entries.map((entry) => `
+    <div class="log-row ${escapeHtml(entry.level)}">
+      <span class="log-time">${escapeHtml(logTimeLabel(entry.ts))}${entry.previous ? '<em class="log-previous">上次运行</em>' : ""}</span>
+      <span class="log-level ${escapeHtml(entry.level)}">${escapeHtml(LOG_LEVEL_LABELS[entry.level] || entry.level)}</span>
+      <div class="log-body"><p class="log-message">${escapeHtml(entry.message)}</p>${entry.detail ? `<p class="log-detail">${escapeHtml(entry.detail)}</p>` : ""}</div>
+    </div>`).join("") : '<div class="empty-list">当前筛选下没有日志</div>';
+  $$("#logLevels .log-level-chip").forEach((chip) => chip.classList.toggle("active", chip.dataset.level === (state.logLevel || "")));
+}
+
+/** 侧边栏角标：有几条错误可查。正在看日志页时不打扰。 */
+function bumpLogBadge(count) {
+  state.logErrorCount = Math.max(0, Number(count) || 0);
+  const badge = $("#logNavBadge");
+  if (!badge) return;
+  badge.hidden = state.logErrorCount === 0 || state.view === "logs";
+  badge.textContent = String(state.logErrorCount);
+}
+
+async function loadLogs() {
+  if (!state.bootstrap) return;
+  const params = new URLSearchParams({ limit: "300" });
+  if (state.logLevel) params.set("level", state.logLevel);
+  if (state.logSearch) params.set("search", state.logSearch);
+  const payload = await api(`/api/logs?${params}`);
+  state.logs = payload.entries || [];
+  const level = payload.settings?.level;
+  if (level && $("#logVerbosity")) $("#logVerbosity").value = level;
+  renderLogs();
+}
+
+function startLogAutoRefresh() {
+  stopLogAutoRefresh();
+  if (!$("#logAutoRefresh")?.checked) return;
+  logAutoRefreshTimer = setInterval(() => {
+    if (state.view !== "logs") return;
+    loadLogs().catch(() => {});
+  }, LOG_AUTO_REFRESH_MS);
+}
+
+function stopLogAutoRefresh() {
+  if (logAutoRefreshTimer) clearInterval(logAutoRefreshTimer);
+  logAutoRefreshTimer = null;
+}
+
 async function loadAssets(locale) {
   const projectQuery = state.activeProjectId ? `&projectId=${encodeURIComponent(state.activeProjectId)}` : "";
   const assets = await api(`/api/assets?locale=${encodeURIComponent(locale)}${projectQuery}`);
@@ -4918,6 +5020,37 @@ function bindEvents() {
   $("#refreshTasks").addEventListener("click", () => loadTasks().catch((error) => toast(error.message)));
   $("#styleStatus").addEventListener("change", renderStyleGuidance);
   $("#refreshStyles").addEventListener("click", () => loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message)));
+  $("#logLevels").addEventListener("click", (event) => {
+    const chip = event.target.closest(".log-level-chip");
+    if (!chip) return;
+    state.logLevel = chip.dataset.level || "";
+    loadLogs().catch((error) => toast(error.message));
+  });
+  $("#logSearch").addEventListener("input", (event) => {
+    state.logSearch = event.target.value.trim();
+    clearTimeout(state.logSearchTimer);
+    state.logSearchTimer = setTimeout(() => loadLogs().catch((error) => toast(error.message)), 250);
+  });
+  $("#logVerbosity").addEventListener("change", async (event) => {
+    const level = event.target.value;
+    try {
+      const settings = await api("/api/logs/settings", { method: "POST", body: JSON.stringify({ level }) });
+      $("#logVerbosity").value = settings.level;
+      toast(`记录等级已切换为「${LOG_LEVEL_LABELS[settings.level] || settings.level}」`);
+      await loadLogs();
+    } catch (error) { toast(error.message); }
+  });
+  $("#logAutoRefresh").addEventListener("change", () => { if (state.view === "logs") startLogAutoRefresh(); else stopLogAutoRefresh(); });
+  $("#logRefresh").addEventListener("click", () => loadLogs().catch((error) => toast(error.message)));
+  $("#logDownload").addEventListener("click", () => { window.open("/api/logs/download", "_blank", "noopener"); });
+  $("#logClear").addEventListener("click", async () => {
+    if (!confirm("清空日志？磁盘上的日志文件也会一起删除。")) return;
+    try {
+      await api("/api/logs", { method: "DELETE" });
+      await loadLogs();
+      toast("日志已清空");
+    } catch (error) { toast(error.message); }
+  });
   $("#styleGuideFile").addEventListener("change", (event) => {
     state.styleGuideFile = event.target.files[0] || null;
     $("#styleGuideImportButton").disabled = !state.styleGuideFile;
