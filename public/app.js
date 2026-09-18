@@ -2733,6 +2733,44 @@ function splitStyleRules(instruction) {
   return String(instruction || "").split(/\r?\n|；/u).map((item) => item.trim()).filter(Boolean).slice(0, 24);
 }
 
+function formatStyleTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "时间未知";
+  return date.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * 人工风格指南状态模块：一眼看清"有没有人工指南、是哪一份、现在是否启用"。
+ *
+ * 人工导入的指南由 /api/style-guides/import 命名成"风格指南 · <文件名>"，
+ * 用它跟从译文里蒸馏出来的译者画像区分（两者都存在 user_profiles 里）。
+ */
+function renderManualGuide(profiles) {
+  const container = $("#manualGuideStatus");
+  if (!container) return;
+  const guides = (profiles.userProfiles || []).filter((item) => String(item.name || "").startsWith("风格指南 · "));
+  const current = guides.find((item) => item.status === "active")
+    || [...guides].sort((left, right) => (Number(right.version) || 0) - (Number(left.version) || 0))[0]
+    || null;
+  if (!current) {
+    container.innerHTML = '<div class="manual-guide-empty"><strong>还没有人工风格指南</strong><p>用上面的入口导入 TXT / Markdown / DOCX；导入后立即启用，并优先于自动蒸馏出的规则。</p></div>';
+    return;
+  }
+  const status = String(current.status || "draft");
+  const statusLabel = status === "active" ? "已启用" : status === "draft" ? "待批准" : "已停用";
+  const statusNote = status === "active"
+    ? "正在作为最高优先级风格规则参与翻译"
+    : status === "draft" ? "尚未启用，当前翻译不会使用它" : "已停用，历史版本仍保留";
+  const history = guides.filter((item) => item.id !== current.id).length;
+  const action = status === "active"
+    ? '<button class="button ghost small" data-action="disable">停用（保留历史）</button>'
+    : `<button class="button secondary small" data-action="activate">${status === "draft" ? "批准并启用" : "重新启用"}</button>`;
+  container.innerHTML = `<article class="manual-guide-card ${escapeHtml(status)}" data-profile-id="${escapeHtml(current.id)}">
+    <div class="manual-guide-head"><div><strong>${escapeHtml(String(current.name || "").replace(/^风格指南 · /u, ""))}</strong><small>${escapeHtml(statusNote)} · v${Number(current.version) || 1} · 正文 ${[...String(current.instruction || "")].length} 字 · 最近更新 ${escapeHtml(formatStyleTime(current.updatedAt))}${history ? ` · 另有 ${history} 个历史版本` : ""}</small></div><span class="style-state ${escapeHtml(status)}">${statusLabel}</span></div>
+    <div class="manual-guide-actions"><details class="style-examples"><summary>查看正文</summary><p class="manual-guide-text">${escapeHtml(String(current.instruction || "").slice(0, 1500))}</p></details>${action}</div>
+  </article>`;
+}
+
 async function loadStyleGuidance(locale = state.styleLocale) {
   const [profiles, pending] = await Promise.all([
     api(`/api/style-profiles?locale=${encodeURIComponent(locale)}&projectId=${encodeURIComponent(state.activeProjectId)}`),
@@ -2753,6 +2791,7 @@ function renderStyleGuidance() {
   ].filter((item) => !statusFilter || item.status === statusFilter);
   const activeCount = [...(profiles.userProfiles || []), ...(profiles.styleProfiles || [])].filter((item) => item.status === "active").length;
   $("#styleGuidanceCount").textContent = `${activeCount} 条启用 · ${items.length} 条显示`;
+  renderManualGuide(profiles);
   $("#styleLearningCount").textContent = `${learningRuns.length} 个批次范围`;
   $("#styleLearningRuns").innerHTML = learningRuns.length ? renderLearningCards(learningRuns) : '<div class="empty-list compact">还没有可展示的批次学习记录；导入完整双语句段后会在这里说明 AI 具体学到了什么。</div>';
   const pools = profiles.evidencePools || [];
@@ -2777,8 +2816,8 @@ function renderStyleGuidance() {
   $("#styleQaCount").textContent = `${pending.length} 条`;
   $("#styleQaList").innerHTML = pending.length ? pending.map((item) => `<div class="qa-case-row" data-case-id="${escapeHtml(item.id)}"><div><small>${Math.round(item.scoreBefore)} → ${Math.round(item.scoreAfter)} · ${escapeHtml(item.source.slice(0, 55))}</small><p><s>${escapeHtml((item.rejectedTranslation || "").slice(0, 90))}</s> → <strong>${escapeHtml((item.correctedTranslation || "").slice(0, 90))}</strong></p></div><div class="qa-case-actions"><button class="button secondary small" data-action="approve-case">采纳为反例</button><button class="button ghost small" data-action="dispose-case">作废</button></div></div>`).join("") : '<div class="empty-list">当前没有待审核案例</div>';
 
-  $$(".style-guidance-card [data-action]").forEach((button) => button.addEventListener("click", async () => {
-    const id = button.closest(".style-guidance-card").dataset.profileId;
+  $$(".style-guidance-card [data-action], #manualGuideStatus [data-action]").forEach((button) => button.addEventListener("click", async () => {
+    const id = button.closest("[data-profile-id]").dataset.profileId;
     const action = button.dataset.action;
     button.disabled = true;
     try {

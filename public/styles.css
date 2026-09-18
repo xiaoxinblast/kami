@@ -322,6 +322,23 @@ select { min-width: 150px; }
 /* 记忆库分页：一次只渲染一页，剩下的按钮按需追加，避免上万行 DOM 拖慢页面 */
 .asset-more-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
 .asset-more-bar small { color: var(--muted); font-size: 11px; }
+/* 人工风格指南状态模块：有没有、哪一份、是否启用，一眼可见 */
+.manual-guide-section .style-section-head { margin-bottom: 10px; }
+.manual-guide-body { display: grid; gap: 10px; }
+.manual-guide-empty { padding: 14px 15px; border: 1px dashed #cfd8c8; border-radius: 12px; background: #fbfcf8; }
+.manual-guide-empty strong { display: block; color: #46584c; font-size: 13px; }
+.manual-guide-empty p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.manual-guide-card { padding: 14px; border: 1px solid var(--line); border-left: 4px solid #c9d3c4; border-radius: 12px; background: #fbfcfa; }
+.manual-guide-card.active { border-color: #b9d0c2; border-left-color: var(--lime-deep); background: #f7fbf4; }
+.manual-guide-card.draft { border-left-color: #e0b25e; background: #fffdf7; }
+.manual-guide-card.inactive { border-left-color: #c3c9c0; background: #fafbf9; }
+.manual-guide-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.manual-guide-head strong, .manual-guide-head small { display: block; }
+.manual-guide-head strong { font-size: 15px; }
+.manual-guide-head small { margin-top: 6px; color: #6d7d72; font-size: 11px; line-height: 1.7; }
+.manual-guide-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.manual-guide-actions .style-examples { flex: 1; margin: 0; }
+.manual-guide-text { margin: 8px 0 0; max-height: 190px; overflow-y: auto; white-space: pre-wrap; color: #46584c; font-size: 11px; line-height: 1.7; }
 .import-progress.is-failed { border-color: #e7c9c5; background: #fdf6f5; }
 .import-progress.is-failed .import-progress-head strong { color: #b4453c; }
 .smart-import-capabilities { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-top: 12px; }

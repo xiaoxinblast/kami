@@ -73,7 +73,11 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     await page.getByText("风格指南 · 项目风格指南", { exact: true }).waitFor();
     await page.getByText("人工上传，正文未被改写", { exact: false }).waitFor();
     assert.match(await page.locator("#styleGuideImportNote").textContent(), /已启用：项目风格指南\.md · 9 字/u);
-    assert.equal(await page.locator(".style-state", { hasText: "已启用" }).count(), 1, "人工风格指南导入后直接是启用状态");
+    assert.equal(await page.locator("#styleGuidanceList .style-state", { hasText: "已启用" }).count(), 1, "人工风格指南导入后直接是启用状态");
+    // 顶部的人工风格指南模块要能一眼看出"有、哪一份、已启用"
+    const manualGuide = await page.locator("#manualGuideStatus").textContent();
+    assert.match(manualGuide, /项目风格指南/u);
+    assert.match(manualGuide, /已启用/u);
     if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-guide-upload.png`, animations: "disabled" });
     assert.deepEqual(errors, []);
   } finally {
