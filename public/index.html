@@ -521,6 +521,18 @@
       </div>
     </dialog>
     <input type="file" id="reviewImportFile" accept=".mqxliff,.xliff,.xlsx,.csv" hidden />
+    <dialog id="exportDialog">
+      <div class="dialog-card export-dialog-card">
+        <div class="dialog-head"><div><span class="card-kicker">EXPORT</span><h2 id="exportDialogTitle">导出</h2></div><button class="icon-button" type="button" data-close="exportDialog" aria-label="关闭">×</button></div>
+        <p class="panel-caption" id="exportDialogSummary"></p>
+        <div class="review-import-details" id="exportDialogDetails"></div>
+        <div class="dialog-actions">
+          <button class="button ghost" type="button" id="exportDialogJump" hidden>去看第一条</button>
+          <button class="button secondary" type="button" id="exportDialogForce" hidden></button>
+          <button class="button primary" type="button" data-close="exportDialog">知道了</button>
+        </div>
+      </div>
+    </dialog>
     <dialog id="reviewImportDialog">
       <div class="dialog-card asset-preflight-dialog-card">
         <div class="dialog-head"><div><span class="card-kicker">EXTERNAL REVIEW</span><h2>审校回填结果</h2></div><button class="icon-button" type="button" data-close="reviewImportDialog" aria-label="关闭">×</button></div>

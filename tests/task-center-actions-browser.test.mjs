@@ -38,6 +38,8 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     page.on("pageerror", (error) => errors.push(error.message));
     // 中断会先弹确认框：浏览器默认会自动关闭它，这里显式接受。
     page.on("dialog", (dialog) => dialog.accept());
+    // 无头浏览器里系统的"另存为"无法交互，会一直挂着：这里走普通下载分支。
+    await page.addInitScript(() => { window.showSaveFilePicker = undefined; });
     await page.route("**/api/**", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
@@ -72,6 +74,40 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
             trajectoryUnmatched: 1, trajectoryAmbiguous: 0, failures: [],
             details: { unmatched: [{ pairIndex: 4, source: "新材料です。", reason: "该原文不在这个批次里" }], ambiguous: [] }
           })
+        });
+      }
+      if (url.pathname === "/api/batch/run/batch-2" && request.method() === "GET") {
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            batchId: "batch-2", filename: "interrupted.xlsx", format: "xlsx", locale: "zh-CN", contentType: "general", domain: "game",
+            segmentationMode: "unit", runState: "paused", runnerOptions: { route: "auto", reflect: true },
+            segments: [
+              { id: "seg-1", source: "メンテナンスは明日開始します。", translation: "维护明天开始。", selected: true, status: "done", locator: { type: "xlsx-cell", sheet: "S", address: "B2", row: 2, column: 2, entryId: "ID-1" } },
+              { id: "seg-2", source: "アップデートをダウンロードしています。", translation: "正在下载更新。", selected: true, status: "done", locator: { type: "xlsx-cell", sheet: "S", address: "B3", row: 3, column: 2, entryId: "ID-2" } }
+            ]
+          })
+        });
+      }
+      if (url.pathname === "/api/batch/export/preflight") {
+        actions.push(`${request.method()} ${url.pathname}`);
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            ok: false, total: 2,
+            blocking: [
+              { severity: "error", category: "platform_placeholder", segmentId: "seg-1", segmentIndex: 1, message: "占位符数量不一致", suggestion: "核对 <tag> 占位符" },
+              { severity: "critical", category: "terminology_required", segmentId: "seg-2", segmentIndex: 2, message: "术语未按库内译法", suggestion: "使用「维护」" }
+            ],
+            warnings: []
+          })
+        });
+      }
+      if (url.pathname === "/api/batch/export") {
+        actions.push(`${request.method()} ${url.pathname}`);
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({ filename: "interrupted.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", base64: Buffer.from("test").toString("base64") })
         });
       }
       if (url.pathname.startsWith("/api/batch/run/") || url.pathname.includes("/cancel")) {
@@ -135,6 +171,27 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     assert.match(await page.locator("#reviewImportDetails").textContent(), /未匹配 1 条/u);
     assert.match(await page.locator("#reviewImportDetails").textContent(), /该原文不在这个批次里/u);
     assert.ok(actions.includes("POST /api/batch/run/batch-2/import-review"), `回填要打到 import-review 接口：${actions.join(" | ")}`);
+    await page.locator('#reviewImportDialog .icon-button[data-close="reviewImportDialog"]').click();
+
+    // 导出：门禁阻断要弹窗逐条列出，并且给出"仍然导出"的出口（以前只有 3 秒 toast，像"点了没反应"）
+    await page.locator('#taskList .task-row[data-task-id="batch-2"] [data-action="open-task"]').click();
+    await page.waitForFunction(() => document.querySelector("#batchPreviewMeta") !== null || true);
+    await page.waitForSelector("#tertiaryAction:not([hidden])");
+    await page.locator("#tertiaryAction").click();
+    await page.waitForSelector("#exportDialog[open]");
+    assert.match(await page.locator("#exportDialogTitle").textContent(), /导出被 QA 门禁挡住/u);
+    assert.match(await page.locator("#exportDialogSummary").textContent(), /规则层的硬问题/u);
+    assert.match(await page.locator("#exportDialogDetails").textContent(), /占位符/u);
+    assert.equal(await page.locator("#exportDialogForce").isHidden(), false);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/export-gate-dialog.png`, animations: "disabled" });
+    }
+    await page.locator("#exportDialogForce").click();
+    await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 15000 });
+    assert.ok(actions.some((item) => item.includes("/api/batch/export")), `强制导出要打到导出接口：${actions.join(" | ")}`);
+    await page.locator('#exportDialog .icon-button[data-close="exportDialog"]').click();
+
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/task-center-actions.png`, fullPage: true, animations: "disabled" });

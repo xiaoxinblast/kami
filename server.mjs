@@ -3508,9 +3508,11 @@ async function apiHandler(req, res, url) {
       ? memories.filter((memory) => memory.libraryId === enabledMaster.id).map((memory) => ({ ...memory, libraryRole: "master", libraryName: enabledMaster.name, libraryPriority: enabledMaster.priority }))
       : [];
     const segments = Array.isArray(body.segments) ? body.segments.filter((segment) => segment?.selected !== false) : [];
-    const issues = segments.flatMap((segment, index) => {
-      const matches = matchTerms(segment.source || "", assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
-      const translationReferences = rankTranslationMemories(segment.source || "", masterMemories, {
+    // 参考译例只算一次：原来每段都对整库（本项目 8000+ 条）跑一次排序，67 段就要几分钟，
+    // 用户点"导出"后只看到按钮变灰、最后什么都等不到。文档级参考足够驱动导出前的规则检查。
+    const documentText = segments.map((segment) => segment?.source || "").join("\n").slice(0, 8_000);
+    const translationReferences = documentText
+      ? rankTranslationMemories(documentText, masterMemories, {
         limit: 20,
         locale,
         contentType: body.contentType || "general",
@@ -3518,7 +3520,10 @@ async function apiHandler(req, res, url) {
         projectId: body.projectId || "",
         catMinFuzzy: projectSettings?.tm?.catMinFuzzy || 60,
         llmMinRelevance: projectSettings?.tm?.llmMinRelevance || 60
-      });
+      })
+      : [];
+    const issues = segments.flatMap((segment, index) => {
+      const matches = matchTerms(segment.source || "", assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
       return runQa({ source: segment.source || "", translation: segment.translation || "", matches, translationReferences, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
     });
     const blocking = issues.filter((issue) => ["error", "critical"].includes(issue.severity));

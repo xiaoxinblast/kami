@@ -1897,18 +1897,6 @@ async function runBatchInBrowserLegacy() {
   else toast("批次翻译完成，可以导出原格式文件");
 }
 
-function downloadBase64File(payload) {
-  const binary = atob(payload.base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  const url = URL.createObjectURL(new Blob([bytes], { type: payload.mimeType }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = payload.filename;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1_000);
-}
-
 function taskStatusLabel(status) {
   return { ready: "待启动", in_progress: "进行中", paused: "已暂停", review: "QA 待处理", needs_attention: "存在失败", completed: "已完成" }[status] || "待处理";
 }
@@ -2540,18 +2528,51 @@ function invalidateBatchTranslations(message) {
 
 async function exportBatch() {
   if (!state.batchPreview) return;
-  setBusy(true, "正在合并文件…");
+  const restoredWithoutSource = !state.batchBase64 && ["docx", "xlsx", "xliff", "mqxliff"].includes(state.batchPreview.format);
+  const exportSegments = state.batchPreview.segments.map(({ id, source, selected, translation }) => ({ id, source, selected, translation }));
+  setBusy(true, "正在检查导出条件…");
   try {
-    const restoredWithoutSource = !state.batchBase64 && ["docx", "xlsx", "xliff", "mqxliff"].includes(state.batchPreview.format);
-    const exportSegments = state.batchPreview.segments.map(({ id, source, selected, translation }) => ({ id, source, selected, translation }));
-    const gate = await api("/api/batch/export/preflight", { method: "POST", body: JSON.stringify({
-      ...projectPayload(), locale: state.workbenchLocale, contentType: state.batchClassification?.contentType || "general", domain: $("#domain").value, segments: exportSegments
-    }) });
-    if (!gate.ok) {
-      toast(`导出被 QA 阻断：${gate.blocking.length} 项，请先修复或重新 QA`);
-      return;
+    let gate = null;
+    let gateError = "";
+    try {
+      gate = await api("/api/batch/export/preflight", {
+        method: "POST",
+        signal: AbortSignal.timeout(EXPORT_PREFLIGHT_TIMEOUT_MS),
+        body: JSON.stringify({
+          ...projectPayload(), locale: state.workbenchLocale, contentType: state.batchClassification?.contentType || "general", domain: $("#domain").value, segments: exportSegments
+        })
+      });
+    } catch (error) {
+      gateError = error.message;
     }
-    if (gate.warnings.length && !confirm(`导出前发现 ${gate.warnings.length} 条警告，仍要继续导出吗？`)) return;
+    // 门禁结果以前只弹 3 秒 toast，用户会觉得"点了没反应"：改成弹窗逐条列出来，并给"仍要导出"的出口。
+    if (gateError) {
+      const proceed = await openExportDialog({
+        title: "导出前检查没能完成",
+        summary: `${gateError}。可以跳过检查直接导出，也可以稍后重试。`,
+        items: [],
+        forceLabel: "跳过检查，直接导出"
+      });
+      if (!proceed) return;
+    } else if (gate && !gate.ok) {
+      const proceed = await openExportDialog({
+        title: `导出被 QA 门禁挡住（${gate.blocking.length} 项）`,
+        summary: "这些是规则层的硬问题（占位符、术语、数字、未翻译等）。修好再导出最稳，也可以强制导出。",
+        items: gate.blocking.slice(0, 20),
+        forceLabel: "仍然导出（跳过门禁）"
+      });
+      if (!proceed) return;
+    } else if (gate?.warnings?.length) {
+      const proceed = await openExportDialog({
+        title: `导出前有 ${gate.warnings.length} 条提醒`,
+        summary: "只是提醒，不影响导出。可以看一眼再决定。",
+        items: gate.warnings.slice(0, 20),
+        forceLabel: "继续导出"
+      });
+      if (!proceed) return;
+    }
+
+    setBusy(true, "正在生成导出文件…");
     const payload = await api("/api/batch/export", { method: "POST", body: JSON.stringify({
       ...projectPayload(),
       filename: state.batchPreview.filename,
@@ -2561,10 +2582,102 @@ async function exportBatch() {
       base64: state.batchBase64 || undefined,
       segments: exportSegments
     }) });
-    downloadBase64File(payload);
-    toast(restoredWithoutSource ? `原文件未随历史任务保存，已导出可继续编辑的任务 Excel：${payload.filename}` : `已导出 ${payload.filename}`);
-  } catch (error) { toast(error.message); }
-  finally { setBusy(false); }
+    const saved = await saveExportedFile(payload);
+    await openExportDialog({
+      title: "导出完成",
+      summary: restoredWithoutSource
+        ? `原文件未随历史任务保存，已导出可继续编辑的任务 Excel：${payload.filename}。${saved.message}`
+        : `${payload.filename}。${saved.message}`,
+      items: []
+    });
+  } catch (error) {
+    await openExportDialog({ title: "导出失败", summary: error.message, items: [] });
+  } finally { setBusy(false); }
+}
+
+const EXPORT_PREFLIGHT_TIMEOUT_MS = 90_000;
+
+/**
+ * 导出相关的弹窗：门禁阻断 / 提醒 / 完成 / 失败都在这里给出落点。
+ * 带 forceLabel 时返回 true 表示用户选择"仍然导出"，否则 false。
+ */
+function openExportDialog({ title, summary, items = [], forceLabel = "" }) {
+  const dialog = $("#exportDialog");
+  $("#exportDialogTitle").textContent = title;
+  $("#exportDialogSummary").textContent = summary;
+  $("#exportDialogDetails").innerHTML = items.length
+    ? items.map((item) => `<div><strong>第 ${Number(item.segmentIndex) || "?"} 段</strong><p>${escapeHtml(item.message || "")}${item.suggestion ? `<em>${escapeHtml(item.suggestion)}</em>` : ""}</p></div>`).join("")
+    : "";
+  const jump = $("#exportDialogJump");
+  jump.hidden = !items.length;
+  const force = $("#exportDialogForce");
+  force.hidden = !forceLabel;
+  if (forceLabel) force.textContent = forceLabel;
+  const firstSegmentId = items.find((item) => item.segmentId)?.segmentId || "";
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      dialog.removeEventListener("click", onClick);
+      dialog.removeEventListener("close", onClose);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onClick = (event) => {
+      if (event.target.closest("#exportDialogForce")) return finish(true);
+      if (event.target.closest("#exportDialogJump")) { jumpToBatchSegment(firstSegmentId); finish(false); return; }
+      if (event.target.closest("[data-close='exportDialog']")) finish(false);
+    };
+    const onClose = () => finish(false);
+    dialog.addEventListener("click", onClick);
+    dialog.addEventListener("close", onClose);
+    if (!dialog.open) dialog.showModal();
+  });
+}
+
+/** 跳到批次翻译页并高亮某一段，配合导出弹窗的"去看第一条"。 */
+function jumpToBatchSegment(segmentId) {
+  switchView("workbench");
+  setTranslationMode("batch");
+  const row = segmentId ? document.querySelector(`.batch-segment[data-segment-id="${CSS.escape(String(segmentId))}"]`) : null;
+  if (!row) return toast("已回到批次翻译页，请按段号查看");
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  row.classList.add("is-highlighted");
+  setTimeout(() => row.classList.remove("is-highlighted"), 2_500);
+}
+
+/**
+ * 保存导出文件：优先用系统的"另存为"让用户挑位置（Chromium 系支持），
+ * 不支持时回退成普通下载——并明确告诉用户文件去了哪里，避免"点了没反应"的错觉。
+ */
+async function saveExportedFile(payload) {
+  const binary = atob(payload.base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  const extension = String(payload.filename || "").split(".").pop() || "bin";
+  if (typeof window.showSaveFilePicker === "function") {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: payload.filename,
+        types: [{ description: "导出文件", accept: { [payload.mimeType || "application/octet-stream"]: [`.${extension}`] } }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      return { message: `已保存到你选择的位置：${handle.name || payload.filename}` };
+    } catch (error) {
+      if (String(error?.name) === "AbortError") throw new Error("已取消保存");
+      // 其它原因（浏览器策略、权限）回退成下载，不让导出彻底失败。
+    }
+  }
+  const url = URL.createObjectURL(new Blob([bytes], { type: payload.mimeType || "application/octet-stream" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = payload.filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  return { message: "浏览器不会弹保存位置时必须自行设置：默认已存到「下载」目录" };
 }
 
 function batchFeedbacks() {

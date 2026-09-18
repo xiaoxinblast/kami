@@ -346,6 +346,8 @@ select { min-width: 150px; }
 .review-import-details small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .review-import-details p { display: flex; justify-content: space-between; gap: 10px; margin: 6px 0 0; color: #46584c; font-size: 11px; line-height: 1.6; }
 .review-import-details em { flex: 0 0 auto; color: #8a7b52; font-style: normal; }
+.export-dialog-card { width: min(720px, 94vw); }
+.batch-segment.is-highlighted { box-shadow: 0 0 0 2px var(--lime-deep), 0 6px 18px rgba(10,35,27,.12); }
 /*
  * 侧边栏底部的日志入口：紧贴在状态块上面那条分隔线之上。
  * 之前它和 .sidebar-status 都写了 margin-top:auto，flex 会把剩余空白平分，
