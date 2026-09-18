@@ -1099,6 +1099,8 @@ function batchMetrics(segments = [], runState = "") {
   const failedSegments = selected.filter((segment) => segment.status === "error").length;
   const qaPending = selected.filter((segment) => {
     const result = segment.result || {};
+    // 人工已经确认过的段落不再算"待处理"：采纳（含审校回填覆盖）本身就是对 QA 意见的处理结论。
+    if (segment.accepted === true) return false;
     return Boolean(result.aiQa?.fallbackReason) || (Number.isFinite(result.qaScore) && result.qaScore < 90) || (result.issues || []).length > 0;
   }).length;
   return {

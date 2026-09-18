@@ -16,14 +16,14 @@ import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineS
 import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
-import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
+import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
 import { countMemories, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
-import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories } from "./src/external-review.mjs";
+import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories, matchReviewPairsToSegments } from "./src/external-review.mjs";
 import { DEFAULT_TRANSLATION_STRATEGY, createDefaultTranslationSkill, effectiveStrategyValue, evaluateSkillPromotion, normalizedEditDistance, selectSkillHoldout, summarizeTrajectoryAttribution, validateCandidatePromotionState } from "./src/learning-engine.mjs";
 import { benchmarkTranslationSkill, createBenchmarkSnapshot } from "./src/skill-benchmark.mjs";
 import { createEvaluationJobRunner } from "./src/evaluation-jobs.mjs";
@@ -1537,6 +1537,107 @@ async function translateBatchSegment(body) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `翻译请求失败（${response.status}）`);
   return payload;
+}
+
+/**
+ * 审校回填：把在 memoQ 里审校过的双语文件接回同一条批次。
+ *
+ * 用户确认过"覆盖就行"：命中的段落直接覆盖译文并标记人工采纳；同一批对照写入主 TM
+ * （provenance=external-review-import）并按既有规则接回学习轨迹；未匹配和有歧义的照实报出来，
+ * 不猜、不静默丢弃。
+ */
+async function importBatchReview({ run, pairs, projectId, filename }) {
+  const segments = Array.isArray(run.segments) ? run.segments : [];
+  const selected = segments.filter((segment) => segment.selected !== false);
+  const matched = matchReviewPairsToSegments(selected, pairs);
+  const appliedAt = new Date().toISOString();
+  const applied = matched.matches.map((match) => {
+    const segment = selected[match.segmentIndex];
+    const pair = pairs[match.pairIndex];
+    const previousTranslation = String(segment.translation || "");
+    segment.translation = String(pair.target || "").trim();
+    segment.accepted = true;
+    segment.result = {
+      ...(segment.result || {}),
+      humanReview: {
+        source: "external-review-import",
+        at: appliedAt,
+        method: match.method,
+        previousTranslation,
+        sourceFile: filename,
+        sourceRow: pair.sourceRow || null
+      }
+    };
+    return { segment, pair, match };
+  });
+  if (applied.length) await saveBatchRun({ ...run, segments });
+
+  const libraries = await getResourceLibraries(projectId).catch(() => []);
+  const masterTm = libraries.find((library) => library.kind === "translation_memory" && library.role === "master");
+  const trajectoryMatch = linkExternalReviewTrajectories(
+    applied.map(({ pair }) => ({
+      source: pair.source, target: pair.target,
+      entryId: pair.entryId || "", entryKey: pair.entryKey || "",
+      sheet: pair.sheet || "", sourceRow: pair.sourceRow || null,
+      previousSource: pair.previousSource || "", nextSource: pair.nextSource || ""
+    })),
+    await trajectoriesForExternalReview(run.locale, projectId)
+  );
+  const linkByIndex = new Map(trajectoryMatch.links.map((link) => [link.candidateIndex, link]));
+  const failures = [];
+  let memoriesWritten = 0;
+  let trajectoriesLinked = 0;
+  for (const [index, { pair }] of applied.entries()) {
+    try {
+      await saveMemory(run.locale, {
+        source: pair.source, target: pair.target,
+        domain: run.domain || "general", contentType: run.contentType || "general",
+        qualityStatus: "human_approved", qaScore: 100,
+        provenance: "external-review-import",
+        sourceFile: filename, batchId: run.batchId,
+        projectId, project: projectId, libraryId: masterTm?.id || "",
+        entryId: pair.entryId || "", entryKey: pair.entryKey || "",
+        previousSource: pair.previousSource || "", nextSource: pair.nextSource || ""
+      });
+      memoriesWritten += 1;
+    } catch (error) {
+      failures.push({ source: pair.source, reason: `写入主 TM 失败：${error.message}` });
+      continue;
+    }
+    const link = linkByIndex.get(index);
+    if (!link) continue;
+    try {
+      await updateLearningTrajectory(link.trajectory.id, externalReviewTrajectoryPatch({
+        trajectory: link.trajectory, target: pair.target, sourceFile: filename,
+        sourceRow: pair.sourceRow || null, matchMethod: link.method
+      }));
+      trajectoriesLinked += 1;
+    } catch (error) {
+      failures.push({ source: pair.source, reason: `接回学习轨迹失败：${error.message}` });
+    }
+  }
+
+  logInfo("审校回填完成", {
+    batchId: run.batchId, filename, pairs: pairs.length,
+    matched: matched.matches.length, unmatched: matched.unmatched.length, ambiguous: matched.ambiguous.length
+  });
+  return {
+    batchId: run.batchId, filename, total: pairs.length,
+    matched: matched.matches.length,
+    changed: matched.matches.filter((match) => match.changed).length,
+    unchanged: matched.unchanged.length,
+    unmatched: matched.unmatched.length,
+    ambiguous: matched.ambiguous.length,
+    memoriesWritten,
+    trajectoriesLinked,
+    trajectoryUnmatched: trajectoryMatch.unmatched.length,
+    trajectoryAmbiguous: trajectoryMatch.ambiguous.length,
+    failures: failures.slice(0, 50),
+    details: {
+      unmatched: matched.unmatched.slice(0, 50),
+      ambiguous: matched.ambiguous.slice(0, 50)
+    }
+  };
 }
 
 function startBatchWorker(batchId, backgroundTaskId = "") {
@@ -3112,6 +3213,32 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req);
     const saved = await saveBatchRun({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") });
     return json(res, 200, saved);
+  }
+  if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/import-review$/u.test(url.pathname)) {
+    // 审校回填：把在 memoQ 里改完的同一批文件导回来，覆盖译文 + 更新主 TM 与学习轨迹。
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
+    const run = await getBatchRun(batchId);
+    if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    const filename = String(body.filename || "").trim();
+    const base64 = String(body.base64 || "").replace(/^data:[^;]+;base64,/u, "");
+    if (!filename || !base64) return json(res, 400, { error: "请选择审校后导出的双语文件" });
+    if (!/\.(xlsx|csv|xliff|mqxliff)$/iu.test(filename)) return json(res, 400, { error: "审校回填只支持 xlsx、csv、xliff、mqxliff" });
+    const buffer = Buffer.from(base64, "base64");
+    if (!buffer.length) return json(res, 400, { error: "文件内容为空" });
+    if (buffer.length > IMPORT_FILE_BYTES) return json(res, 400, { error: `审校文件超过 ${Math.round(IMPORT_FILE_BYTES / (1024 * 1024))}MB 上限` });
+    const pairs = /\.(xlsx|csv)$/iu.test(filename)
+      ? (await extractTermPairs({ filename, base64, locale: run.locale })).candidates.map((candidate) => ({
+        source: candidate.source,
+        target: candidate.target,
+        entryId: candidate.entryId || "",
+        sourceRow: candidate.rowNumber || null,
+        sheet: candidate.sheet || "",
+        note: candidate.note || ""
+      }))
+      : extractXliffPairs(buffer, filename);
+    if (!pairs.length) return json(res, 400, { error: "文件里没有可回填的双语条目（需要原文与译文都非空）" });
+    return json(res, 200, await importBatchReview({ run, pairs, projectId: String(body.projectId), filename }));
   }
   if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/(?:start|resume)$/u.test(url.pathname)) {
     const parts = url.pathname.split("/");

@@ -520,6 +520,15 @@
         </div>
       </div>
     </dialog>
+    <input type="file" id="reviewImportFile" accept=".mqxliff,.xliff,.xlsx,.csv" hidden />
+    <dialog id="reviewImportDialog">
+      <div class="dialog-card asset-preflight-dialog-card">
+        <div class="dialog-head"><div><span class="card-kicker">EXTERNAL REVIEW</span><h2>审校回填结果</h2></div><button class="icon-button" type="button" data-close="reviewImportDialog" aria-label="关闭">×</button></div>
+        <p class="panel-caption" id="reviewImportSummary">正在回填……</p>
+        <div class="review-import-details" id="reviewImportDetails"></div>
+        <div class="dialog-actions"><button class="button primary" type="button" data-close="reviewImportDialog">知道了</button></div>
+      </div>
+    </dialog>
     <dialog id="assetPreflightDialog">
       <div class="dialog-card asset-preflight-dialog-card">
         <div class="dialog-head"><div><span class="card-kicker">ASSET PREFLIGHT</span><h2>确认双语资产去向</h2></div><button class="icon-button" type="button" data-close="assetPreflightDialog" aria-label="关闭">×</button></div>

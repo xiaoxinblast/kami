@@ -339,6 +339,13 @@ select { min-width: 150px; }
 .manual-guide-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .manual-guide-actions .style-examples { flex: 1; margin: 0; }
 .manual-guide-text { margin: 8px 0 0; max-height: 190px; overflow-y: auto; white-space: pre-wrap; color: #46584c; font-size: 11px; line-height: 1.7; }
+/* 审校回填结果：匹配/未匹配/歧义逐条列出来，不让用户猜是哪几条 */
+.review-import-details { display: grid; gap: 10px; max-height: 48vh; overflow-y: auto; margin: 4px 0 12px; }
+.review-import-details > div { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; }
+.review-import-details strong { display: block; color: #345244; font-size: 12px; }
+.review-import-details small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.review-import-details p { display: flex; justify-content: space-between; gap: 10px; margin: 6px 0 0; color: #46584c; font-size: 11px; line-height: 1.6; }
+.review-import-details em { flex: 0 0 auto; color: #8a7b52; font-style: normal; }
 /*
  * 侧边栏底部的日志入口：紧贴在状态块上面那条分隔线之上。
  * 之前它和 .sidebar-status 都写了 margin-top:auto，flex 会把剩余空白平分，

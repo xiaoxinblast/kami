@@ -62,6 +62,18 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
           ])
         });
       }
+      if (url.pathname === "/api/batch/run/batch-2/import-review") {
+        actions.push(`${request.method()} ${url.pathname}`);
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            batchId: "batch-2", filename: "interrupted.xlsx", total: 5, matched: 4, changed: 3, unchanged: 1,
+            unmatched: 1, ambiguous: 0, memoriesWritten: 4, trajectoriesLinked: 3,
+            trajectoryUnmatched: 1, trajectoryAmbiguous: 0, failures: [],
+            details: { unmatched: [{ pairIndex: 4, source: "新材料です。", reason: "该原文不在这个批次里" }], ambiguous: [] }
+          })
+        });
+      }
       if (url.pathname.startsWith("/api/batch/run/") || url.pathname.includes("/cancel")) {
         actions.push(`${request.method()} ${url.pathname}`);
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, cancelling: true }) });
@@ -110,6 +122,19 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     const stoppedImport = page.locator('#taskList .task-row[data-task-id="task-2"]');
     assert.match(await stoppedImport.textContent(), /已中断/u);
     assert.equal(await stoppedImport.locator('[data-action="continue-import"]').count(), 1, "中断的导入要给「继续导入」");
+
+    // 审校回填：批次行给出入口，上传审校后的文件后弹报告（匹配/未匹配逐条列出）
+    assert.equal(await interruptedRow.locator('[data-action="import-review"]').count(), 1, "完成过段落的批次要给「导入审校结果」");
+    await interruptedRow.locator('[data-action="import-review"]').click();
+    await page.locator("#reviewImportFile").setInputFiles({ name: "reviewed.mqxliff", mimeType: "application/xml", buffer: Buffer.from("<xliff/>") });
+    await page.waitForSelector("#reviewImportDialog[open]");
+    const summary = await page.locator("#reviewImportSummary").textContent();
+    assert.match(summary, /已回填 4 \/ 5 条/u);
+    assert.match(summary, /写入主 TM 4 条/u);
+    assert.match(summary, /接回学习轨迹 3 条/u);
+    assert.match(await page.locator("#reviewImportDetails").textContent(), /未匹配 1 条/u);
+    assert.match(await page.locator("#reviewImportDetails").textContent(), /该原文不在这个批次里/u);
+    assert.ok(actions.includes("POST /api/batch/run/batch-2/import-review"), `回填要打到 import-review 接口：${actions.join(" | ")}`);
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/task-center-actions.png`, fullPage: true, animations: "disabled" });

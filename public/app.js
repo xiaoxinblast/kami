@@ -72,6 +72,7 @@ const state = {
   logLevel: "",
   logSearch: "",
   logErrorCount: 0,
+  reviewImportBatchId: "",
   batchClassification: null,
   batchStyleProfile: null,
   projectSettings: null
@@ -1962,6 +1963,7 @@ function renderTasks() {
     else if (action === "continue-import") continueImportTask(id, button);
     else if (action === "pause-task") pauseBatchTask(id, button);
     else if (action === "continue-task") continueBatchTask(id, button);
+    else if (action === "import-review") importReviewTask(id, button);
     else if (action === "cancel-task") cancelBatchTask(id, button);
     else if (action === "cancel-background") cancelBackgroundTaskRow(id, button);
     else if (action === "delete-background") deleteBackgroundTaskRow(id, button);
@@ -2056,6 +2058,56 @@ async function cancelBatchTask(id, button) {
     body: { projectId: task.projectId || state.activeProjectId || "" },
     doneText: (result) => result?.cancelling ? "已请求中断：当前段落跑完就停" : "批次已中断，已完成段落保留"
   });
+}
+
+/**
+ * 审校回填：把在 memoQ 里改完的同一批文件导回来。
+ * 命中的段落直接覆盖译文并标记人工采纳，同时写入主 TM 并接回学习轨迹；
+ * 未匹配和有歧义的条目会在弹窗里逐条列出来，不静默丢弃。
+ */
+function importReviewTask(batchId, button) {
+  const task = findBatchTask(batchId);
+  if (!task) return toast("找不到这条批次任务");
+  state.reviewImportBatchId = batchId;
+  const input = $("#reviewImportFile");
+  input.value = "";
+  input.click();
+  void button;
+}
+
+function renderReviewImportDetails(report) {
+  const sections = [];
+  if (report.details?.unmatched?.length) {
+    sections.push(`<div><strong>未匹配 ${report.unmatched} 条</strong><small>这些原文不在这个批次里，或属于被跳过的段落</small>${report.details.unmatched.map((item) => `<p>${escapeHtml(String(item.source).slice(0, 60))} <em>${escapeHtml(item.reason)}</em></p>`).join("")}</div>`);
+  }
+  if (report.details?.ambiguous?.length) {
+    sections.push(`<div><strong>有歧义 ${report.ambiguous} 条</strong><small>同一条原文在批次里出现多次，缺少条目 ID 时不敢乱认（没有写入）</small>${report.details.ambiguous.map((item) => `<p>${escapeHtml(String(item.source).slice(0, 60))} <em>${escapeHtml(item.reason)}</em></p>`).join("")}</div>`);
+  }
+  if (report.failures?.length) {
+    sections.push(`<div><strong>失败 ${report.failures.length} 条</strong>${report.failures.map((item) => `<p>${escapeHtml(String(item.source).slice(0, 60))} <em>${escapeHtml(item.reason)}</em></p>`).join("")}</div>`);
+  }
+  return sections.length ? sections.join("") : '<div class="manual-guide-empty"><strong>全部条目都按条目 ID 精确匹配</strong><p>没有未匹配或歧义条目。</p></div>';
+}
+
+async function submitReviewImport(file) {
+  const batchId = state.reviewImportBatchId;
+  if (!file || !batchId) return;
+  const dialog = $("#reviewImportDialog");
+  $("#reviewImportSummary").textContent = `正在回填「${file.name}」……`;
+  $("#reviewImportDetails").innerHTML = "";
+  if (!dialog.open) dialog.showModal();
+  try {
+    const report = await api(`/api/batch/run/${encodeURIComponent(batchId)}/import-review`, { method: "POST", body: JSON.stringify({
+      ...projectPayload(), filename: file.name, base64: await fileToBase64(file)
+    }) });
+    $("#reviewImportSummary").textContent = `已回填 ${report.matched} / ${report.total} 条（其中 ${report.changed} 条译文有改动）· 写入主 TM ${report.memoriesWritten} 条 · 接回学习轨迹 ${report.trajectoriesLinked} 条`;
+    $("#reviewImportDetails").innerHTML = renderReviewImportDetails(report);
+    toast(`审校回填完成：匹配 ${report.matched} 条，写入主 TM ${report.memoriesWritten} 条`);
+    await loadTasks();
+  } catch (error) {
+    $("#reviewImportSummary").textContent = `回填失败：${error.message}`;
+    toast(error.message);
+  }
 }
 
 /** 导入类任务（术语 / 双语资产 / TM）的中断：跑批循环在下一处分块边界停下。 */
@@ -2197,11 +2249,12 @@ function renderBatchTaskRow(task) {
   const runningState = ["queued", "running"].includes(task.runState);
   const hasPending = Number(task.completedSegments) < Number(task.totalSegments);
   const canResume = hasPending && !runningState;
+  const canImportReview = Number(task.completedSegments) > 0;
   return `<article class="task-row" data-task-id="${escapeHtml(task.batchId)}">
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.filename)}</strong><span class="task-status ${escapeHtml(task.status)}">${cancelled ? "已中断" : taskStatusLabel(task.status)}</span><span class="task-type-chip">批次</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${progress}%"></i></div><span>${task.completedSegments} / ${task.totalSegments}</span></div>
     <div class="task-qa"><strong>${task.qaPending ? `${task.qaPending} 条待处理` : "QA 已清"}</strong>${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
-    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">后台导出</button></div>
+    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">后台导出</button></div>
   </article>`;
 }
 
@@ -4919,6 +4972,7 @@ function bindEvents() {
     toast("译文已复制");
   });
   $("#cancelBatchAction")?.addEventListener("click", () => cancelBatchRun().catch((error) => toast(error.message)));
+  $("#reviewImportFile").addEventListener("change", (event) => submitReviewImport(event.target.files?.[0]));
   $("#sourceText").addEventListener("input", previewClassificationAndMatches);
   $("#sourceText").addEventListener("paste", (event) => {
     const text = event.clipboardData?.getData("text/plain") || "";

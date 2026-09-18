@@ -128,6 +128,74 @@ export function linkExternalReviewTrajectories(candidates = [], trajectories = [
   };
 }
 
+/**
+ * 把"审校回填"文件里的双语条目定位到同一条批次的段落。
+ *
+ * 定位顺序（越稳的越先）：
+ *   1. memoQ 条目 ID（x-mmq-context，导出→审校→导入全程保留）；
+ *   2. 段落 unit id（同一文件内稳定）；
+ *   3. 原文唯一匹配；同一原文在批次里出现多次且没有 ID 可依据时算"有歧义"，不猜。
+ *
+ * 返回 { matches, unmatched, ambiguous, unchanged }：
+ *   matches 里带 pairIndex/segmentIndex/method，调用方据此覆盖译文；
+ *   unchanged 表示这条译文和回填前一样（仍然算匹配，只是内容没变化）。
+ */
+export function matchReviewPairsToSegments(segments = [], pairs = []) {
+  const list = Array.isArray(segments) ? segments : [];
+  const byEntryKey = new Map();
+  const byEntryId = new Map();
+  const bySource = new Map();
+  list.forEach((segment, index) => {
+    const entryKey = text(segment?.entryKey || segment?.locator?.entryKey);
+    if (entryKey && !byEntryKey.has(entryKey)) byEntryKey.set(entryKey, index);
+    const entryId = text(segment?.locator?.unitId || segment?.locator?.entryId || segment?.context?.entryId);
+    if (entryId && !byEntryId.has(entryId)) byEntryId.set(entryId, index);
+    const sourceKey = normalizeSource(segment?.source);
+    if (sourceKey) bySource.set(sourceKey, [...(bySource.get(sourceKey) || []), index]);
+  });
+
+  const matches = [];
+  const unmatched = [];
+  const ambiguous = [];
+  const unchanged = [];
+  const claimedSegments = new Set();
+  (Array.isArray(pairs) ? pairs : []).forEach((pair, pairIndex) => {
+    const source = text(pair?.source);
+    const target = text(pair?.target);
+    if (!source || !target) return;
+    const entryKey = text(pair?.entryKey);
+    const entryId = text(pair?.entryId);
+    const sourceKey = normalizeSource(source);
+
+    let index = -1;
+    let method = "";
+    if (entryKey && byEntryKey.has(entryKey)) {
+      index = byEntryKey.get(entryKey);
+      method = "entry_key";
+    } else if (entryId && byEntryId.has(entryId)) {
+      index = byEntryId.get(entryId);
+      method = "entry_id";
+    } else {
+      const sameSource = (bySource.get(sourceKey) || []).filter((candidate) => !claimedSegments.has(candidate));
+      if (sameSource.length === 1) {
+        [index] = sameSource;
+        method = "unique_source";
+      } else if (sameSource.length > 1) {
+        ambiguous.push({ pairIndex, source, reason: `同一条原文在这个批次里出现 ${sameSource.length} 次，缺少条目 ID 无法唯一定位` });
+        return;
+      } else {
+        unmatched.push({ pairIndex, source, reason: bySource.has(sourceKey) ? "可定位的段落都已被其他条目占用" : "该原文不在这个批次里" });
+        return;
+      }
+    }
+    claimedSegments.add(index);
+    const previous = text(list[index]?.translation);
+    if (previous === target) unchanged.push(pairIndex);
+    matches.push({ pairIndex, segmentIndex: index, method, previousTranslation: previous, changed: previous !== target });
+  });
+  return { matches, unmatched, ambiguous, unchanged };
+}
+
 export function externalReviewTrajectoryPatch({ trajectory, target, sourceFile = "", sourceRow = null, matchMethod = "" } = {}) {
   const finalTranslation = text(target);
   const machineTranslation = text(trajectory?.finalTranslation || trajectory?.initialTranslation);
