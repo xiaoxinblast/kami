@@ -4,6 +4,60 @@ import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
+test("导入任务在开始就带上批次号，服务重启后「继续导入」才找得到候选", async () => {
+  const server = await read("../server.mjs");
+  const commitRoute = server.slice(
+    server.indexOf('url.pathname === "/api/assets-import/commit"'),
+    server.indexOf('url.pathname === "/api/assets-import/resume"')
+  );
+  // 之前批次号只在成功（或抛错）时才写进任务载荷：进程被杀就没有 batchId，
+  // 任务中心虽然给出「继续导入」，点了却提示"没有可续传的批次"。
+  assert.match(commitRoute, /payload: \{ batchId: String\(body\.batchId \|\| ""\), filename, purpose, aiCleaning, styleEvidence, resumable: false \}/u);
+  const resumeRoute = server.slice(
+    server.indexOf('url.pathname === "/api/assets-import/resume"'),
+    server.indexOf('url.pathname === "/api/batch/columns"')
+  );
+  assert.match(resumeRoute, /payload: \{ batchId, filename, purpose, aiCleaning, styleEvidence, resumable: false \}/u);
+  // 后台链路写队列拿到批次号后立刻补写，TM 导入同理。
+  assert.match(server, /persistedBatchId = persisted\.batchId;/u);
+  assert.match(server, /payload: \{ batchId: batch, filename, purpose, aiCleaning, styleEvidence, resumable: false \}/u);
+});
+
+test("中断：跑批循环在分块边界停下，任务标成可继续而不是一直进行中", async () => {
+  const server = await read("../server.mjs");
+  assert.match(server, /const runningBackgroundTasks = new Map\(\);/u);
+  assert.match(server, /function cancellationError\(message\)/u);
+  // 路由：后台任务中断 + 批次中断
+  assert.match(server, /\^\\\/api\\\/background-tasks\\\/\[\^\/\]\+\\\/cancel\$/u);
+  assert.match(server, /\^\\\/api\\\/batch\\\/run\\\/\[\^\/\]\+\\\/cancel\$/u);
+  // 中断落成 needs_attention + phase=cancelled + resumable，界面才知道可以继续
+  assert.match(server, /phase: cancelled \? "cancelled" : "failed"/u);
+  assert.match(server, /status: cancelled \? "needs_attention" : "failed"/u);
+  assert.match(server, /const cancelled = isCancellation\(error\);/u);
+  // 批次：中断用 runnerOptions.cancelled 标记（run_state 只有库里允许的取值）
+  const runner = await read("../src/batch-runner.mjs");
+  assert.match(runner, /run\.runState = "paused";\s*\n\s*run\.runnerOptions = \{ \.\.\.options, cancelled: true \};/u);
+  assert.match(server, /shouldCancel: \(\) => controller\.cancelRequested/u);
+  assert.match(server, /worker\.cancelRequested = true;/u);
+});
+
+test("服务重启后：批次任务与导入任务都会标成可继续", async () => {
+  const server = await read("../server.mjs");
+  const recovery = server.slice(
+    server.indexOf("async function recoverInterruptedBatchWorkers"),
+    server.indexOf("async function shutdownManagedWorkbench")
+  );
+  // 批次：运行中的批次置 paused，卡在 running 的段落退回 pending
+  assert.match(recovery, /runState: "paused"/u);
+  assert.match(recovery, /error: "服务重启后等待继续"/u);
+  // 对应的后台任务行也要收尾，否则任务中心一直显示"进行中"
+  assert.match(recovery, /item\.type === "batch_translation" && item\.status === "in_progress"/u);
+  assert.match(recovery, /message: "服务重启导致中断，可在任务中心继续翻译"/u);
+  assert.match(recovery, /payload: \{ \.\.\.\(task\.payload \|\| \{\}\), batchId: run\.batchId, filename: run\.filename, resumable: true \}/u);
+  // 导入：in_progress 的 term_import / asset_import 标成 needs_attention + resumable
+  assert.match(server, /\["term_import", "asset_import"\]\.includes\(task\.type\)/u);
+});
+
 test("术语导入不再逐条拉整库，改为一次索引 + 分块写入", async () => {
   const server = await read("../server.mjs");
   // 旧实现是每条候选都 getProjectAssets(整库) 判重，5859 条会变成分钟级导入。

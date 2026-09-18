@@ -27,6 +27,37 @@ test("服务端按真实 subBatches 执行并逐段保存检查点", async () =>
   assert.ok(snapshots.length >= 7, "启动、每段运行前后和完成状态都应持久化");
 });
 
+test("中断请求在当前段完成后停止，留下已中断标记且已完成段保留", async () => {
+  const run = fixture();
+  let translated = 0;
+  const snapshots = [];
+  const first = await runServerBatch(run.batchId, {
+    loadRun: async () => run,
+    saveRun: async (value) => snapshots.push(structuredClone(value)),
+    loadProject: async () => ({ settings: { batch: { subBatchMaxEntries: 2, subBatchMaxChars: 99 }, tm: {} } }),
+    classifyDocument: async () => "dialogue",
+    translateSegment: async () => { translated += 1; return { translation: `译文${translated}`, issues: [] }; },
+    shouldCancel: () => translated >= 1
+  });
+  assert.equal(first.runState, "paused");
+  assert.equal(first.runnerOptions.cancelled, true, "中断要留标记：界面据此显示「已中断」而不是「已暂停」");
+  assert.equal(first.segments.filter((segment) => segment.status === "done").length, 1);
+  assert.equal(translated, 1, "中断之后不能继续翻后面的段落");
+  assert.equal(snapshots.at(-1).runState, "paused");
+  assert.equal(snapshots.at(-1).runnerOptions.cancelled, true);
+
+  // 继续：只翻没完成的段落，已完成的那段不重翻
+  const resumed = await runServerBatch(run.batchId, {
+    loadRun: async () => run,
+    saveRun: async () => {},
+    loadProject: async () => ({ settings: { batch: { subBatchMaxEntries: 2, subBatchMaxChars: 99 }, tm: {} } }),
+    classifyDocument: async () => "dialogue",
+    translateSegment: async () => { translated += 1; return { translation: `译文${translated}`, issues: [] }; }
+  });
+  assert.equal(resumed.runState, "completed");
+  assert.equal(translated, 3, "续跑只补剩下两段");
+});
+
 test("暂停请求在当前段完成后停止，恢复时跳过已完成段", async () => {
   const run = fixture();
   let translated = 0;

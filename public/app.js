@@ -67,6 +67,7 @@ const state = {
   batchPreview: null,
   batchRunning: false,
   batchPaused: false,
+  batchCancelling: false,
   batchClassification: null,
   batchStyleProfile: null,
   projectSettings: null
@@ -378,7 +379,9 @@ function refreshActions() {
   const primary = $("#primaryAction");
   const secondary = $("#secondaryAction");
   const tertiary = $("#tertiaryAction");
+  const cancelBatch = $("#cancelBatchAction");
   [secondary, tertiary].forEach((button) => { button.hidden = true; button.disabled = false; });
+  if (cancelBatch) { cancelBatch.hidden = true; cancelBatch.disabled = false; }
   primary.disabled = false;
   primary.title = "";
   if (state.view === "workbench") {
@@ -396,6 +399,13 @@ function refreshActions() {
       const hasCompleted = segments.some((segment) => segment.status === "done" && segment.translation);
       primary.textContent = state.batchRunning ? (state.batchPaused ? "暂停中…" : "暂停批次") : !state.batchPreview ? "解析并分段" : hasPending ? (segments.some((segment) => segment.status === "error") ? "继续 / 重试" : "开始批次翻译") : "批次已完成";
       primary.disabled = state.batchRunning ? state.batchPaused : (!state.batchPreview && !state.batchFile && !$("#batchPasteText")?.value.trim()) || (Boolean(state.batchPreview) && !hasPending);
+      // 中断：正在服务端后台跑（或已交出去）时才出现，点了当前段跑完就停，进度保留。
+      if (cancelBatch && state.batchPreview) {
+        const running = state.batchRunning || ["queued", "running"].includes(state.batchPreview.runState || "");
+        cancelBatch.hidden = !running;
+        cancelBatch.disabled = !running;
+        cancelBatch.textContent = state.batchCancelling ? "中断中…" : "中断批次";
+      }
       if (state.batchFile || state.batchPreview || $("#batchPasteText")?.value.trim()) {
         secondary.hidden = false;
         secondary.textContent = "清空批次";
@@ -1634,6 +1644,7 @@ function mergeServerBatchRun(run) {
   const current = new Map(state.batchPreview.segments.map((segment) => [segment.id, segment]));
   state.batchPreview.subBatches = run.subBatches || [];
   state.batchPreview.runState = run.runState || "ready";
+  state.batchPreview.runnerOptions = run.runnerOptions || null;
   state.batchPreview.segments = (run.segments || []).map((segment, index) => ({
     ...(current.get(segment.id) || {}),
     ...segment,
@@ -1651,9 +1662,11 @@ async function pollServerBatch(batchId) {
     if (["completed", "needs_attention", "paused"].includes(run.runState)) {
       state.batchRunning = false;
       state.batchPaused = false;
+      state.batchCancelling = false;
       refreshActions();
       renderBatchSegments();
       if (run.runState === "completed") toast("后台批次翻译完成，可以导出原格式文件");
+      else if (run.runState === "paused" && run.runnerOptions?.cancelled) toast("批次已中断，已完成的段落保留，可随时继续");
       else if (run.runState === "paused") toast("后台批次已暂停，进度已保存");
       else toast("后台批次存在失败，可点击继续 / 重试");
       return;
@@ -1670,6 +1683,32 @@ async function pauseBatch() {
     method: "POST",
     body: JSON.stringify(projectPayload())
   });
+}
+
+/**
+ * 中断批次：当前段跑完就停，已完成的段落全部保留，之后可以「继续 / 重试」接着翻。
+ * 与暂停的区别只是"是用户主动中断"，任务中心据此显示已中断。
+ */
+async function cancelBatchRun() {
+  const batchId = state.batchPreview?.batchId;
+  if (!batchId || state.batchCancelling) return;
+  if (!confirm("中断这个批次？已完成的段落会保留，之后可以继续翻译。")) return;
+  state.batchCancelling = true;
+  refreshActions();
+  try {
+    const result = await api(`/api/batch/run/${encodeURIComponent(batchId)}/cancel`, { method: "POST", body: JSON.stringify(projectPayload()) });
+    toast(result.cancelling ? "已请求中断：当前段落跑完就停" : "批次已中断，已完成段落保留");
+    if (!result.cancelling) {
+      state.batchRunning = false;
+      state.batchPaused = false;
+      state.batchCancelling = false;
+      refreshActions();
+    }
+  } catch (error) {
+    state.batchCancelling = false;
+    refreshActions();
+    toast(error.message);
+  }
 }
 
 async function runBatch() {
@@ -1881,6 +1920,10 @@ function renderTasks() {
     else if (action === "download-export") downloadBackgroundExport(id, button);
     else if (action === "open-import-review") openImportReview(id, button);
     else if (action === "continue-import") continueImportTask(id, button);
+    else if (action === "pause-task") pauseBatchTask(id, button);
+    else if (action === "continue-task") continueBatchTask(id, button);
+    else if (action === "cancel-task") cancelBatchTask(id, button);
+    else if (action === "cancel-background") cancelBackgroundTaskRow(id, button);
     else if (action === "delete-background") deleteBackgroundTaskRow(id, button);
   }));
 }
@@ -1898,13 +1941,16 @@ function renderBackgroundTaskRow(task) {
   const locale = state.bootstrap.locales[task.locale];
   const progress = task.progress || {};
   const percent = Number.isFinite(Number(progress.percent)) ? Math.max(0, Math.min(100, Number(progress.percent))) : (task.status === "completed" ? 100 : 0);
-  const statusLabel = task.status === "in_progress" ? "进行中" : task.status === "review" ? "等待审核" : ["needs_attention", "failed"].includes(task.status) ? "失败" : "已完成";
+  // 中断与服务重启打断都用 progress.phase 区分，状态本身仍是库里允许的取值。
+  const stoppedPhase = ["cancelled", "interrupted"].includes(progress.phase);
+  const statusLabel = stoppedPhase ? "已中断" : task.status === "in_progress" ? "进行中" : task.status === "review" ? "等待审核" : ["needs_attention", "failed"].includes(task.status) ? "失败" : "已完成";
   const statusClass = task.status === "in_progress" || task.status === "review" ? "warning" : task.status === "needs_attention" ? "error" : "success";
   const message = progress.message || "";
   const download = task.taskType === "batch_export" && task.status === "completed" && task.payload?.downloadUrl;
   const summary = task.payload?.summary;
   const canResumeImport = task.taskType === "term_import" && task.status === "review" && task.payload?.batchId;
   const canContinueImport = resumableImportTask(task);
+  const canCancel = task.status === "in_progress";
   const payloadText = summary
     ? `术语 ${summary.terms ?? 0} · 译例 ${summary.memories ?? 0} · 风格草稿 ${summary.styleProfiles ?? 0} · 跳过 ${summary.skipped ?? 0}${summary.skippedByReason ? `（${Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join("；")}）` : ""}`
     : task.payload?.error ? `错误：${task.payload.error}` : "";
@@ -1912,8 +1958,78 @@ function renderBackgroundTaskRow(task) {
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="task-status ${escapeHtml(statusClass)}">${escapeHtml(statusLabel)}</span><span class="task-type-chip">${escapeHtml(BACKGROUND_TASK_LABELS[task.taskType] || "后台")}</span></div><small title="${escapeHtml(message || payloadText || "")}">${locale ? `${escapeHtml(locale.label)} · ` : ""}${escapeHtml(message || payloadText || contentTypeLabel(task.contentType))} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${percent}%"></i></div><span>${task.totalSegments ? `${task.completedSegments} / ${task.totalSegments}` : `${percent}%`}</span></div>
     <div class="task-qa"><strong title="${escapeHtml(payloadText || "")}">${payloadText || (canResumeImport ? `${task.payload.candidateCount || 0} 条候选` : "—")}</strong><small>${task.status === "in_progress" ? "后台执行中" : canResumeImport ? "识别完成，等待人工确认" : formatTaskTime(task.updatedAt)}</small></div>
-    <div class="task-actions">${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${canContinueImport ? `<button class="button secondary small" data-action="continue-import">继续导入</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
+    <div class="task-actions">${canCancel ? '<button class="button ghost small" data-action="cancel-background">中断</button>' : ""}${canResumeImport ? `<button class="button secondary small" data-action="open-import-review">继续审核</button>` : ""}${canContinueImport ? `<button class="button secondary small" data-action="continue-import">继续导入</button>` : ""}${download ? `<button class="button secondary small" data-action="download-export">下载 Excel</button>` : ""}<button class="button ghost small" data-action="delete-background">删除</button></div>
   </article>`;
+}
+
+/** 任务中心里的批次操作：暂停 / 继续 / 中断，都走已有的批次接口。 */
+function findBatchTask(id) {
+  return (state.tasks || []).find((item) => item.type === "batch" && item.batchId === id) || null;
+}
+
+async function runBatchTaskAction(button, { busyText, endpoint, body, doneText }) {
+  const original = button?.textContent || "";
+  if (button) { button.disabled = true; button.textContent = busyText; }
+  try {
+    const result = await api(endpoint, { method: "POST", body: JSON.stringify(body) });
+    toast(doneText(result));
+    await loadTasks();
+  } catch (error) {
+    if (button) { button.disabled = false; button.textContent = original; }
+    toast(error.message);
+  }
+}
+
+async function pauseBatchTask(id, button) {
+  const task = findBatchTask(id);
+  if (!task) return toast("找不到这条批次任务");
+  await runBatchTaskAction(button, {
+    busyText: "暂停中…",
+    endpoint: `/api/batch/run/${encodeURIComponent(id)}/pause`,
+    body: { projectId: task.projectId || state.activeProjectId || "" },
+    doneText: () => "已请求暂停：当前段落结束就停，进度已保存"
+  });
+}
+
+async function continueBatchTask(id, button) {
+  const task = findBatchTask(id);
+  if (!task) return toast("找不到这条批次任务");
+  await runBatchTaskAction(button, {
+    busyText: "续跑中…",
+    endpoint: `/api/batch/run/${encodeURIComponent(id)}/start`,
+    body: {
+      projectId: task.projectId || state.activeProjectId || "",
+      route: task.runnerOptions?.route || "auto",
+      reflect: task.runnerOptions?.reflect !== false
+    },
+    doneText: (result) => result?.alreadyRunning ? "这个批次已经在后台跑着了" : "已继续：只翻还没完成的段落"
+  });
+}
+
+async function cancelBatchTask(id, button) {
+  const task = findBatchTask(id);
+  if (!task) return toast("找不到这条批次任务");
+  if (!confirm(`中断「${task.filename}」？已完成的段落会保留，之后可以继续翻译。`)) return;
+  await runBatchTaskAction(button, {
+    busyText: "中断中…",
+    endpoint: `/api/batch/run/${encodeURIComponent(id)}/cancel`,
+    body: { projectId: task.projectId || state.activeProjectId || "" },
+    doneText: (result) => result?.cancelling ? "已请求中断：当前段落跑完就停" : "批次已中断，已完成段落保留"
+  });
+}
+
+/** 导入类任务（术语 / 双语资产 / TM）的中断：跑批循环在下一处分块边界停下。 */
+async function cancelBackgroundTaskRow(id, button) {
+  const original = button?.textContent || "中断";
+  if (button) { button.disabled = true; button.textContent = "中断中…"; }
+  try {
+    const result = await api(`/api/background-tasks/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify(projectPayload()) });
+    toast(result.cancelling ? "已请求中断：正在跑的循环会在下一处分块停下" : result.stopped ? "任务已标记中断" : "任务已经不在运行");
+    await loadTasks();
+  } catch (error) {
+    if (button) { button.disabled = false; button.textContent = original; }
+    toast(error.message);
+  }
 }
 
 /**
@@ -2035,11 +2151,17 @@ async function deleteShareTaskRow(token, button) {
 function renderBatchTaskRow(task) {
   const locale = state.bootstrap.locales[task.locale];
   const progress = task.totalSegments ? Math.round(task.completedSegments / task.totalSegments * 100) : 0;
+  // 中断过的批次：run_state 只能是库里允许的取值，所以中断用 runnerOptions.cancelled 标记，
+  // 这里据此显示"已中断"并给出「继续翻译」。
+  const cancelled = task.runnerOptions?.cancelled === true;
+  const runningState = ["queued", "running"].includes(task.runState);
+  const hasPending = Number(task.completedSegments) < Number(task.totalSegments);
+  const canResume = hasPending && !runningState;
   return `<article class="task-row" data-task-id="${escapeHtml(task.batchId)}">
-    <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.filename)}</strong><span class="task-status ${escapeHtml(task.status)}">${taskStatusLabel(task.status)}</span><span class="task-type-chip">批次</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small></div>
+    <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.filename)}</strong><span class="task-status ${escapeHtml(task.status)}">${cancelled ? "已中断" : taskStatusLabel(task.status)}</span><span class="task-type-chip">批次</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${progress}%"></i></div><span>${task.completedSegments} / ${task.totalSegments}</span></div>
     <div class="task-qa"><strong>${task.qaPending ? `${task.qaPending} 条待处理` : "QA 已清"}</strong>${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
-    <div class="task-actions"><button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">后台导出</button></div>
+    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">后台导出</button></div>
   </article>`;
 }
 
@@ -2269,6 +2391,7 @@ function applyStoredBatchRun(run) {
   state.batchPreview = {
     batchId: run.batchId, filename: run.filename, format: run.format,
     segmentationMode: run.segmentationMode, structure: run.structure, subBatches: run.subBatches || [], runState: run.runState || "ready",
+    runnerOptions: run.runnerOptions || null,
     segments: run.segments.map((segment, index) => ({
       id: segment.id, index: index + 1, source: segment.source, translation: segment.translation || "",
       status: segment.status || "pending", selected: segment.selected !== false, accepted: Boolean(segment.accepted),
@@ -4693,6 +4816,7 @@ function bindEvents() {
     await navigator.clipboard.writeText(state.lastResult.translation);
     toast("译文已复制");
   });
+  $("#cancelBatchAction")?.addEventListener("click", () => cancelBatchRun().catch((error) => toast(error.message)));
   $("#sourceText").addEventListener("input", previewClassificationAndMatches);
   $("#sourceText").addEventListener("paste", (event) => {
     const text = event.clipboardData?.getData("text/plain") || "";

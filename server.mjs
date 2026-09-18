@@ -87,6 +87,31 @@ const BACKGROUND_TASK_TERMINAL_STATUSES = new Set(["completed", "failed", "revie
 let workbenchSessionMonitor = null;
 let workbenchShutdownStarted = false;
 const batchWorkers = new Map();
+/**
+ * 正在本进程内执行的后台任务。
+ * 任务中心点「中断」只置一个标记，跑批的循环在下一处分块边界停下来：
+ * 已写入的数据完整保留，剩下的稍后可以用同一个批次「继续导入」。
+ */
+const runningBackgroundTasks = new Map();
+const CANCELLED = Symbol("taskCancelled");
+
+function beginBackgroundRun(taskId) {
+  const control = { cancelRequested: false };
+  if (taskId) runningBackgroundTasks.set(taskId, control);
+  return control;
+}
+
+function endBackgroundRun(taskId) {
+  if (taskId) runningBackgroundTasks.delete(taskId);
+}
+
+function cancellationError(message) {
+  return Object.assign(new Error(message || "已按用户要求中断"), { [CANCELLED]: true });
+}
+
+function isCancellation(error) {
+  return Boolean(error && error[CANCELLED] === true);
+}
 
 function readGraceMs(variable, fallback) {
   const raw = process.env[variable];
@@ -857,8 +882,9 @@ function markExistingTermCandidates(candidates, assetsByLocale) {
  * AI 逐条清洗候选：判定 keep / rowKind / 句内术语，并就地回写候选。
  * 术语库页面的导入预览与双语资产导入的后台清洗共用这一段，避免两条路径漂移。
  */
-async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, percentRange = [30, 86] } = {}) {
+async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, percentRange = [30, 86], shouldCancel = null } = {}) {
   const [startPercent, endPercent] = percentRange;
+  const cancelled = () => typeof shouldCancel === "function" && shouldCancel() === true;
   const locales = [...new Set(candidates.map((candidate) => candidate.locale))];
   const groups = locales.flatMap((locale) => {
     const indexes = candidates.map((candidate, index) => ({ candidate, index })).filter(({ candidate }) => candidate.locale === locale && !candidate.existing);
@@ -873,6 +899,8 @@ async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, per
   let completed = 0;
   onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：0 / ${groups.length} 批`, percent: startPercent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
   const results = await runTaskPool(groups, async ({ locale, indexes }) => {
+    // 中断检查放在每个分块开头：并发里已经发出的请求自然跑完，剩下的立刻放弃。
+    if (cancelled()) throw cancellationError("AI 清洗已按用户要求中断");
     const result = await reviewCandidateGroup(locale, indexes.map(({ candidate }) => candidate));
     indexes.forEach(({ index }, localIndex) => { candidates[index] = result.candidates[localIndex]; });
     return { reviewed: result.reviewed, missing: result.missing, retries: result.retries, failures: result.failures };
@@ -884,6 +912,8 @@ async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, per
       onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：${completed} / ${groups.length} 批`, percent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
     }
   });
+  const stopped = results.find((result) => result.status === "rejected" && isCancellation(result.reason));
+  if (stopped) throw stopped.reason;
   const failures = [
     ...results.filter((result) => result.status === "rejected").map((result) => result.reason?.message || String(result.reason)),
     ...results.filter((result) => result.status === "fulfilled").flatMap((result) => result.value.failures || [])
@@ -909,6 +939,9 @@ async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, per
  */
 async function runAssetImportInBackground({ taskId, projectId, batchId, filename, candidates, purpose, aiCleaning, styleEvidence, persistCandidates = false }) {
   let progressWrites = Promise.resolve();
+  const control = beginBackgroundRun(taskId);
+  const shouldCancel = () => control.cancelRequested;
+  let persistedBatchId = String(batchId || "");
   const reportImmediate = (update) => {
     reportImportProgress(taskId, { status: "running", ...update });
     progressWrites = progressWrites
@@ -936,12 +969,15 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
       }, { onProgress: countReport(1, 8) });
       batch = persisted.batchId;
       working = persisted.candidates;
+      // 批次号一拿到就写进任务载荷：进程被杀（服务重启）时任务里也已经有批次号，
+      // 重启后的「继续导入」才真的找得到这批候选。
+      await updateBackgroundTaskProgress(taskId, { payload: { batchId: batch, filename, purpose, aiCleaning, styleEvidence, resumable: false } }).catch(() => {});
       reportImmediate({ phase: "queued", message: `审核队列就绪（${working.length} 条），开始导入`, percent: 9, completed: 0, total: working.length });
     }
     reportImmediate({ phase: "preparing", message: aiCleaning ? "准备 AI 清洗" : "准备按表导入", percent: 10, completed: 0, total: working.length });
     let ai = { requested: aiCleaning, used: false, reviewed: 0, total: working.length };
     if (aiCleaning) {
-      const cleaned = await cleanCandidatesWithModel(working, { onProgress: reportImmediate, percentRange: [12, 45] });
+      const cleaned = await cleanCandidatesWithModel(working, { onProgress: reportImmediate, percentRange: [12, 45], shouldCancel });
       ai = cleaned.ai;
       const nested = expandNestedTermCandidates(working);
       if (nested.length) working = [...working, ...nested];
@@ -961,7 +997,8 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
       });
     const result = await commitTermImport(
       { projectId, batchId: batch, filename, candidates: routed, styleEvidence },
-      scaleReport(50, 92)
+      scaleReport(50, 92),
+      shouldCancel
     );
     await progressWrites;
     const summary = result.summary;
@@ -989,15 +1026,23 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
     console.log(`[Kami] 双语资产导入完成：${filename} · 术语 ${summary.terms} 条 · 主 TM ${summary.memories} 条 · 跳过 ${summary.skipped} 条`);
   } catch (error) {
     await progressWrites.catch(() => {});
+    const cancelled = isCancellation(error);
     await updateBackgroundTaskProgress(taskId, {
-      status: "failed",
-      progress: { phase: "failed", message: error.message, percent: 100, completed: 0, total: candidates.length },
+      status: cancelled ? "needs_attention" : "failed",
+      progress: {
+        phase: cancelled ? "cancelled" : "failed",
+        message: error.message,
+        percent: cancelled ? undefined : 100,
+        completed: 0,
+        total: candidates.length
+      },
       // 批次号可能是后台写队列时才拿到的：带上它，任务中心才能用「继续导入」补跑。
       payload: { batchId: batch || batchId, filename, purpose, aiCleaning, styleEvidence, error: error.message, resumable: Boolean(batch || batchId) }
     }).catch(() => {});
-    reportImportProgress(taskId, { status: "failed", phase: "failed", message: error.message, error: error.message, percent: 100 });
-    console.error(`[Kami] 双语资产导入失败：${filename} · ${error.message}`);
+    reportImportProgress(taskId, { status: cancelled ? "needs_attention" : "failed", phase: cancelled ? "cancelled" : "failed", message: error.message, error: cancelled ? "" : error.message, percent: cancelled ? undefined : 100 });
+    console.error(cancelled ? `[Kami] 双语资产导入已中断：${filename} · ${error.message}` : `[Kami] 双语资产导入失败：${filename} · ${error.message}`);
   } finally {
+    endBackgroundRun(taskId);
     scheduleImportProgressCleanup(taskId);
   }
 }
@@ -1009,6 +1054,8 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
  */
 async function runTmImportInBackground({ taskId, projectId, filename, batchId, candidates, styleEvidence, sourceFileType }) {
   let progressWrites = Promise.resolve();
+  const control = beginBackgroundRun(taskId);
+  const shouldCancel = () => control.cancelRequested;
   const report = (update) => {
     reportImportProgress(taskId, { status: "running", ...update });
     progressWrites = progressWrites
@@ -1027,10 +1074,14 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
       fileMode: "tm",
       ai: { used: false, requested: false }
     }, { onProgress: countProgressReport(report, 2, 10) });
+    // 批次号立刻写进任务载荷：服务重启打断时任务中心仍能靠它「继续导入」。
+    persistedBatchId = persisted.batchId;
+    await updateBackgroundTaskProgress(taskId, { payload: { batchId: persisted.batchId, filename, resumable: false } }).catch(() => {});
     report({ phase: "importing", message: `审核队列就绪（${persisted.candidates.length} 条），开始写入主 TM`, percent: 10, completed: 0, total: persisted.candidates.length });
     const result = await commitTermImport(
       { projectId, batchId: persisted.batchId, filename, candidates: persisted.candidates, styleEvidence },
-      scaleProgressReport(report, 10, 92)
+      scaleProgressReport(report, 10, 92),
+      shouldCancel
     );
     await progressWrites;
     const summary = result.summary;
@@ -1055,14 +1106,22 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
     console.log(`[Kami] 人工 TM 导入完成：${filename} · 主 TM ${summary.memories} 条 · 跳过 ${summary.skipped} 条`);
   } catch (error) {
     await progressWrites.catch(() => {});
+    const cancelled = isCancellation(error);
     await updateBackgroundTaskProgress(taskId, {
-      status: "failed",
-      progress: { phase: "failed", message: error.message, percent: 100, completed: 0, total: candidates.length },
-      payload: { batchId, filename, error: error.message, resumable: Boolean(batchId) }
+      status: cancelled ? "needs_attention" : "failed",
+      progress: {
+        phase: cancelled ? "cancelled" : "failed",
+        message: error.message,
+        percent: cancelled ? undefined : 100,
+        completed: 0,
+        total: candidates.length
+      },
+      payload: { batchId: persistedBatchId, filename, error: error.message, resumable: Boolean(persistedBatchId) }
     }).catch(() => {});
-    reportImportProgress(taskId, { status: "failed", phase: "failed", message: error.message, error: error.message, percent: 100 });
-    console.error(`[Kami] 人工 TM 导入失败：${filename} · ${error.message}`);
+    reportImportProgress(taskId, { status: cancelled ? "needs_attention" : "failed", phase: cancelled ? "cancelled" : "failed", message: error.message, error: cancelled ? "" : error.message, percent: cancelled ? undefined : 100 });
+    console.error(cancelled ? `[Kami] 人工 TM 导入已中断：${filename} · ${error.message}` : `[Kami] 人工 TM 导入失败：${filename} · ${error.message}`);
   } finally {
+    endBackgroundRun(taskId);
     scheduleImportProgressCleanup(taskId);
   }
 }
@@ -1191,7 +1250,7 @@ async function trajectoriesForExternalReview(locale, projectId) {
   return [...scoped, ...legacy.filter((trajectory) => runs.get(trajectory.batchId)?.projectId === projectId)];
 }
 
-async function commitTermImport(body, onProgress = null) {
+async function commitTermImport(body, onProgress = null, shouldCancel = null) {
   if (!body.batchId || !Array.isArray(body.candidates)) {
     const error = new Error("导入批次或候选数据无效");
     error.statusCode = 400;
@@ -1200,6 +1259,7 @@ async function commitTermImport(body, onProgress = null) {
   const report = (update) => {
     if (typeof onProgress === "function") onProgress(update);
   };
+  const cancelled = () => typeof shouldCancel === "function" && shouldCancel() === true;
   const total = body.candidates.length;
   const projectId = String(body.projectId || "").trim();
   const projectLibraries = projectId ? await getResourceLibraries(projectId) : [];
@@ -1268,6 +1328,11 @@ async function commitTermImport(body, onProgress = null) {
     termsWritten += saved.length;
   };
   for (const [candidateIndex, candidate] of body.candidates.entries()) {
+    if (cancelled()) {
+      // 已攒在内存里的术语先落库，再中断：这样"继续导入"只需补剩下的。
+      await flushTerms();
+      throw cancellationError(`已中断：已写入 ${imported.length} 条，可在任务中心继续导入`);
+    }
     const decision = { candidateId: candidate.candidateId, status: "rejected", decision: candidate.decision };
     if (!candidate.selected || candidate.existing || candidate.decision === "excluded") {
       recordSkip({ source: candidate.source, locale: candidate.locale, reason: candidate.existing ? "已存在" : "未选择" });
@@ -1465,7 +1530,7 @@ async function translateBatchSegment(body) {
 function startBatchWorker(batchId, backgroundTaskId = "") {
   const existing = batchWorkers.get(batchId);
   if (existing) return existing;
-  const controller = { pauseRequested: false, promise: null, backgroundTaskId };
+  const controller = { pauseRequested: false, cancelRequested: false, promise: null, backgroundTaskId };
   const sessionId = `batch:${batchId}`;
   const heartbeat = setInterval(() => workbenchSessionMonitor?.touch(sessionId), 5_000);
   heartbeat.unref?.();
@@ -1479,10 +1544,12 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
         const completed = selected.filter((segment) => segment.status === "done").length;
         const failed = selected.filter((segment) => segment.status === "error").length;
         await updateBackgroundTaskProgress(backgroundTaskId, {
-          status: run.runState === "completed" ? "completed" : run.runState === "needs_attention" ? "failed" : "in_progress",
+          status: run.runState === "completed" ? "completed" : run.runState === "needs_attention" ? "failed" : run.runnerOptions?.cancelled ? "needs_attention" : "in_progress",
+          // 批次号与"可继续"标记：任务中心的「继续」靠它们找得到这个批次。
+          payload: { batchId: run.batchId, filename: run.filename, resumable: true },
           progress: {
-            phase: run.runState || "running",
-            message: run.runState === "paused" ? "批次已暂停" : `正在翻译：${completed} / ${selected.length}`,
+            phase: run.runnerOptions?.cancelled ? "cancelled" : run.runState || "running",
+            message: run.runnerOptions?.cancelled ? `批次已中断：已完成 ${completed} / ${selected.length} 段，可继续` : run.runState === "paused" ? "批次已暂停" : `正在翻译：${completed} / ${selected.length}`,
             percent: selected.length ? Math.round((completed / selected.length) * 100) : 0,
             completed,
             total: selected.length,
@@ -1495,6 +1562,7 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
     classifyDocument: async (text) => (await classify({ text, hint: "auto", useModel: true })).contentType,
     translateSegment: translateBatchSegment,
     shouldPause: () => controller.pauseRequested,
+    shouldCancel: () => controller.cancelRequested,
     touch: () => workbenchSessionMonitor?.touch(sessionId),
     review: async (run) => runEvolutionReview({
       locale: run.locale,
@@ -1817,7 +1885,9 @@ async function apiHandler(req, res, url) {
       type: "asset_import",
       title: `导入 · ${filename}`,
       projectId,
-      progress: { phase: "queued", message: aiCleaning ? "已排队：先写审核队列，再做 AI 清洗" : "已排队：先写审核队列，再按表导入", total: candidates.length }
+      progress: { phase: "queued", message: aiCleaning ? "已排队：先写审核队列，再做 AI 清洗" : "已排队：先写审核队列，再按表导入", total: candidates.length },
+      // 批次号建任务时就写进去：服务重启打断时，「继续导入」才有批次可用。
+      payload: { batchId: String(body.batchId || ""), filename, purpose, aiCleaning, styleEvidence, resumable: false }
     });
     runAssetImportInBackground({
       taskId: task.id,
@@ -1855,7 +1925,8 @@ async function apiHandler(req, res, url) {
       type: "asset_import",
       title: `续传 · ${filename}`,
       projectId,
-      progress: { phase: "queued", message: "正在续传未完成的导入", total: candidates.length }
+      progress: { phase: "queued", message: "正在续传未完成的导入", total: candidates.length },
+      payload: { batchId, filename, purpose, aiCleaning, styleEvidence, resumable: false }
     });
     runAssetImportInBackground({
       taskId: task.id,
@@ -1968,20 +2039,38 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/term-import/commit") {
     const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const backgroundTaskId = String(body.backgroundTaskId || "");
+    const control = beginBackgroundRun(backgroundTaskId);
     const onProgress = (update) => {
       if (!backgroundTaskId) return;
       updateBackgroundTaskProgress(backgroundTaskId, { progress: update }).catch(() => {});
     };
-    const result = await commitTermImport(body, onProgress);
-    if (backgroundTaskId) {
-      const backgroundTask = await getBackgroundTask(backgroundTaskId);
-      await updateBackgroundTaskProgress(backgroundTaskId, {
-        status: "completed",
-        progress: { phase: "completed", message: "导入完成", percent: 100, completed: 1, total: 1 },
-        payload: { ...(backgroundTask?.payload || {}), summary: result.summary }
-      });
+    try {
+      const result = await commitTermImport(body, onProgress, () => control.cancelRequested);
+      if (backgroundTaskId) {
+        const backgroundTask = await getBackgroundTask(backgroundTaskId);
+        await updateBackgroundTaskProgress(backgroundTaskId, {
+          status: "completed",
+          progress: { phase: "completed", message: "导入完成", percent: 100, completed: 1, total: 1 },
+          payload: { ...(backgroundTask?.payload || {}), summary: result.summary }
+        });
+      }
+      return json(res, 201, { ...result, backgroundTaskId });
+    } catch (error) {
+      if (!isCancellation(error)) throw error;
+      // 用户主动中断：标成"可继续"，不要让它停在"进行中"。
+      if (backgroundTaskId) {
+        const backgroundTask = await getBackgroundTask(backgroundTaskId).catch(() => null);
+        await updateBackgroundTaskProgress(backgroundTaskId, {
+          status: "needs_attention",
+          progress: { ...(backgroundTask?.progress || {}), phase: "cancelled", message: error.message },
+          payload: { ...(backgroundTask?.payload || {}), batchId: String(body.batchId || backgroundTask?.payload?.batchId || ""), resumable: true }
+        }).catch(() => {});
+        reportImportProgress(backgroundTaskId, { status: "needs_attention", phase: "cancelled", message: error.message });
+      }
+      return json(res, 200, { cancelled: true, message: error.message, backgroundTaskId });
+    } finally {
+      endBackgroundRun(backgroundTaskId);
     }
-    return json(res, 201, { ...result, backgroundTaskId });
   }
   if (req.method === "GET" && url.pathname === "/api/provider") {
     return json(res, 200, getProviderConfig());
@@ -3005,6 +3094,23 @@ async function apiHandler(req, res, url) {
     await saveBatchRun({ ...run, runState: "paused" });
     return json(res, 200, { batchId, runState: "paused", waitingForCurrentSegment: Boolean(worker) });
   }
+  if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/cancel$/u.test(url.pathname)) {
+    // 中断批次：跑批循环在下一段开始前停下，已完成段落全部保留；
+    // runState 只有数据库允许的那几个取值，所以中断用「已暂停 + cancelled 标记」表达，
+    // 界面据此显示"已中断"，并且之后能直接「继续」。
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const run = await getBatchRun(batchId);
+    if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    const worker = batchWorkers.get(batchId);
+    if (worker) {
+      worker.cancelRequested = true;
+      return json(res, 202, { batchId, runState: run.runState || "running", cancelling: true, waitingForCurrentSegment: true });
+    }
+    // 没有在跑的 worker（例如服务重启后残留）：直接落成中断状态，等用户决定是否继续。
+    await saveBatchRun({ ...run, runState: "paused", runnerOptions: { ...(run.runnerOptions || {}), cancelled: true } });
+    return json(res, 200, { batchId, runState: "paused", cancelling: false, stopped: true });
+  }
   if (req.method === "GET" && url.pathname === "/api/tasks") {
     const type = url.searchParams.get("type") || "";
     const requestedLocale = url.searchParams.get("locale") || "";
@@ -3124,6 +3230,27 @@ async function apiHandler(req, res, url) {
     }
     workbenchSessionMonitor?.release(backgroundTaskHoldId(id));
     return json(res, 200, { ok: true });
+  }
+  if (req.method === "POST" && /^\/api\/background-tasks\/[^/]+\/cancel$/u.test(url.pathname)) {
+    // 中断：正在本进程里跑的任务置标记，跑批循环在下一个分块边界停下；
+    // 只是"重启后残留的进行中"任务则直接在这里收尾，避免一直显示进行中。
+    const id = decodeURIComponent(url.pathname.slice("/api/background-tasks/".length, -"/cancel".length));
+    const task = await getBackgroundTask(id);
+    if (!task) return json(res, 404, { error: "后台任务不存在" });
+    const control = runningBackgroundTasks.get(id);
+    if (control) {
+      control.cancelRequested = true;
+      return json(res, 202, { id, cancelling: true, resumeAfterCancel: true });
+    }
+    if (!["in_progress", "review"].includes(task.status)) {
+      return json(res, 200, { id, cancelling: false, alreadyStopped: true, status: task.status });
+    }
+    await updateBackgroundTaskProgress(id, {
+      status: "needs_attention",
+      progress: { ...(task.progress || {}), phase: "cancelled", message: "已中断（任务不在运行，可继续导入补齐）" },
+      payload: { ...(task.payload || {}), resumable: Boolean(task.payload?.batchId || task.payload?.resumable) }
+    });
+    return json(res, 200, { id, cancelling: false, stopped: true });
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/background-tasks/")) {
     const id = decodeURIComponent(url.pathname.slice("/api/background-tasks/".length));
@@ -4561,6 +4688,7 @@ function closeServerForAutomaticShutdown() {
 }
 
 async function recoverInterruptedBatchWorkers() {
+  const tasks = await listBackgroundTasks({ limit: 500 });
   for (const project of await getProjects()) {
     const runs = await listBatchRuns({ projectId: project.id, limit: 500 });
     for (const summary of runs) {
@@ -4574,6 +4702,16 @@ async function recoverInterruptedBatchWorkers() {
           ? { ...segment, status: "pending", error: "服务重启后等待继续" }
           : segment)
       });
+      // 对应的后台任务也要收尾，否则任务中心那条「批次翻译」会一直停在"进行中"。
+      const task = tasks.find((item) => item.type === "batch_translation" && item.status === "in_progress" && item.payload?.batchId === run.batchId);
+      if (task) {
+        await saveBackgroundTask({
+          ...task,
+          status: "needs_attention",
+          progress: { ...(task.progress || {}), phase: "interrupted", message: "服务重启导致中断，可在任务中心继续翻译" },
+          payload: { ...(task.payload || {}), batchId: run.batchId, filename: run.filename, resumable: true }
+        });
+      }
       console.log(`[Kami] 已暂停服务重启前未完成的批次：${run.filename}`);
     }
   }

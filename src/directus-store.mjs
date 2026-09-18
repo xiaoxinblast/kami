@@ -1136,13 +1136,14 @@ function summarizeBatchRun(item) {
     batchId: item.id, filename: item.filename || "未命名任务", projectId: item.project_id || "", locale: item.target_locale || "",
     contentType: item.content_type || "general", domain: item.domain || "general", format: item.format || "",
     segmentationMode: item.segmentation_mode || "sentence", status, runState: item.run_state || "ready",
+    runnerOptions: item.runner_options || {},
     totalSegments, completedSegments, failedSegments, qaPending,
     createdAt: item.date_created || null, updatedAt: item.date_updated || item.date_created || null
   };
 }
 
 export async function listDirectusBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
-  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,run_state,task_status,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,run_state,task_status,runner_options,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[filename][_icontains]", String(search).slice(0, 120));

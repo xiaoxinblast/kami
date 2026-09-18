@@ -61,6 +61,7 @@ export async function runServerBatch(batchId, {
   classifyDocument,
   translateSegment,
   shouldPause = () => false,
+  shouldCancel = () => false,
   touch = () => {},
   review = async () => {}
 } = {}) {
@@ -88,6 +89,14 @@ export async function runServerBatch(batchId, {
   for (const subBatch of subBatches) {
     for (const segmentId of subBatch.segmentIds) {
       touch();
+      if (shouldCancel()) {
+        // 中断：当前段跑完就停，已完成的段落全部保留，之后可以「继续」接着翻。
+        run.runState = "paused";
+        run.runnerOptions = { ...options, cancelled: true };
+        run.subBatches = checkpointSubBatches(subBatches, run.segments);
+        await saveRun(run);
+        return run;
+      }
       if (shouldPause()) {
         run.runState = "paused";
         run.subBatches = checkpointSubBatches(subBatches, run.segments);
