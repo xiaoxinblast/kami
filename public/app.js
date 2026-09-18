@@ -1143,7 +1143,7 @@ async function loadPastedTextAsBatch(value) {
 async function setBatchFile(file) {
   if (!file) return;
   if (!/\.(txt|md|docx|xlsx|csv|xliff|mqxliff)$/i.test(file.name)) return toast("请选择 TXT、Markdown、DOCX、XLSX、CSV、XLIFF 或 MQXLIFF 文件");
-  if (file.size > 10 * 1024 * 1024) return toast("文件不能超过 10MB");
+  if (file.size > UPLOAD_FILE_BYTES) return toast(`文件不能超过 ${UPLOAD_FILE_LABEL}`);
   state.batchFile = file;
   state.batchBase64 = "";
   state.batchPreview = null;
@@ -1174,7 +1174,7 @@ async function resetBatch() {
   $("#batchFile").value = "";
   $("#batchPasteText").value = "";
   $("#batchFilePrompt").textContent = "拖入或点击选择文件";
-  $("#batchFileMeta").textContent = "拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 10MB";
+  $("#batchFileMeta").textContent = "拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 20MB";
   $("#batchDropZone").classList.remove("has-file");
   $("#batchSourceMeta").textContent = "尚未载入";
   $("#spreadsheetAnalysis").hidden = true;
@@ -2712,10 +2712,10 @@ async function setImportFiles(files = [], {
   const supported = /\.(xlsx|csv|xliff|mqxliff)$/iu;
   const invalid = selected.find((file) => !supported.test(file.name));
   if (invalid) return toast(`${invalid.name} 不是支持的双语资产格式`);
-  // 与记忆库、批次入口统一：单文件 10MB，一次最多 200 个文件；不再限制单次总量
+  // 与记忆库、批次入口统一：单文件 20MB，一次最多 200 个文件；不再限制单次总量
   //（预检是逐文件请求，请求体积不随文件数量增长）。
   const oversize = selected.find((file) => file.size > MEMORY_IMPORT_FILE_BYTES);
-  if (oversize) return toast(`${oversize.name} 超过单文件 10MB 上限（${formatBytes(oversize.size)}）`);
+  if (oversize) return toast(`${oversize.name} 超过单文件 ${UPLOAD_FILE_LABEL} 上限（${formatBytes(oversize.size)}）`);
   if (selected.length > IMPORT_MAX_FILES) return toast(`一次最多选择 ${IMPORT_MAX_FILES} 个文件，当前 ${selected.length} 个`);
   const resolvedPurpose = purpose || (intent === "terms" ? "term" : readImportPurpose());
   state.importFiles = selected;
@@ -2998,13 +2998,16 @@ function formatBytes(bytes = 0) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-const MEMORY_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+const UPLOAD_FILE_BYTES = 20 * 1024 * 1024;
+const UPLOAD_FILE_LABEL = String(Math.round(UPLOAD_FILE_BYTES / (1024 * 1024))) + "MB";
+/** 兼容旧名字：预检与上传共用同一个单文件上限。 */
+const MEMORY_IMPORT_FILE_BYTES = UPLOAD_FILE_BYTES;
 /** 一次最多选多少个文件：预检是逐文件的，这里只是防止误拖几百个文件把界面卡住。 */
 const IMPORT_MAX_FILES = 200;
 
 function validateMemoryImportFiles(files) {
   const tooBig = files.find((file) => file.size > MEMORY_IMPORT_FILE_BYTES);
-  if (tooBig) return `${tooBig.name} 超过单文件 10MB 上限（${formatBytes(tooBig.size)}）`;
+  if (tooBig) return `${tooBig.name} 超过单文件 ${UPLOAD_FILE_LABEL} 上限（${formatBytes(tooBig.size)}）`;
   if (files.length > IMPORT_MAX_FILES) return `一次最多选择 ${IMPORT_MAX_FILES} 个文件，当前 ${files.length} 个`;
   return "";
 }
@@ -3122,7 +3125,7 @@ function renderAssets() {
 async function setImportFile(file) {
   if (!file) return;
   if (!/\.(xlsx|csv)$/i.test(file.name)) return toast("请选择 .xlsx 或 .csv 表格");
-  if (file.size > 10 * 1024 * 1024) return toast("表格不能超过 10MB");
+  if (file.size > UPLOAD_FILE_BYTES) return toast(`表格不能超过 ${UPLOAD_FILE_LABEL}`);
   state.importFile = file;
   state.importPreview = null;
   state.importCompleted = false;
@@ -3162,7 +3165,7 @@ function resetImport() {
   state.importBatchLearning = [];
   $("#termFile").value = "";
   $("#filePrompt").textContent = "拖入或点击选择双语资产文件";
-  $("#fileMeta").textContent = "支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 10MB；先本地预检，再确认导入";
+  $("#fileMeta").textContent = "支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 20MB；先本地预检，再确认导入";
   $("#dropZone").classList.remove("has-file");
   renderImportFileList($("#importFileList"), [], new Map());
   $("#mappingNote").textContent = "拖入表格后会自动识别结构并生成审核队列。";

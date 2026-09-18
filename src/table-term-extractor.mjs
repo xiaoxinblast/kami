@@ -6,7 +6,7 @@ import { classifyContent, inferContentTags, inferDomainFromText } from "./classi
 
 const HEADER_SCAN_LIMIT = 12;
 const MAX_ROWS = 10_000;
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const DOMAINS = new Set(["game", "marketing", "community", "general"]);
 const SHEET_MODES = new Set(["dialogue", "glossary", "mixed"]);
 const TERM_CATEGORIES = new Set([
@@ -449,7 +449,7 @@ export async function extractTermPairs({ filename, base64, locale = "auto" }, { 
     throw error;
   }
   if (buffer.length > MAX_FILE_BYTES) {
-    const error = new Error("表格不能超过 10MB");
+    const error = new Error("表格不能超过 20MB");
     error.statusCode = 413;
     throw error;
   }

@@ -58,7 +58,7 @@ const MAX_BODY_BYTES = 15 * 1024 * 1024;
 /** 导入类请求要把多个文件按 base64 塞进一个 JSON，额度单独放宽。 */
 const IMPORT_BODY_BYTES = 48 * 1024 * 1024;
 /** 所有导入入口统一的单文件上限（前端同值，两边都要有）。 */
-const IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+const IMPORT_FILE_BYTES = 20 * 1024 * 1024;
 const TERM_AI_CONCURRENCY = 5;
 const TERM_AI_BATCH_SIZE = 24;
 /** 术语批量写入的分块大小；导入 5000+ 条时逐条写会拖到分钟级。 */
@@ -1659,7 +1659,7 @@ async function apiHandler(req, res, url) {
     if (unsupported) return json(res, 400, { error: `人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff：${unsupported.filename}` });
     // 统一单文件上限：xlsx/csv 在解析器里也有同样的闸门，这里补上 XLIFF 这一路。
     const tooLarge = files.find((file) => Buffer.byteLength(String(file.base64 || ""), "base64") > IMPORT_FILE_BYTES);
-    if (tooLarge) return json(res, 400, { error: `${tooLarge.filename} 超过单文件 10MB 上限` });
+    if (tooLarge) return json(res, 400, { error: `${tooLarge.filename} 超过单文件 ${Math.round(IMPORT_FILE_BYTES / (1024 * 1024))}MB 上限` });
     const candidates = [];
     let rowsScanned = 0;
     const fileTypes = new Set();
@@ -1797,7 +1797,7 @@ async function apiHandler(req, res, url) {
     return json(res, 200, await commitTermImport({ ...body, projectId, batchId: persisted.batchId, candidates: persisted.candidates }));
   }
   if (req.method === "POST" && url.pathname === "/api/term-import/preview") {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const requestedLocale = body.locale === "auto" ? "auto" : assertActiveLocale(body.locale || "zh-CN");
     const scopedBody = { ...body, locale: requestedLocale };
     const progressId = String(body.progressId || "").trim();
@@ -1854,7 +1854,7 @@ async function apiHandler(req, res, url) {
     return json(res, progress ? 200 : 404, progress || { error: "识别任务尚未开始" });
   }
   if (req.method === "POST" && url.pathname === "/api/term-import/commit") {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const backgroundTaskId = String(body.backgroundTaskId || "");
     const onProgress = (update) => {
       if (!backgroundTaskId) return;
@@ -2841,7 +2841,7 @@ async function apiHandler(req, res, url) {
     return json(res, 200, { run: await saveTrainingRun({ id: run.id, scope: learningScope(run), payload: advanced }) });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/prepare") {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const locale = assertActiveLocale(body.locale || "zh-CN");
     const analyzeSpreadsheet = body.useAiStructure === false ? undefined : (snapshot, ruleAnalysis) => analyzeSpreadsheetStructureWithModel(snapshot, ruleAnalysis, locale);
     const project = body.projectId ? await getProject(String(body.projectId)) : null;

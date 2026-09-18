@@ -96,14 +96,26 @@ test("跳过原因与任务文案都做了截断，界面不会被长报错撑�
   assert.match(app, /<strong title="\$\{escapeHtml\(payloadText \|\| ""\)\}">/u);
 });
 
-test("导入体积规则三条路径统一：单文件 10MB、只限文件个数", async () => {
+test("导入体积规则各入口统一：单文件 20MB、只限文件个数", async () => {
   const app = await read("../public/app.js");
   assert.doesNotMatch(app, /MEMORY_IMPORT_TOTAL_BYTES/u);
-  assert.match(app, /const MEMORY_IMPORT_FILE_BYTES = 10 \* 1024 \* 1024;/u);
+  assert.match(app, /const UPLOAD_FILE_BYTES = 20 \* 1024 \* 1024;/u);
   assert.match(app, /const IMPORT_MAX_FILES = 200;/u);
   const server = await read("../server.mjs");
-  assert.match(server, /const IMPORT_FILE_BYTES = 10 \* 1024 \* 1024;/u);
+  assert.match(server, /const IMPORT_FILE_BYTES = 20 \* 1024 \* 1024;/u);
   assert.match(server, /const tooLarge = files\.find\(\(file\) => Buffer\.byteLength\(String\(file\.base64 \|\| ""\), "base64"\) > IMPORT_FILE_BYTES\);/u);
   const html = await read("../public/index.html");
-  assert.match(html, /单个文件不超过 10MB/u);
+  assert.match(html, /单个文件不超过 20MB/u);
+  // 文件类请求的 body 额度必须容得下 20MB 文件 base64 后的体积（约 27MB）。
+  assert.match(server, /const IMPORT_BODY_BYTES = 48 \* 1024 \* 1024;/u);
+  for (const route of ["/api/term-import/preview", "/api/term-import/commit", "/api/batch/prepare"]) {
+    const index = server.indexOf(`url.pathname === "${route}"`);
+    assert.ok(index > 0, `找不到路由 ${route}`);
+    assert.match(server.slice(index, index + 220), /readJsonBody\(req, \{ limitBytes: IMPORT_BODY_BYTES \}\)/u, `${route} 需要放宽请求体额度`);
+  }
+  // 解析器侧的上限也要跟着改，否则 20MB 文件仍会被拒。
+  const extractor = await read("../src/table-term-extractor.mjs");
+  assert.match(extractor, /const MAX_FILE_BYTES = 20 \* 1024 \* 1024;/u);
+  const batchDocument = await read("../src/batch-document.mjs");
+  assert.match(batchDocument, /const MAX_FILE_BYTES = 20 \* 1024 \* 1024;/u);
 });
