@@ -2287,8 +2287,15 @@ function renderBackgroundTaskRow(task) {
   const canResumeImport = task.taskType === "term_import" && task.status === "review" && task.payload?.batchId;
   const canContinueImport = resumableImportTask(task);
   const canCancel = task.status === "in_progress";
+  // 导入类任务会把审校稿接回学习轨迹：接回多少条、多少条因歧义/找不到原文没接上，
+  // 用户要能在任务行直接看到，不用去翻任务 payload。
+  const trajectoryText = summary && summary.trajectoriesLinked != null
+    ? ` · 接回轨迹 ${summary.trajectoriesLinked} 条${(Number(summary.trajectoryAmbiguous) || Number(summary.trajectoryUnmatched))
+      ? `（歧义 ${summary.trajectoryAmbiguous ?? 0} / 未匹配 ${summary.trajectoryUnmatched ?? 0}）`
+      : ""}`
+    : "";
   const payloadText = summary
-    ? `术语 ${summary.terms ?? 0} · 译例 ${summary.memories ?? 0} · 风格草稿 ${summary.styleProfiles ?? 0} · 跳过 ${summary.skipped ?? 0}${summary.skippedByReason ? `（${Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join("；")}）` : ""}`
+    ? `术语 ${summary.terms ?? 0} · 译例 ${summary.memories ?? 0} · 风格草稿 ${summary.styleProfiles ?? 0} · 跳过 ${summary.skipped ?? 0}${summary.skippedByReason ? `（${Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join("；")}）` : ""}${trajectoryText}`
     : task.payload?.error ? `错误：${task.payload.error}` : "";
   return `<article class="task-row" data-task-id="${escapeHtml(task.id)}">
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="task-status ${escapeHtml(statusClass)}">${escapeHtml(statusLabel)}</span><span class="task-type-chip">${escapeHtml(BACKGROUND_TASK_LABELS[task.taskType] || "后台")}</span></div><small title="${escapeHtml(message || payloadText || "")}">${locale ? `${escapeHtml(locale.label)} · ` : ""}${escapeHtml(message || payloadText || contentTypeLabel(task.contentType))} · ${formatTaskTime(task.updatedAt)}</small></div>

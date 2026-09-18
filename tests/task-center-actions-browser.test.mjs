@@ -71,6 +71,20 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
               id: "qa-1", type: "autoqa", title: "dialogue.xlsx 质检", locale: "zh-CN",
               status: "completed", contentType: "general", domain: "game", overallScore: 87,
               totalSegments: 12, completedSegments: 12, failedSegments: 0, qaPending: 3, updatedAt: "2026-09-18T12:00:00Z"
+            },
+            {
+              id: "task-3", type: "background", taskType: "term_import", title: "导入 · Asia_batch18_review.mqxliff", locale: "zh-CN",
+              status: "completed", contentType: "general", domain: "general", totalSegments: 67, completedSegments: 67,
+              progress: { phase: "completed", message: "导入完成：术语 0 条、主 TM 64 条、跳过 3 条", percent: 100, completed: 67, total: 67 },
+              payload: {
+                batchId: "b-10", filename: "Asia_batch18_review.mqxliff",
+                summary: {
+                  imported: 64, terms: 0, memories: 64, styleProfiles: 1, skipped: 3,
+                  skippedByReason: { "库内已有译法：巴尔": 3 },
+                  trajectoriesLinked: 60, trajectoryAmbiguous: 2, trajectoryUnmatched: 2
+                }
+              },
+              updatedAt: "2026-09-18T12:00:00Z"
             }
           ])
         });
@@ -182,6 +196,15 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     const stoppedImport = page.locator('#taskList .task-row[data-task-id="task-2"]');
     assert.match(await stoppedImport.textContent(), /已中断/u);
     assert.equal(await stoppedImport.locator('[data-action="continue-import"]').count(), 1, "中断的导入要给「继续导入」");
+
+    // 导入完成的任务行要显示审校稿接回了多少条学习轨迹，不能只报术语/译例/跳过
+    const finishedImport = page.locator('#taskList .task-row[data-task-id="task-3"] .task-qa strong');
+    assert.match(await finishedImport.textContent(), /接回轨迹 60 条（歧义 2 \/ 未匹配 2）/u);
+    assert.match(await finishedImport.textContent(), /库内已有译法：巴尔 3/u);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/task-center-trajectory-count.png`, animations: "disabled" });
+    }
 
     // 审校回填：批次行给出入口，上传审校后的文件后弹报告（匹配/未匹配逐条列出）
     assert.equal(await interruptedRow.locator('[data-action="import-review"]').count(), 1, "完成过段落的批次要给「导入审校结果」");
