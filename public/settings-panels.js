@@ -85,14 +85,29 @@ function fieldMarkup(field, value, extra = "") {
 export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
   let active = "connection";
   let provider = null;
+  /**
+   * 面板内的未保存编辑。切分类会整块重绘，如果直接按保存值渲染，
+   * 用户刚输入的地址/密钥/价格就没了——只有关窗或保存成功才该重置。
+   */
+  let draft = null;
   let saving = false;
   const find = (selector) => dialog.querySelector(selector);
+
+  function draftFromProvider(source) {
+    const values = {};
+    for (const field of Object.values(providerFields).flat()) {
+      const secret = field.type === "password";
+      values[field.name] = secret ? "" : String(readPath(source, field.name) ?? "");
+    }
+    return values;
+  }
 
   function render(status = "") {
     const body = providerTabs.map((tab) => `<section class="sp-panel" data-panel="${tab.id}" ${tab.id === active ? "" : "hidden"}>
       <div class="sp-page-heading"><span class="sp-eyebrow">${escape(tab.subtitle)}</span><h3>${escape(tab.title)}</h3><p>${tab.id === "connection" ? "配置服务入口和鉴权；密钥保存后不会回显明文。" : tab.id === "models" ? "把不同风险等级的任务交给不同模型，留空会自动复用主模型。" : tab.id === "embedding" ? "配置语义向量检索；留空会回退本地 CJK 索引。" : "填写真实单价后，评测成本门禁才能计算成本和判断预算。"}</p></div>
       <div class="sp-card">${providerFields[tab.id].map((field) => {
-        const value = field.name === "apiKey" || field.name === "embeddingApiKey" ? "" : readPath(provider, field.name);
+        const saved = field.name === "apiKey" || field.name === "embeddingApiKey" ? "" : readPath(provider, field.name);
+        const value = draft && Object.hasOwn(draft, field.name) ? draft[field.name] : saved;
         const placeholder = field.name === "apiKey" ? (provider.apiKeyConfigured ? "已配置 · 留空保持不变" : "未配置 · 如需鉴权请填写") : field.name === "embeddingApiKey" ? (provider.embeddingApiKeyConfigured ? "已配置 · 留空保持不变" : "未配置 · 留空复用主 Key") : field.placeholder;
         return fieldMarkup({ ...field, placeholder }, value);
       }).join("")}</div>
@@ -113,14 +128,14 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
 
   async function submit() {
     if (saving) return;
-    // 必须先取值再重绘：render() 会用内存里的旧配置重建整个面板，
-    // 先 render 会把用户刚输入的模型地址、价格等直接丢掉（历史 bug）。
-    const submitted = Object.fromEntries(new FormData(find(".sp-form")));
+    // 必须先取值再重绘：render() 会用内存里的配置重建整个面板。
+    const submitted = draft ? { ...draft } : Object.fromEntries(new FormData(find(".sp-form")));
     saving = true;
     render();
     try {
       const saved = await api("/api/provider", { method: "POST", body: JSON.stringify(submitted) });
       provider = saved;
+      draft = draftFromProvider(saved);
       onSaved?.(saved);
       // 保存成功不关闭面板：留下来核对自己刚填的值，关闭交给取消/×。
       saving = false;
@@ -141,12 +156,18 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
     }
     if (button.matches("[data-close-panel]")) dialog.close();
   });
+  dialog.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!draft || !input?.name || !Object.hasOwn(draft, input.name)) return;
+    draft[input.name] = input.value;
+  });
   dialog.addEventListener("submit", (event) => { event.preventDefault(); submit(); });
 
   return {
     open(nextProvider) {
       if (dialog.open) return;
       provider = nextProvider;
+      draft = draftFromProvider(nextProvider);
       active = "connection";
       saving = false;
       render();
@@ -181,6 +202,8 @@ function parameterSections(group, fields) {
 export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
   let active = "quality";
   let payload = null;
+  /** 未保存的编辑：切分类会整块重绘，只有关窗或保存成功才重置。 */
+  let draft = null;
   let saving = false;
   const find = (selector) => dialog.querySelector(selector);
 
@@ -188,13 +211,15 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
     const groups = new Map(payload.groups.map((group) => [group.group, group]));
     const renderFields = (fields) => fields.map((field) => {
       const override = payload.environmentOverrides?.[field.path];
-      const value = readPath(payload.settings, field.path) ?? field.default;
+      const edited = draft ? readPath(draft, field.path) : undefined;
+      const value = edited ?? readPath(payload.settings, field.path) ?? field.default;
       const extra = `data-path="${escape(field.path)}" ${override ? "disabled" : ""}`;
       return `<label class="sp-field${override ? " overridden" : ""}"><span><strong>${escape(field.label)}</strong><small>${escape(field.hint)}</small>${override ? `<em>由环境变量 ${escape(override.variable)} 接管</em>` : ""}</span><div class="sp-input"><input type="number" ${extra} value="${escape(String(value))}" min="${field.min}" max="${field.max}" step="${field.step}" /><small>${field.min} ~ ${field.max}</small></div></label>`;
     }).join("");
     const body = parameterTabs.map((tab) => {
       if (tab.id === "orthography") {
-        const bracketRows = Object.entries(payload.locales).map(([locale, label]) => `<label class="sp-field"><span><strong>${escape(label)}</strong><small>${escape(locale)}</small></span><div class="sp-input"><select data-bracket="${escape(locale)}">${payload.titleBracketChoices.map((choice) => `<option value="${escape(choice)}"${payload.settings.orthography?.titleBrackets?.[locale] === choice ? " selected" : ""}>${escape(choice || "不检查")}</option>`).join("")}</select></div></label>`).join("");
+        const source = draft?.orthography?.titleBrackets || payload.settings.orthography?.titleBrackets || {};
+        const bracketRows = Object.entries(payload.locales).map(([locale, label]) => `<label class="sp-field"><span><strong>${escape(label)}</strong><small>${escape(locale)}</small></span><div class="sp-input"><select data-bracket="${escape(locale)}">${payload.titleBracketChoices.map((choice) => `<option value="${escape(choice)}"${source[locale] === choice ? " selected" : ""}>${escape(choice || "不检查")}</option>`).join("")}</select></div></label>`).join("");
         const shareFields = groups.get("share")?.fields || [];
         return `<section class="sp-panel" data-panel="${tab.id}" ${tab.id === active ? "" : "hidden"}><div class="sp-page-heading"><span class="sp-eyebrow">${escape(tab.subtitle)}</span><h3>${escape(tab.title)}</h3><p>控制分享页拆解规模，并配置作品名使用哪对括号。</p></div>${shareFields.length ? `<div class="sp-card"><h4>分享页</h4>${renderFields(shareFields)}</div>` : ""}<div class="sp-card"><h4>作品名括号约定</h4>${bracketRows}</div></section>`;
       }
@@ -234,6 +259,7 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
     try {
       const result = await api("/api/settings", { method: "POST", body: JSON.stringify({ settings: submitted }) });
       payload = { ...payload, ...result };
+      draft = structuredClone(payload.settings);
       onSaved?.(result);
       // 保存后留在面板里：被自动校正的项要看得见，也想再改一处时不用重开。
       saving = false;
@@ -254,6 +280,7 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
     try {
       const result = await api("/api/settings", { method: "POST", body: JSON.stringify({ reset: true }) });
       payload = { ...payload, ...result };
+      draft = structuredClone(payload.settings);
       saving = false;
       render(result.notes || []);
       onSaved?.(result);
@@ -273,12 +300,26 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
     if (button.matches("[data-close-panel]")) dialog.close();
     if (button.matches("[data-reset]")) reset();
   });
+  dialog.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!input || !draft) return;
+    if (input.matches?.("input[data-path]")) {
+      writePath(draft, input.dataset.path, Number(input.value));
+      return;
+    }
+    if (input.matches?.("select[data-bracket]")) {
+      if (!draft.orthography) draft.orthography = { titleBrackets: {} };
+      if (!draft.orthography.titleBrackets) draft.orthography.titleBrackets = {};
+      draft.orthography.titleBrackets[input.dataset.bracket] = input.value;
+    }
+  });
   dialog.addEventListener("submit", (event) => { event.preventDefault(); submit(); });
 
   return {
     async open() {
       if (dialog.open) return;
       payload = await api("/api/settings");
+      draft = structuredClone(payload.settings);
       active = "quality";
       saving = false;
       render();

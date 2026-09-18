@@ -16,14 +16,23 @@ test("术语库和风格指导页面提供各自的上传入口", async () => {
 });
 
 test("双语资产导入在上传前就能选术语/TM，并可选 AI 清洗与风格证据", async () => {
-  const [html, script] = await Promise.all([
+  const [html, script, styles] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
-    readFile(new URL("../public/app.js", import.meta.url), "utf8")
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8")
   ]);
   assert.match(html, /name="importPurpose" value="term"/u);
   assert.match(html, /name="importPurpose" value="tm"/u);
   assert.match(html, /id="importAiCleaning"/u);
   assert.match(html, /id="importStyleEvidence"/u);
+  // 去向用分段开关、勾选用自绘方框：原生控件在窄列里会被挤成竖排单字/超大复选框。
+  assert.match(html, /class="import-purpose-switch"/u);
+  assert.match(html, /class="import-purpose-option"/u);
+  assert.match(html, /class="import-toggle"/u);
+  assert.match(html, /class="import-toggle-box"/u);
+  assert.match(styles, /\.import-purpose-switch \{ display: flex;/u);
+  assert.match(styles, /\.import-toggle-box \{ grid-column: 1;/u);
+  assert.match(styles, /\.import-toggle > input \{ position: absolute; width: 1px;/u);
   // 预检弹窗里保留最终确认用的开关与只读去向说明。
   assert.match(html, /id="assetPreflightAiCleaning"/u);
   assert.match(html, /id="assetPreflightStyleEvidence"/u);
@@ -44,6 +53,15 @@ test("记忆库支持批量选择文件导入，并可选择是否写入风格�
   assert.match(script, /state\.memoryImportFiles = \[\.\.\.event\.target\.files\]/u);
   assert.match(script, /files: await Promise\.all\(files\.map\(async \(file\) => \(\{ filename: file\.name, base64: await fileToBase64\(file\) \}\)\)\)/u);
   assert.match(script, /candidates, styleEvidence: state\.memoryStyleEvidence \}\)/u);
+});
+
+test("术语库列表显示原表注释", async () => {
+  const [script, styles] = await Promise.all([
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8")
+  ]);
+  assert.match(script, /class="asset-note" title="\$\{escapeHtml\(term\.note\)\}"/u);
+  assert.match(styles, /\.asset-note \{ grid-column: 1\/-1;/u);
 });
 
 test("双语资产导入在前端按后台任务展示进度，并可续跑", async () => {

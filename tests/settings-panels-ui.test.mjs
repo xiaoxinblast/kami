@@ -69,3 +69,32 @@ test("项目设置保存后留在面板里，不自动关闭", async () => {
   assert.doesNotMatch(body, /dialog\.close\(\)/u);
   assert.match(body, /已保存 · /u);
 });
+
+/**
+ * 回归：面板切分类会整块重绘，未保存的编辑必须放在草稿里渲染，
+ * 否则用户切一下分类再切回来，刚输入的地址/参数就没了。
+ */
+test("两个设置面板都用草稿渲染，切分类不丢未保存输入", async () => {
+  const panels = await readFile(new URL("../public/settings-panels.js", import.meta.url), "utf8");
+  assert.match(panels, /let draft = null;/u);
+  // 模型设置：打开/保存时重建草稿，渲染优先读草稿。
+  assert.match(panels, /function draftFromProvider\(source\)/u);
+  assert.match(panels, /const value = draft && Object\.hasOwn\(draft, field\.name\) \? draft\[field\.name\] : saved;/u);
+  assert.match(panels, /draft = draftFromProvider\(saved\);/u);
+  assert.match(panels, /draft = draftFromProvider\(nextProvider\);/u);
+  // 参数设置：草稿参与渲染，勾选与数值都写回草稿。
+  assert.match(panels, /const edited = draft \? readPath\(draft, field\.path\) : undefined;/u);
+  assert.match(panels, /const source = draft\?\.orthography\?\.titleBrackets \|\| payload\.settings\.orthography\?\.titleBrackets \|\| \{\};/u);
+  assert.match(panels, /draft = structuredClone\(payload\.settings\);/u);
+  assert.match(panels, /writePath\(draft, input\.dataset\.path, Number\(input\.value\)\);/u);
+  assert.match(panels, /draft\.orthography\.titleBrackets\[input\.dataset\.bracket\] = input\.value;/u);
+  // 只靠 input 事件维护草稿：click 里的分类切换不能顺手把草稿清掉。
+  assert.equal((panels.match(/dialog\.addEventListener\("input"/gu) || []).length, 2);
+});
+
+test("浏览器回归测试覆盖设置面板的草稿行为", async () => {
+  const browserTest = await readFile(new URL("./settings-panels-browser.test.mjs", import.meta.url), "utf8");
+  assert.match(browserTest, /切分类后 Base URL 不应被重置/u);
+  assert.match(browserTest, /关窗未保存应丢弃编辑/u);
+  assert.match(browserTest, /保存后不应自动关闭面板/u);
+});

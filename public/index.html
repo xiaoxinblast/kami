@@ -190,9 +190,13 @@
             <article class="panel upload-panel smart-upload-panel">
               <span class="card-kicker">01 · DROP FILE</span><h2>上传日语与简体中文对照表</h2>
               <div class="import-purpose" id="importPurposeOptions">
-                <div class="import-purpose-row"><span>本次导入</span><div class="import-purpose-choices" role="radiogroup" aria-label="本次导入类型"><label><input type="radio" name="importPurpose" value="term" checked /><span>术语表</span><small>写入术语库</small></label><label><input type="radio" name="importPurpose" value="tm" /><span>人工 TM</span><small>写入主记忆库</small></label></div></div>
-                <label class="import-purpose-toggle" id="importAiCleaningRow"><input type="checkbox" id="importAiCleaning" /><span><strong>导入前先做 AI 清洗</strong><small>默认按表直接导入；打开后让模型逐条判定术语 / 句段，几千行会明显变慢。</small></span></label>
-                <label class="import-purpose-toggle"><input type="checkbox" id="importStyleEvidence" /><span><strong>作为风格学习证据</strong><small>人工 TM 默认勾选；术语表默认不勾。</small></span></label>
+                <div class="import-purpose-head"><span>本次导入</span><small>先定类型，再拖入文件</small></div>
+                <div class="import-purpose-switch" role="radiogroup" aria-label="本次导入类型">
+                  <label class="import-purpose-option"><input type="radio" name="importPurpose" value="term" checked /><span>术语表</span><small>短词条入术语库，完整句段入主 TM</small></label>
+                  <label class="import-purpose-option"><input type="radio" name="importPurpose" value="tm" /><span>人工 TM</span><small>整批作为人工确认译文写入主 TM</small></label>
+                </div>
+                <label class="import-toggle" id="importAiCleaningRow"><input type="checkbox" id="importAiCleaning" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>导入前先做 AI 清洗</strong><small>默认按表直接导入；打开后让模型逐条判定术语 / 句段，几千行会明显变慢。</small></span></label>
+                <label class="import-toggle"><input type="checkbox" id="importStyleEvidence" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>作为风格学习证据</strong><small>人工 TM 默认勾选；术语表默认不勾。</small></span></label>
               </div>
               <label class="drop-zone" id="dropZone" for="termFile">
                 <input id="termFile" type="file" accept=".xlsx,.csv,.xliff,.mqxliff" multiple hidden />
@@ -263,7 +267,7 @@
           <article class="panel asset-list-panel">
             <div class="panel-head"><div><span class="card-kicker">PROJECT TM</span><h2>记忆库 TM</h2><p class="panel-caption">主 TM 接收人工确认译文，工作 TM 接收通过 QA 的机器译文，参考 TM 只读参与检索。</p></div><div class="asset-count" id="memoryCount">0 条</div></div>
             <div class="task-toolbar"><label class="drop-zone compact"><input id="memoryFile" type="file" accept=".xliff,.mqxliff,.xlsx,.csv" multiple hidden /><strong>导入人工 TM</strong><small>支持 XLSX / CSV / XLIFF / MQXLIFF，可一次选择多个文件</small></label><button class="button secondary" id="memoryImportButton" type="button" disabled>预检 TM</button></div>
-            <label class="import-purpose-toggle memory-evidence-toggle"><input type="checkbox" id="memoryStyleEvidence" checked /><span><strong>作为风格学习证据</strong><small>勾选后这批人工 TM 同时进入风格证据池，攒够条数会参与风格蒸馏；取消勾选则只写主 TM。</small></span></label>
+            <label class="import-toggle memory-evidence-toggle"><input type="checkbox" id="memoryStyleEvidence" checked /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>作为风格学习证据</strong><small>勾选后这批人工 TM 同时进入风格证据池，攒够条数会参与风格蒸馏；取消勾选则只写主 TM。</small></span></label>
             <div class="mapping-note" id="memoryImportNote">选择文件后先预检；memoQ 等工具审校后的双语文件会写入主 TM，并自动接回当前项目中可唯一定位的原翻译轨迹。</div>
             <div class="candidate-table-wrap" id="memoryImportPreview" hidden>
               <table class="candidate-table"><thead><tr><th>写入</th><th>条目 ID</th><th>日语原文</th><th>简体中文译文</th><th>来源</th></tr></thead><tbody id="memoryImportPreviewBody"></tbody></table>
@@ -464,8 +468,8 @@
         <div class="dialog-head"><div><span class="card-kicker">ASSET PREFLIGHT</span><h2>确认双语资产去向</h2></div><button class="icon-button" type="button" data-close="assetPreflightDialog" aria-label="关闭">×</button></div>
         <p class="panel-caption" id="assetPreflightSummary">正在本地识别文件……</p>
         <div class="asset-preflight-options" id="assetPreflightOptions">
-          <label id="assetPreflightAiRow"><input type="checkbox" id="assetPreflightAiCleaning" /><span><strong>先做 AI 清洗</strong><small>默认按表直接导入（本地规则分流）；打开后模型逐条判定，几千行会明显变慢。</small></span></label>
-          <label><input type="checkbox" id="assetPreflightStyleEvidence" /><span><strong>作为风格学习证据</strong><small>人工 TM 默认写入证据池；术语表默认只写术语库与主 TM。</small></span></label>
+          <label class="import-toggle" id="assetPreflightAiRow"><input type="checkbox" id="assetPreflightAiCleaning" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>先做 AI 清洗</strong><small>默认按表直接导入（本地规则分流）；打开后模型逐条判定，几千行会明显变慢。</small></span></label>
+          <label class="import-toggle"><input type="checkbox" id="assetPreflightStyleEvidence" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>作为风格学习证据</strong><small>人工 TM 默认写入证据池；术语表默认只写术语库与主 TM。</small></span></label>
         </div>
         <div class="candidate-table-wrap" id="assetPreflightTableWrap"><table class="candidate-table"><thead><tr><th>文件</th><th>识别类型</th><th>条目数</th><th>导入去向</th><th>风格证据 / 异常</th></tr></thead><tbody id="assetPreflightBody"></tbody></table></div>
         <div class="import-progress" id="assetImportProgress" hidden>

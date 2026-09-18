@@ -119,8 +119,12 @@ test("项目设置浏览器交互、失败恢复与响应式布局", { skip: !pr
     assert.equal(await dialog.isVisible(), true);
     await page.evaluate(() => { window.failSave = false; });
     await page.locator("[data-save]").click();
-    await dialog.waitFor({ state: "hidden" });
+    // 保存成功不再自动关闭面板：留在原处显示已保存，关闭交给取消/×。
+    await page.getByText(/已保存/).waitFor();
+    assert.equal(await dialog.isVisible(), true);
     assert.equal(await page.evaluate(() => window.writes.filter((request) => request.method === "POST").length), 1);
+    await page.locator("[data-close-settings]").click();
+    await dialog.waitFor({ state: "hidden" });
     await reopen();
     await selectTab("matching");
     assert.equal(await page.locator('[data-setting="tm.llmMinRelevance"]').inputValue(), "0");

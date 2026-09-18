@@ -37,6 +37,9 @@ export function createProjectWizard(dialog, {
   let tmFile = null;
   let tmPreview = null;
   let styleFile = null;
+  // 步骤内的勾选状态放在状态里：选文件会触发整块重绘，直接从 DOM 读会被重置。
+  let termsAiCleaning = false;
+  let tmStyleEvidence = true;
   let busy = false;
   let error = "";
   const summary = [];
@@ -51,6 +54,8 @@ export function createProjectWizard(dialog, {
     tmFile = null;
     tmPreview = null;
     styleFile = null;
+    termsAiCleaning = false;
+    tmStyleEvidence = true;
     busy = false;
     error = "";
     summary.length = 0;
@@ -71,7 +76,7 @@ export function createProjectWizard(dialog, {
     }
     if (step.id === "terms") {
       return `${filePicker({ id: "terms", accept: ".xlsx,.csv,.xliff,.mqxliff", multiple: true, files: termFiles, title: "选择术语表文件", hint: "支持 XLSX / CSV / XLIFF / MQXLIFF，可多选" })}
-        <label class="pw-toggle"><input type="checkbox" data-terms-ai-cleaning /><span><strong>导入前先做 AI 清洗</strong><small>默认按表直接导入（本地规则分流：短词条进术语库、完整句段进主 TM）。打开后让模型逐条判定，几千行会明显变慢。</small></span></label>
+        <label class="pw-toggle"><input type="checkbox" data-terms-ai-cleaning ${termsAiCleaning ? "checked" : ""} /><span><strong>导入前先做 AI 清洗</strong><small>默认按表直接导入（本地规则分流：短词条进术语库、完整句段进主 TM）。打开后让模型逐条判定，几千行会明显变慢。</small></span></label>
         <div class="pw-note"><strong>下一步会打开预检窗口</strong><p>确认后进入后台导入并显示进度；关掉窗口也会继续跑完，结果在任务中心可查。</p></div>`;
     }
     if (step.id === "tm") {
@@ -80,7 +85,7 @@ export function createProjectWizard(dialog, {
         : "";
       return `${filePicker({ id: "tm", accept: ".xlsx,.csv,.xliff,.mqxliff", files: tmFile ? [tmFile] : [], title: "选择 TM 文件", hint: "支持 XLSX / CSV / XLIFF / MQXLIFF" })}
         ${preview}
-        <label class="pw-toggle"><input type="checkbox" data-tm-style-evidence checked /><span><strong>写入风格学习证据</strong><small>人工确认译文是风格学习最可信的证据；取消勾选则只写主 TM。</small></span></label>
+        <label class="pw-toggle"><input type="checkbox" data-tm-style-evidence ${tmStyleEvidence ? "checked" : ""} /><span><strong>写入风格学习证据</strong><small>人工确认译文是风格学习最可信的证据；取消勾选则只写主 TM。</small></span></label>
         <div class="pw-note"><strong>下一步会写入主 TM</strong><p>未选择文件时直接下一步即可跳过；导入后仍可在记忆库页面查看。</p></div>`;
     }
     if (step.id === "style") {
@@ -151,13 +156,13 @@ export function createProjectWizard(dialog, {
         summary.push(`待译原文件已导入：${sourceFile.name}`);
         sourceFile = null;
       } else if (step.id === "terms" && termFiles.length) {
-        const aiCleaning = Boolean(find("[data-terms-ai-cleaning]")?.checked);
+        const aiCleaning = termsAiCleaning;
         const result = await onImportTerms(termFiles, { aiCleaning, styleEvidence: false });
         if (result?.submitted) summary.push(`已提交后台导入：${fileNames(termFiles)}${aiCleaning ? "（先做 AI 清洗）" : ""}`);
         else summary.push(`术语表未导入：${fileNames(termFiles)}`);
         termFiles = [];
       } else if (step.id === "tm" && tmFile) {
-        const styleEvidence = Boolean(find("[data-tm-style-evidence]")?.checked);
+        const styleEvidence = tmStyleEvidence;
         if (!tmPreview) tmPreview = await onPreviewTm(tmFile);
         if (tmPreview?.candidates?.length) {
           await onCommitTm(tmPreview, { styleEvidence });
@@ -219,6 +224,15 @@ export function createProjectWizard(dialog, {
     const input = event.target;
     if (input.matches("[data-name], [data-description]")) {
       projectDraft[input.matches("[data-name]") ? "name" : "description"] = input.value;
+      return;
+    }
+    // 勾选项只更新状态、不重绘：重绘会把刚勾上的选择又抹回去。
+    if (input.matches("[data-terms-ai-cleaning]")) {
+      termsAiCleaning = input.checked;
+      return;
+    }
+    if (input.matches("[data-tm-style-evidence]")) {
+      tmStyleEvidence = input.checked;
       return;
     }
     if (!input.matches("[data-file]")) return;

@@ -58,7 +58,14 @@ test("新建项目向导：术语步骤可选 AI 清洗，TM 步骤默认写入�
     readFile(new URL("../public/app.js", import.meta.url), "utf8")
   ]);
   assert.match(wizard, /data-terms-ai-cleaning/u);
-  assert.match(wizard, /data-tm-style-evidence checked/u);
+  // 勾选状态保存在状态里并按状态渲染：选文件会触发重绘，直接读 DOM 会被重置。
+  assert.match(wizard, /let termsAiCleaning = false;/u);
+  assert.match(wizard, /let tmStyleEvidence = true;/u);
+  assert.match(wizard, /data-terms-ai-cleaning \$\{termsAiCleaning \? "checked" : ""\}/u);
+  assert.match(wizard, /data-tm-style-evidence \$\{tmStyleEvidence \? "checked" : ""\}/u);
+  assert.match(wizard, /if \(input\.matches\("\[data-terms-ai-cleaning\]"\)\) \{\s*\n\s*termsAiCleaning = input\.checked;\s*\n\s*return;/u);
+  assert.match(wizard, /const aiCleaning = termsAiCleaning;/u);
+  assert.match(wizard, /const styleEvidence = tmStyleEvidence;/u);
   assert.match(wizard, /const result = await onImportTerms\(termFiles, \{ aiCleaning, styleEvidence: false \}\)/u);
   assert.match(wizard, /if \(result\?\.submitted\) summary\.push\(`已提交后台导入：/u);
   assert.doesNotMatch(wizard, /术语表已进入审核/u);
