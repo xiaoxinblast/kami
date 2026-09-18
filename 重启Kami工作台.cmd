@@ -10,6 +10,11 @@ echo Stopping any running Kami server...
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\stop-kami-server.ps1"
 if errorlevel 1 goto :failed
 
+rem Close the previous workbench window as well, otherwise old pages stay open and
+rem keep talking to the restarted server.
+echo Closing the previous Kami browser window...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\close-kami-browser.ps1"
+
 echo Starting Kami workbench again...
 call ".\scripts\launch-kami.cmd"
 exit /b %errorlevel%
