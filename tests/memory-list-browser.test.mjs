@@ -33,17 +33,17 @@ test("记忆库显示总数、按页加载，搜索走服务端", { skip: !proce
     await page.route("**/api/**", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
-      if (url.pathname === "/api/memories") {
+      if (url.pathname === "/api/library-entries") {
         memoryQueries.push(url.searchParams);
         const search = url.searchParams.get("search") || "";
         const offset = Number(url.searchParams.get("offset") || 0);
         // 服务端搜索这里故意返回一条"词面不含查询词"的条目：前端若还按输入框二次
         // 过滤，这条会被吞掉——那正是"只搜到已加载一页"的老问题。
         const payload = search
-          ? { memories: [row("s1", "別の原文", "服务端命中的条目")], total: 1 }
+          ? { items: [row("s1", "別の原文", "服务端命中的条目")], total: 1 }
           : offset > 0
-            ? { memories: [row("m4", "ロード", "读取")], total: 1200 }
-            : { memories: [row("m1", "プレミアムパス", "高级通行证"), row("m2", "メンテナンス", "维护"), row("m3", "アップデート", "更新")], total: 1200 };
+            ? { items: [row("m4", "ロード", "读取")], total: 1200 }
+            : { items: [row("m1", "プレミアムパス", "高级通行证"), row("m2", "メンテナンス", "维护"), row("m3", "アップデート", "更新")], total: 1200 };
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
       }
       let payload = {};
@@ -54,6 +54,14 @@ test("记忆库显示总数、按页加载，搜索走服务端", { skip: !proce
       else if (url.pathname === "/api/health") payload = { ok: true, version: "0.7.0" };
       else if (url.pathname === "/api/projects") payload = { projects: [{ id: "project-1", name: "测试项目", settings: createDefaultProjectSettings() }] };
       else if (url.pathname === "/api/assets") payload = { locale: "zh-CN", revision: 0, terms: [] };
+      else if (url.pathname === "/api/projects/project-1/libraries") payload = {
+        projectId: "project-1",
+        libraries: [
+          { id: "term-1", projectId: "project-1", name: "术语库", kind: "term_base", role: "reference", enabled: true, priority: 1, entryCount: 1200, lastEntryAt: "2026-09-18T10:00:00Z" },
+          { id: "tm-master", projectId: "project-1", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1, entryCount: 1200, lastEntryAt: "2026-09-18T10:00:00Z" },
+          { id: "tm-working", projectId: "project-1", name: "工作 TM", kind: "translation_memory", role: "working", enabled: true, priority: 2, entryCount: 66, lastEntryAt: "2026-09-18T11:00:00Z" }
+        ]
+      };
       else if (url.pathname === "/api/feedback/pending" || url.pathname === "/api/feedback") payload = [];
       else if (url.pathname === "/api/qa-cases/pending") payload = [];
       else if (url.pathname === "/api/style-profiles") payload = { styleProfiles: [], evidencePools: [], learningRuns: [], userProfiles: [] };
@@ -62,7 +70,13 @@ test("记忆库显示总数、按页加载，搜索走服务端", { skip: !proce
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForSelector(".nav-item");
     await page.getByRole("button", { name: "记忆库 TM" }).click();
+    // 两级结构：先进库列表，再打开某个库看条目。
+    await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-master"]');
+    assert.match(await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-master"]').textContent(), /主 TM/u);
+    assert.match(await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-working"]').textContent(), /工作 TM · 66|66/u);
+    await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-master"] [data-library-action="open"]').click();
     await page.waitForSelector("#memoryList .asset-row");
+    assert.equal(memoryQueries.at(-1).get("libraryId"), "tm-master", "条目列表要按打开的库过滤");
 
     assert.equal(await page.locator("#memoryList .asset-row").count(), 3, "第一页只渲染服务端返回的 3 条");
     assert.equal(await page.locator("#memoryCount").textContent(), "已显示 3 / 共 1200 条");

@@ -1,5 +1,6 @@
 import http from "node:http";
 import os from "node:os";
+import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
@@ -13,7 +14,7 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, deleteAsset, getAssets, getAssetStats, getImportPreview, getMemories, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, listLibraryEntries, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
@@ -932,7 +933,7 @@ async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, per
  * 进度同时写进内存进度表（弹窗轮询）与后台任务（任务中心），关掉页面也会继续跑完。
  * 续跑（persistCandidates=false）复用已有批次，不重复写审核队列。
  */
-async function runAssetImportInBackground({ taskId, projectId, batchId, filename, candidates, purpose, aiCleaning, styleEvidence, persistCandidates = false }) {
+async function runAssetImportInBackground({ taskId, projectId, batchId, filename, candidates, purpose, aiCleaning, styleEvidence, termLibraryId = "", tmLibraryId = "", persistCandidates = false }) {
   let progressWrites = Promise.resolve();
   const control = beginBackgroundRun(taskId);
   const shouldCancel = () => control.cancelRequested;
@@ -966,7 +967,7 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
       working = persisted.candidates;
       // 批次号一拿到就写进任务载荷：进程被杀（服务重启）时任务里也已经有批次号，
       // 重启后的「继续导入」才真的找得到这批候选。
-      await updateBackgroundTaskProgress(taskId, { payload: { batchId: batch, filename, purpose, aiCleaning, styleEvidence, resumable: false } }).catch(() => {});
+      await updateBackgroundTaskProgress(taskId, { payload: { batchId: batch, filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false } }).catch(() => {});
       reportImmediate({ phase: "queued", message: `审核队列就绪（${working.length} 条），开始导入`, percent: 9, completed: 0, total: working.length });
     }
     reportImmediate({ phase: "preparing", message: aiCleaning ? "准备 AI 清洗" : "准备按表导入", percent: 10, completed: 0, total: working.length });
@@ -998,7 +999,7 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
       reportImmediate({ phase: "routing", message: `清洗结果已保存（${persistedCleaning} 条），开始分库`, percent: 49, completed: 0, total: routed.length });
     }
     const result = await commitTermImport(
-      { projectId, batchId: batch, filename, candidates: routed, styleEvidence },
+      { projectId, batchId: batch, filename, candidates: routed, styleEvidence, termLibraryId, tmLibraryId },
       scaleReport(50, 92),
       shouldCancel
     );
@@ -1019,6 +1020,8 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
         purpose,
         aiCleaning,
         styleEvidence,
+        termLibraryId,
+        tmLibraryId,
         summary,
         ai: ai.used ? { used: true, reviewed: ai.reviewed, fallbackReason: ai.fallbackReason } : { used: false, requested: Boolean(aiCleaning) },
         skippedDetails: summary.skippedDetails || []
@@ -1054,7 +1057,7 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
  * 9332 条的导入要跑好几分钟，同步请求会让界面一直只有一句静止提示，
  * 所以走后台任务，进度写进任务记录（任务中心）与内存进度表（页面轮询）。
  */
-async function runTmImportInBackground({ taskId, projectId, filename, batchId, candidates, styleEvidence, sourceFileType }) {
+async function runTmImportInBackground({ taskId, projectId, filename, batchId, candidates, styleEvidence, sourceFileType, tmLibraryId = "" }) {
   let progressWrites = Promise.resolve();
   const control = beginBackgroundRun(taskId);
   const shouldCancel = () => control.cancelRequested;
@@ -1078,10 +1081,10 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
     }, { onProgress: countProgressReport(report, 2, 10) });
     // 批次号立刻写进任务载荷：服务重启打断时任务中心仍能靠它「继续导入」。
     persistedBatchId = persisted.batchId;
-    await updateBackgroundTaskProgress(taskId, { payload: { batchId: persisted.batchId, filename, resumable: false } }).catch(() => {});
+    await updateBackgroundTaskProgress(taskId, { payload: { batchId: persisted.batchId, filename, tmLibraryId, resumable: false } }).catch(() => {});
     report({ phase: "importing", message: `审核队列就绪（${persisted.candidates.length} 条），开始写入主 TM`, percent: 10, completed: 0, total: persisted.candidates.length });
     const result = await commitTermImport(
-      { projectId, batchId: persisted.batchId, filename, candidates: persisted.candidates, styleEvidence },
+      { projectId, batchId: persisted.batchId, filename, candidates: persisted.candidates, styleEvidence, tmLibraryId },
       scaleProgressReport(report, 10, 92),
       shouldCancel
     );
@@ -1276,6 +1279,56 @@ async function trajectoriesForExternalReview(locale, projectId) {
   return [...scoped, ...legacy.filter((trajectory) => runs.get(trajectory.batchId)?.projectId === projectId)];
 }
 
+/**
+ * 导入目标库校验：库必须存在、属于当前项目、类型匹配、且处于启用状态。
+ * 不传 libraryId 时返回 null，调用方沿用原来的默认库口径。
+ */
+async function resolveImportLibrary(projectId, { libraryId = "", kind = "term_base" } = {}) {
+  const requested = String(libraryId || "").trim();
+  if (!requested) return null;
+  const library = (await getResourceLibraries(projectId)).find((item) => item.id === requested);
+  if (!library) throw Object.assign(new Error("选择的资源库不存在或不属于当前项目"), { statusCode: 400 });
+  if (library.kind !== kind) {
+    throw Object.assign(new Error(kind === "term_base" ? "选择的资源库不是术语库" : "选择的资源库不是翻译记忆库"), { statusCode: 400 });
+  }
+  if (library.enabled !== true) throw Object.assign(new Error(`「${library.name}」未启用，不能作为导入目标；请先在项目设置里启用`), { statusCode: 400 });
+  return library;
+}
+
+/**
+ * 库导出：术语库与 TM 各一套列定义，导出整个库（不受页面分页与搜索影响）。
+ * 复用 batch_export 任务类型与 /api/export-tasks 下载链路，避免再加一种任务类型。
+ */
+async function buildLibraryExport({ kind, locale, libraryName = "库", items = [] }) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet(kind === "tm" ? "翻译记忆" : "术语库");
+  const headers = kind === "tm"
+    ? ["日语原文", "简体中文译文", "条目 ID", "状态", "来源文件", "行号", "来源", "更新时间"]
+    : ["日语原文", "简体中文译法", "别名", "禁用译法", "注释", "语体", "强制级别", "来源", "更新时间"];
+  sheet.addRow(headers);
+  sheet.getRow(1).font = { bold: true };
+  const qualityLabels = { human_approved: "人工确认", machine_verified: "机器译文", provisional: "候选" };
+  for (const item of items) {
+    sheet.addRow(kind === "tm"
+      ? [item.source, item.target, item.entryKey || "", qualityLabels[item.qualityStatus] || "候选", item.sourceFile || "", item.sourceRow ?? "", item.provenance || "", item.updatedAt || item.createdAt || ""]
+      : [
+        item.source, item.target,
+        (item.aliases || []).join(", "), (item.forbidden || []).join(", "),
+        item.note || "",
+        (item.contentTypes || []).map((type) => CONTENT_TYPES[type]?.label || type).join(", "),
+        item.enforcement || "", item.provenance || "", item.updatedAt || item.createdAt || ""
+      ]);
+  }
+  for (const column of sheet.columns) column.width = 30;
+  const stamp = new Date().toISOString().slice(0, 10);
+  const safeName = String(libraryName).replace(/[\\/:*?"<>|]/gu, "_").slice(0, 60);
+  return {
+    buffer: Buffer.from(await workbook.xlsx.writeBuffer()),
+    filename: `${kind === "tm" ? "TM" : "术语库"}_${safeName}_${locale}_${stamp}.xlsx`,
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  };
+}
+
 async function commitTermImport(body, onProgress = null, shouldCancel = null) {
   if (!body.batchId || !Array.isArray(body.candidates)) {
     const error = new Error("导入批次或候选数据无效");
@@ -1289,8 +1342,15 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null) {
   const total = body.candidates.length;
   const projectId = String(body.projectId || "").trim();
   const projectLibraries = projectId ? await getResourceLibraries(projectId) : [];
-  const masterTm = projectLibraries.find((library) => library.kind === "translation_memory" && library.role === "master");
-  const termLibrary = projectLibraries.find((library) => library.kind === "term_base" && library.enabled) || projectLibraries.find((library) => library.kind === "term_base");
+  // 导入目标：调用方可以指定具体库（库页面行内导入），不指定时保持原来的默认口径。
+  const requestedTermLibrary = String(body.termLibraryId || "").trim();
+  const requestedTmLibrary = String(body.tmLibraryId || "").trim();
+  const masterTm = requestedTmLibrary
+    ? projectLibraries.find((library) => library.id === requestedTmLibrary)
+    : projectLibraries.find((library) => library.kind === "translation_memory" && library.role === "master");
+  const termLibrary = requestedTermLibrary
+    ? projectLibraries.find((library) => library.id === requestedTermLibrary)
+    : (projectLibraries.find((library) => library.kind === "term_base" && library.enabled) || projectLibraries.find((library) => library.kind === "term_base"));
   let done = 0;
   const imported = [];
   const skipped = [];
@@ -1798,7 +1858,19 @@ async function apiHandler(req, res, url) {
     const projectId = decodeURIComponent(url.pathname.slice("/api/projects/".length, -"/libraries".length));
     const project = await getProject(projectId);
     if (!project) return json(res, 404, { error: "项目不存在" });
-    return json(res, 200, { projectId, libraries: await getResourceLibraries(projectId) });
+    const libraries = await getResourceLibraries(projectId);
+    if (url.searchParams.get("withStats") !== "1") return json(res, 200, { projectId, libraries });
+    // 库页面要显示"这个库里到底有多少条"：entry_count 列是历史遗留、从不更新，
+    // 所以按 library_id 现算（一次 groupBy 聚合同时拿条目数与最新条目时间）。
+    const stats = await getLibraryStats("zh-CN", projectId);
+    return json(res, 200, {
+      projectId,
+      libraries: libraries.map((library) => ({
+        ...library,
+        entryCount: stats.get(library.id)?.entryCount || 0,
+        lastEntryAt: stats.get(library.id)?.lastEntryAt || ""
+      }))
+    });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/projects/") && url.pathname.endsWith("/libraries")) {
     const projectId = decodeURIComponent(url.pathname.slice("/api/projects/".length, -"/libraries".length));
@@ -1864,6 +1936,22 @@ async function apiHandler(req, res, url) {
     ]);
     return json(res, 200, { memories, total, limit, offset });
   }
+  if ((req.method === "PATCH" || req.method === "DELETE") && url.pathname.startsWith("/api/memories/")) {
+    const locale = assertActiveLocale(url.searchParams.get("locale") || "zh-CN");
+    const id = decodeURIComponent(url.pathname.slice("/api/memories/".length));
+    if (req.method === "DELETE") {
+      const deleted = await deleteMemory(locale, id);
+      return json(res, deleted ? 200 : 404, { deleted });
+    }
+    const body = await readJsonBody(req);
+    const updated = await updateMemory(locale, id, {
+      source: body.source,
+      target: body.target,
+      entryKey: body.entryKey,
+      qualityStatus: body.qualityStatus
+    });
+    return updated ? json(res, 200, { memory: updated }) : json(res, 404, { error: "这条 TM 条目不存在" });
+  }
   if (req.method === "GET" && url.pathname === "/api/assets") {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
     return json(res, 200, (await getProjectAssets(locale, url.searchParams.get("projectId") || "")).assets);
@@ -1876,18 +1964,125 @@ async function apiHandler(req, res, url) {
     // 术语列表与模型参考只认"项目里启用的术语库"的条目：单条新增过去不写
     // library_id，保存后既不出现在列表里、也不参与翻译。这里补上归属。
     if (projectId && !term.libraryId) {
-      const libraries = await getResourceLibraries(projectId, { kind: "term_base" });
-      const library = libraries.find((item) => item.enabled) || libraries[0];
-      if (!library) throw Object.assign(new Error("这个项目还没有术语库，无法加入这条术语；请先在项目设置里新建术语库"), { statusCode: 400 });
-      term.libraryId = library.id;
+      // 编辑已有条目时要保留它原来的库归属，不能顺手挪到默认库。
+      const existing = term.id ? await getAsset(locale, term.id).catch(() => null) : null;
+      if (existing?.libraryId) {
+        term.libraryId = existing.libraryId;
+      } else {
+        const libraries = await getResourceLibraries(projectId, { kind: "term_base" });
+        const library = libraries.find((item) => item.enabled) || libraries[0];
+        if (!library) throw Object.assign(new Error("这个项目还没有术语库，无法加入这条术语；请先在项目设置里新建术语库"), { statusCode: 400 });
+        term.libraryId = library.id;
+      }
     }
-    return json(res, 201, await saveAsset(locale, term));
+    return json(res, term.id ? 200 : 201, await saveAsset(locale, term));
+  }
+  if (req.method === "PATCH" && url.pathname.startsWith("/api/assets/")) {
+    // 编辑术语：先读回现有行再合并，只改内容字段，不动 library_id / 归属。
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
+    const id = decodeURIComponent(url.pathname.slice("/api/assets/".length));
+    const existing = await getAsset(locale, id);
+    if (!existing) return json(res, 404, { error: "这条术语不存在" });
+    const body = await readJsonBody(req);
+    const term = {
+      ...existing,
+      ...(body.source === undefined ? {} : { source: body.source }),
+      ...(body.target === undefined ? {} : { target: body.target }),
+      ...(body.aliases === undefined ? {} : { aliases: body.aliases }),
+      ...(body.forbidden === undefined ? {} : { forbidden: body.forbidden }),
+      ...(body.note === undefined ? {} : { note: body.note }),
+      ...(body.contentTypes === undefined ? {} : { contentTypes: body.contentTypes }),
+      ...(body.enforcement === undefined ? {} : { enforcement: body.enforcement }),
+      id
+    };
+    return json(res, 200, await saveAsset(locale, term));
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/assets/")) {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
     const id = decodeURIComponent(url.pathname.slice("/api/assets/".length));
     const deleted = await deleteAsset(locale, id);
     return json(res, deleted ? 200 : 404, { deleted });
+  }
+  if (req.method === "GET" && url.pathname === "/api/library-entries") {
+    // 库页面：按库过滤 + 搜索 + 分页。libraryId 为空表示"全部库（合并视图）"。
+    const locale = assertActiveLocale(url.searchParams.get("locale") || "zh-CN");
+    const kind = url.searchParams.get("kind") === "tm" ? "tm" : "term";
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
+    if (!projectId) return json(res, 400, { error: "缺少项目" });
+    const libraryId = String(url.searchParams.get("libraryId") || "").trim();
+    const limit = Math.min(1_000, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+    const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset")) || 0));
+    const result = await listLibraryEntries({
+      locale, kind, projectId, libraryId,
+      search: (url.searchParams.get("search") || "").trim(),
+      limit, offset
+    });
+    return json(res, 200, { ...result, kind, libraryId, limit, offset });
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/library-entries") {
+    // "删库并删除库内条目"：先按库把条目 id 全量取回，再分批删（逐条 DELETE 在
+    // 几千条规模下要跑几分钟）。删完顺手清一次库统计缓存。
+    const locale = assertActiveLocale(url.searchParams.get("locale") || "zh-CN");
+    const kind = url.searchParams.get("kind") === "tm" ? "tm" : "term";
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
+    const libraryId = String(url.searchParams.get("libraryId") || "").trim();
+    if (!projectId || !libraryId) return json(res, 400, { error: "缺少项目或资源库" });
+    const { items } = await listLibraryEntries({ locale, kind, projectId, libraryId, search: "", limit: 0, offset: 0 });
+    const ids = items.map((item) => item.id);
+    const deleted = await deleteLibraryEntries(locale, kind, ids);
+    logInfo("已删除库内条目", { locale, kind, libraryId, requested: ids.length, deleted });
+    return json(res, 200, { deleted, requested: ids.length });
+  }
+  if (req.method === "POST" && url.pathname === "/api/library-export") {
+    const body = await readJsonBody(req);
+    const locale = assertActiveLocale(body.locale || "zh-CN");
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    const kind = body.kind === "tm" ? "tm" : "term";
+    const libraryId = String(body.libraryId || "").trim();
+    const libraries = await getResourceLibraries(projectId);
+    const library = libraryId ? libraries.find((item) => item.id === libraryId) : null;
+    if (libraryId && !library) return json(res, 404, { error: "资源库不存在或不属于当前项目" });
+    const label = library ? library.name : `全部${kind === "tm" ? " TM" : "术语"}库`;
+    const task = await createBackgroundTask({
+      type: "batch_export",
+      title: `导出 · ${label}`,
+      locale,
+      projectId,
+      progress: { phase: "exporting", message: "正在读取库内条目", percent: 10, completed: 0, total: 1 }
+    });
+    (async () => {
+      try {
+        const { items } = await listLibraryEntries({ locale, kind, projectId, libraryId, search: "", limit: 0, offset: 0 });
+        await updateBackgroundTaskProgress(task.id, { progress: { phase: "exporting", message: `正在生成表格（${items.length} 条）`, percent: 55, completed: 0, total: items.length } });
+        const exported = await buildLibraryExport({ kind, locale, libraryName: label, items });
+        const directory = join(DATA_ROOT, "exports");
+        await mkdir(directory, { recursive: true });
+        await writeFile(join(directory, `${task.id}.xlsx`), exported.buffer);
+        await updateBackgroundTaskProgress(task.id, {
+          status: "completed",
+          progress: { phase: "completed", message: `导出完成：${items.length} 条`, percent: 100, completed: items.length, total: items.length },
+          payload: {
+            kind: "library_export",
+            libraryId,
+            libraryName: label,
+            count: items.length,
+            filename: exported.filename,
+            mimeType: exported.mimeType,
+            bytes: exported.buffer.length,
+            downloadUrl: `/api/export-tasks/${task.id}/download`
+          }
+        });
+      } catch (error) {
+        await updateBackgroundTaskProgress(task.id, {
+          status: "failed",
+          progress: { phase: "failed", message: error.message, percent: 100, completed: 0, total: 1 },
+          payload: { kind: "library_export", libraryId, libraryName: label, error: error.message }
+        });
+        console.error("[Kami] 库导出失败", error);
+      }
+    })().catch((error) => console.error("[Kami] 库导出后台任务异常", error));
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, message: "导出已进入任务中心后台处理" });
   }
   if (req.method === "POST" && url.pathname === "/api/learning/conflict-scan") {
     const body = await readJsonBody(req);
@@ -2049,6 +2244,11 @@ async function apiHandler(req, res, url) {
     const aiCleaning = purpose === "term" && body.aiCleaning === true;
     // 批次级开关决定风格证据：预检候选里遗留的逐文件勾选值在这里统一归一。
     const styleEvidence = body.styleEvidence === true;
+    // 目标库先校验再建任务：选错库要立刻报错，不能等后台跑到一半才失败。
+    const termLibrary = await resolveImportLibrary(projectId, { libraryId: body.termLibraryId, kind: "term_base" });
+    const tmLibrary = await resolveImportLibrary(projectId, { libraryId: body.tmLibraryId, kind: "translation_memory" });
+    const termLibraryId = termLibrary?.id || "";
+    const tmLibraryId = tmLibrary?.id || "";
     const filename = String(body.filename || body.candidates[0]?.sourceFile || "双语资产导入").slice(0, 120);
     const candidates = body.candidates.map((candidate) => ({
       ...candidate,
@@ -2065,7 +2265,7 @@ async function apiHandler(req, res, url) {
       projectId,
       progress: { phase: "queued", message: aiCleaning ? "已排队：先写审核队列，再做 AI 清洗" : "已排队：先写审核队列，再按表导入", total: candidates.length },
       // 批次号建任务时就写进去：服务重启打断时，「继续导入」才有批次可用。
-      payload: { batchId: String(body.batchId || ""), filename, purpose, aiCleaning, styleEvidence, resumable: false }
+      payload: { batchId: String(body.batchId || ""), filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false }
     });
     runAssetImportInBackground({
       taskId: task.id,
@@ -2076,9 +2276,11 @@ async function apiHandler(req, res, url) {
       purpose,
       aiCleaning,
       styleEvidence,
+      termLibraryId,
+      tmLibraryId,
       persistCandidates: true
     }).catch((error) => console.error("[Kami] 双语资产导入后台任务异常", error));
-    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: String(body.batchId || ""), accepted: candidates.length, purpose, aiCleaning, styleEvidence });
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: String(body.batchId || ""), accepted: candidates.length, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId });
   }
   if (req.method === "POST" && url.pathname === "/api/assets-import/resume") {
     // 续传：用同一个批次的候选重跑一次。已写入的"原文+译文"会被当成重复跳过，
@@ -2095,6 +2297,10 @@ async function apiHandler(req, res, url) {
     const purpose = body.purpose === "tm" ? "tm" : "term";
     const aiCleaning = purpose === "term" && body.aiCleaning === true;
     const styleEvidence = body.styleEvidence === true;
+    const termLibrary = await resolveImportLibrary(projectId, { libraryId: body.termLibraryId, kind: "term_base" });
+    const tmLibrary = await resolveImportLibrary(projectId, { libraryId: body.tmLibraryId, kind: "translation_memory" });
+    const termLibraryId = termLibrary?.id || "";
+    const tmLibraryId = tmLibrary?.id || "";
     const filename = String(preview.filename || "双语资产导入").slice(0, 120);
     // 持久化的候选不带 selected（库里没有这一列），续跑时要按"默认全选"还原，
     // 否则整批会被当成"未选择"直接跳过。
@@ -2105,7 +2311,7 @@ async function apiHandler(req, res, url) {
       title: `续传 · ${filename}`,
       projectId,
       progress: { phase: "queued", message: "正在续传未完成的导入", total: candidates.length },
-      payload: { batchId, filename, purpose, aiCleaning, styleEvidence, resumable: false }
+      payload: { batchId, filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false }
     });
     runAssetImportInBackground({
       taskId: task.id,
@@ -2116,10 +2322,12 @@ async function apiHandler(req, res, url) {
       purpose,
       aiCleaning,
       styleEvidence,
+      termLibraryId,
+      tmLibraryId,
       // 候选已经在这个批次里，续跑不要再写一遍审核队列。
       persistCandidates: false
     }).catch((error) => console.error("[Kami] 双语资产续传任务异常", error));
-    return json(res, 202, { taskId: task.id, batchId, accepted: candidates.length });
+    return json(res, 202, { taskId: task.id, batchId, accepted: candidates.length, termLibraryId, tmLibraryId });
   }
   if (req.method === "POST" && url.pathname === "/api/tm-import/commit") {
     const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
@@ -2128,6 +2336,8 @@ async function apiHandler(req, res, url) {
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     const filename = String(body.filename || "人工 TM 导入").slice(0, 120);
     // 页面要进度条时走后台任务：9332 条要跑好几分钟，同步请求期间界面只能干等。
+    const tmLibrary = await resolveImportLibrary(projectId, { libraryId: body.tmLibraryId, kind: "translation_memory" });
+    const tmLibraryId = tmLibrary?.id || "";
     if (body.background === true) {
       const task = await createBackgroundTask({
         type: "term_import",
@@ -2142,9 +2352,10 @@ async function apiHandler(req, res, url) {
         batchId: String(body.batchId),
         candidates: body.candidates,
         styleEvidence: body.styleEvidence !== false,
-        sourceFileType: body.sourceFileType
+        sourceFileType: body.sourceFileType,
+        tmLibraryId
       }).catch((error) => console.error("[Kami] 人工 TM 导入后台任务异常", error));
-      return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: String(body.batchId), accepted: body.candidates.length, background: true });
+      return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: String(body.batchId), accepted: body.candidates.length, background: true, tmLibraryId });
     }
     const persisted = await saveImportPreview({
       filename: body.filename || "人工 TM 导入",
@@ -2156,7 +2367,7 @@ async function apiHandler(req, res, url) {
       fileMode: "tm",
       ai: { used: false, requested: false }
     });
-    return json(res, 200, await commitTermImport({ ...body, projectId, batchId: persisted.batchId, candidates: persisted.candidates }));
+    return json(res, 200, await commitTermImport({ ...body, projectId, batchId: persisted.batchId, candidates: persisted.candidates, tmLibraryId }));
   }
   if (req.method === "POST" && url.pathname === "/api/term-import/preview") {
     const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
@@ -2218,6 +2429,14 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/term-import/commit") {
     const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const backgroundTaskId = String(body.backgroundTaskId || "");
+    // 目标库先校验：选错库要立刻报错，别等写到一半才失败。
+    const commitProjectId = String(body.projectId || "").trim();
+    if (commitProjectId) {
+      const termLibrary = await resolveImportLibrary(commitProjectId, { libraryId: body.termLibraryId, kind: "term_base" });
+      const tmLibrary = await resolveImportLibrary(commitProjectId, { libraryId: body.tmLibraryId, kind: "translation_memory" });
+      body.termLibraryId = termLibrary?.id || "";
+      body.tmLibraryId = tmLibrary?.id || "";
+    }
     const control = beginBackgroundRun(backgroundTaskId);
     const onProgress = (update) => {
       if (!backgroundTaskId) return;

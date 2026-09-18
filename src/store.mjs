@@ -8,8 +8,14 @@ import { createDefaultProjectSettings, sanitizeProjectSettings } from "./project
 import { memoryMatchAttempts, normalizeMemoryText, styleEvidenceMatch } from "./translation-memory.mjs";
 import {
   deleteDirectusAsset,
+  deleteDirectusLibraryEntries,
+  deleteDirectusMemory,
+  getDirectusAsset,
   getDirectusAssets,
   getDirectusAssetStats,
+  getDirectusLibraryStats,
+  listDirectusLibraryEntries,
+  updateDirectusMemory,
   getDirectusMetadata,
   getDirectusMemories,
   countDirectusMemories,
@@ -598,6 +604,113 @@ async function getJsonAssets(locale, options = {}) {
   if (!options.projectId) return data;
   const projectId = String(options.projectId).trim();
   return { ...data, terms: data.terms.filter((item) => item.projectId === projectId) };
+}
+
+async function getJsonAsset(locale, id) {
+  const data = await getJsonAssets(locale);
+  return (data.terms || []).find((item) => item.id === String(id)) || null;
+}
+
+/** 术语库 / 记忆库页的条目列表（JSON 存储）：与 Directus 实现同一套过滤与分页口径。 */
+async function listJsonLibraryEntries({ locale, kind = "term", projectId = "", libraryId = "", search = "", limit = 100, offset = 0 } = {}) {
+  assertLocale(locale);
+  const needle = String(search || "").trim().toLocaleLowerCase();
+  const matches = (item) => (!needle || [item.source, item.target, ...(kind === "tm" ? [item.entryKey] : item.aliases || [])]
+    .some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
+  const rows = kind === "tm"
+    ? (await readJson(join(ROOT, "memories", `${locale}.json`), [])).map((item) => ({ ...item, locale }))
+    : (await getJsonAssets(locale)).terms;
+  const filtered = rows
+    .filter((item) => (!projectId || String(item.projectId || "") === String(projectId)))
+    .filter((item) => (!libraryId || String(item.libraryId || "") === String(libraryId)))
+    .filter(matches)
+    .sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")));
+  const start = Math.max(0, Math.trunc(Number(offset)) || 0);
+  const size = Number(limit) <= 0 ? filtered.length : Math.max(1, Math.trunc(Number(limit)) || 100);
+  return { total: filtered.length, items: filtered.slice(start, start + size) };
+}
+
+async function getJsonLibraryStats(locale, projectId = "") {
+  const [terms, memories] = await Promise.all([
+    getJsonAssets(locale).then((data) => data.terms || []),
+    readJson(join(ROOT, "memories", `${assertLocale(locale)}.json`), [])
+  ]);
+  const stats = new Map();
+  const collect = (rows, kind) => {
+    for (const row of rows) {
+      const libraryId = String(row.libraryId || "");
+      if (!libraryId || (projectId && String(row.projectId || "") !== String(projectId))) continue;
+      const bucket = stats.get(libraryId) || { entryCount: 0, termCount: 0, memoryCount: 0, lastEntryAt: "" };
+      bucket.entryCount += 1;
+      if (kind === "term") bucket.termCount += 1;
+      else bucket.memoryCount += 1;
+      const stamp = String(row.createdAt || row.updatedAt || "");
+      if (stamp > bucket.lastEntryAt) bucket.lastEntryAt = stamp;
+      stats.set(libraryId, bucket);
+    }
+  };
+  collect(terms, "term");
+  collect(memories, "tm");
+  return stats;
+}
+
+async function updateJsonMemory(locale, id, patch = {}) {
+  const path = join(ROOT, "memories", `${assertLocale(locale)}.json`);
+  const items = await readJson(path, []);
+  const index = items.findIndex((item) => item.id === String(id));
+  if (index < 0) return null;
+  const next = { ...items[index] };
+  if (patch.source !== undefined) {
+    const source = String(patch.source || "").trim();
+    if (!source) {
+      const error = new Error("日语原文不能为空");
+      error.statusCode = 400;
+      throw error;
+    }
+    next.source = source;
+  }
+  if (patch.target !== undefined) {
+    const target = String(patch.target || "").trim();
+    if (!target) {
+      const error = new Error("简体中文译文不能为空");
+      error.statusCode = 400;
+      throw error;
+    }
+    next.target = target;
+  }
+  if (patch.entryKey !== undefined) next.entryKey = String(patch.entryKey || "").trim();
+  if (patch.qualityStatus !== undefined && ["human_approved", "machine_verified", "provisional"].includes(patch.qualityStatus)) next.qualityStatus = patch.qualityStatus;
+  next.updatedAt = new Date().toISOString();
+  items[index] = next;
+  await writeJsonAtomic(path, items);
+  return next;
+}
+
+async function deleteJsonMemory(locale, id) {
+  const path = join(ROOT, "memories", `${assertLocale(locale)}.json`);
+  const items = await readJson(path, []);
+  const next = items.filter((item) => item.id !== String(id));
+  if (next.length === items.length) return false;
+  await writeJsonAtomic(path, next);
+  return true;
+}
+
+async function deleteJsonLibraryEntries(locale, kind, ids = []) {
+  assertLocale(locale);
+  const wanted = new Set(ids.map((id) => String(id)));
+  if (!wanted.size) return 0;
+  if (kind === "tm") {
+    const path = join(ROOT, "memories", `${locale}.json`);
+    const items = await readJson(path, []);
+    const next = items.filter((item) => !wanted.has(String(item.id)));
+    await writeJsonAtomic(path, next);
+    return items.length - next.length;
+  }
+  const data = await getJsonAssets(locale);
+  const next = (data.terms || []).filter((item) => !wanted.has(String(item.id)));
+  const removed = (data.terms || []).length - next.length;
+  await writeJsonAtomic(assetPath(locale), { ...data, revision: (data.revision || 0) + 1, terms: next });
+  return removed;
 }
 
 async function saveJsonAsset(locale, input) {
@@ -1545,6 +1658,26 @@ export async function deleteAsset(locale, id) {
   return usesDirectus() ? deleteDirectusAsset(locale, id) : deleteJsonAsset(locale, id);
 }
 
+/** 单条术语：编辑前要先读回现有行，避免整条覆盖丢掉 library_id 等归属信息。 */
+export async function getAsset(locale, id) {
+  return usesDirectus() ? getDirectusAsset(locale, id) : getJsonAsset(locale, id);
+}
+
+/** 术语库 / 记忆库页：按库过滤 + 搜索 + 分页的条目列表（limit<=0 取全量，供导出用）。 */
+export async function listLibraryEntries(options) {
+  return usesDirectus() ? listDirectusLibraryEntries(options) : listJsonLibraryEntries(options);
+}
+
+/** 库列表的实时条目数与最新条目时间，按 library_id 聚合。 */
+export async function getLibraryStats(locale, projectId) {
+  return usesDirectus() ? getDirectusLibraryStats(locale, projectId) : getJsonLibraryStats(locale, projectId);
+}
+
+/** 批量删除库内条目（删库时二选一里的"连条目一起删"）。 */
+export async function deleteLibraryEntries(locale, kind, ids) {
+  return usesDirectus() ? deleteDirectusLibraryEntries(locale, kind, ids) : deleteJsonLibraryEntries(locale, kind, ids);
+}
+
 export async function saveCorpus(input) {
   return usesDirectus() ? saveDirectusCorpus(input) : saveJsonCorpus(input);
 }
@@ -1579,6 +1712,14 @@ export async function countMemories(locale, options) {
 
 export async function saveMemory(locale, input) {
   return usesDirectus() ? saveDirectusMemory(locale, input) : saveJsonMemory(locale, input);
+}
+
+export async function updateMemory(locale, id, patch) {
+  return usesDirectus() ? updateDirectusMemory(locale, id, patch) : updateJsonMemory(locale, id, patch);
+}
+
+export async function deleteMemory(locale, id) {
+  return usesDirectus() ? deleteDirectusMemory(locale, id) : deleteJsonMemory(locale, id);
 }
 
 export async function getStyleProfile(locale, contentType, domain, options = {}) {

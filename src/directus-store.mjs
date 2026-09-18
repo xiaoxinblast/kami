@@ -413,6 +413,61 @@ export async function saveDirectusMemory(locale, input) {
   return { id: saved.id, locale, source: saved.source, target: saved.target, qualityStatus: saved.quality_status, qaScore: Number(saved.qa_score) || 0 };
 }
 
+/**
+ * 按 id 编辑一条记忆：只改传来的人可编辑字段，不动归属（library_id）、批次与时间戳。
+ * 原文变了必须重算 source_hash，否则后续"按原文去重/覆盖"会失效。
+ */
+export async function updateDirectusMemory(locale, id, patch = {}) {
+  const collection = memoryCollectionFor(locale);
+  const body = {};
+  if (patch.source !== undefined) {
+    const source = String(patch.source || "").trim();
+    if (!source) {
+      const error = new Error("日语原文不能为空");
+      error.statusCode = 400;
+      throw error;
+    }
+    body.source = source;
+    body.source_hash = memorySourceHash(source);
+  }
+  if (patch.target !== undefined) {
+    const target = String(patch.target || "").trim();
+    if (!target) {
+      const error = new Error("简体中文译文不能为空");
+      error.statusCode = 400;
+      throw error;
+    }
+    body.target = target;
+  }
+  if (patch.entryKey !== undefined) body.entry_key = String(patch.entryKey || "").trim();
+  if (patch.qualityStatus !== undefined && ["human_approved", "machine_verified", "provisional"].includes(patch.qualityStatus)) {
+    body.quality_status = patch.qualityStatus;
+  }
+  if (!Object.keys(body).length) {
+    const error = new Error("没有需要更新的字段");
+    error.statusCode = 400;
+    throw error;
+  }
+  try {
+    const saved = await request(`/items/${collection}/${encodeURIComponent(String(id))}`, { method: "PATCH", body });
+    return toMemoryEntry(saved);
+  } catch (error) {
+    if (isMissingItem(error)) return null;
+    throw error;
+  }
+}
+
+export async function deleteDirectusMemory(locale, id) {
+  const collection = memoryCollectionFor(locale);
+  try {
+    await request(`/items/${collection}/${encodeURIComponent(String(id))}`, { method: "DELETE" });
+    return true;
+  } catch (error) {
+    if (isMissingItem(error)) return false;
+    throw error;
+  }
+}
+
 export async function getDirectusStyleProfile(locale, contentType, domain = "general", { projectId = "" } = {}) {
   assertLocale(locale);
   const params = new URLSearchParams({ limit: "20", sort: "-version,-date_updated", fields: "id,project_id,name,target_locale,content_type,content_tags,domain,instructions,review_rubric,examples,rules,version,parent_id,evidence_count,evidence_ids,generated_by,source_batch_id,learning_run_id,status,date_updated" });
@@ -763,6 +818,151 @@ export async function getDirectusAssetStats(locale) {
   const collection = collectionFor(locale);
   const result = await request(`/items/${collection}?aggregate[count]=*`);
   return { locale, termCount: Number(result?.[0]?.count ?? 0), revision: Date.now() };
+}
+
+const TERM_ENTRY_FIELDS = "id,source,aliases,target,forbidden,domains,content_types,content_tags,enforcement,note,status,provenance,project_id,library_id,date_created,date_updated";
+const MEMORY_ENTRY_FIELDS = "id,source,target,entry_id,entry_key,domain,content_type,content_tags,quality_status,qa_score,provenance,source_file,batch_id,source_row,project_id,library_id,campaign,platform,region,audience,date_created,date_updated";
+
+/**
+ * 别名在 Directus 里是 json 列，`_icontains` 直接报 INVALID_QUERY，所以库内搜索要
+ * 先在内存里按别名找出命中的 id，再并进同一条查询的 `_or` 里。索引按"集合 + 项目"
+ * 缓存一分钟：导入几千条后 60 秒内刷新一次，够新也不会每敲一个字就全量拉一次。
+ */
+const ALIAS_INDEX_TTL_MS = 60_000;
+const aliasIndexCache = new Map();
+
+function aliasIndexKey(locale, projectId) {
+  return `${collectionFor(locale)}\u0000${projectId || ""}`;
+}
+
+async function aliasMatchIds(locale, projectId, needle) {
+  const query = String(needle || "").trim().toLocaleLowerCase();
+  if (!query) return [];
+  const key = aliasIndexKey(locale, projectId);
+  let cached = aliasIndexCache.get(key);
+  if (!cached || Date.now() - cached.at > ALIAS_INDEX_TTL_MS) {
+    const params = new URLSearchParams({ limit: "-1", fields: "id,aliases" });
+    if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+    const rows = await request(`/items/${collectionFor(locale)}?${params}`);
+    const entries = rows
+      .map((row) => ({ id: row.id, text: arrayValue(row.aliases).join("\u0000").toLocaleLowerCase() }))
+      .filter((entry) => entry.text);
+    cached = { at: Date.now(), entries };
+    aliasIndexCache.set(key, cached);
+  }
+  return cached.entries.filter((entry) => entry.text.includes(query)).map((entry) => entry.id).slice(0, 200);
+}
+
+function applyLibraryEntryFilters(params, { projectId = "", libraryId = "", search = "", aliasIds = [] } = {}) {
+  let group = 0;
+  const nextGroup = () => `filter[_and][${group++}]`;
+  if (projectId) params.set(`${nextGroup()}[project_id][_eq]`, String(projectId));
+  if (libraryId) params.set(`${nextGroup()}[library_id][_eq]`, String(libraryId));
+  if (search) {
+    const base = nextGroup();
+    params.set(`${base}[_or][0][source][_icontains]`, String(search));
+    params.set(`${base}[_or][1][target][_icontains]`, String(search));
+    if (aliasIds.length) params.set(`${base}[_or][2][id][_in]`, aliasIds.join(","));
+  }
+  return params;
+}
+
+/** 术语库 / 记忆库页的条目列表：按库过滤 + 搜索 + 分页（limit<=0 取全量，供导出用）。 */
+export async function listDirectusLibraryEntries({ locale, kind = "term", projectId = "", libraryId = "", search = "", limit = 100, offset = 0 } = {}) {
+  assertLocale(locale);
+  const terms = kind !== "tm";
+  const collection = terms ? collectionFor(locale) : memoryCollectionFor(locale);
+  const fields = terms ? TERM_ENTRY_FIELDS : MEMORY_ENTRY_FIELDS;
+  const aliasIds = terms && search ? await aliasMatchIds(locale, projectId, search) : [];
+  const filters = { projectId, libraryId, search, aliasIds };
+  const countParams = applyLibraryEntryFilters(new URLSearchParams({ "aggregate[count]": "*" }), filters);
+  const countResult = await request(`/items/${collection}?${countParams}`);
+  const total = Number(countResult?.[0]?.count ?? 0);
+  const params = applyLibraryEntryFilters(new URLSearchParams({ sort: "-date_created", fields }), filters);
+  const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(1000, Number(limit) || 100));
+  params.set("limit", directusLimit);
+  params.set("offset", String(Math.max(0, Math.trunc(Number(offset)) || 0)));
+  const rows = await request(`/items/${collection}?${params}`, { timeoutMs: 60_000 });
+  return { total, items: rows.map((row) => (terms ? toTerm(row) : toMemoryEntry(row))) };
+}
+
+function toMemoryEntry(item) {
+  return {
+    id: item.id,
+    source: item.source,
+    target: item.target,
+    entryId: item.entry_id || "",
+    entryKey: item.entry_key || "",
+    domain: item.domain || "general",
+    contentType: item.content_type || "general",
+    qualityStatus: item.quality_status || "provisional",
+    qaScore: Number(item.qa_score) || 0,
+    provenance: item.provenance || "directus",
+    sourceFile: item.source_file || "",
+    sourceRow: Number(item.source_row) || null,
+    batchId: item.batch_id || "",
+    projectId: item.project_id || "",
+    libraryId: item.library_id || "",
+    createdAt: item.date_created,
+    updatedAt: item.date_updated
+  };
+}
+
+/** 库列表要的实时条目数 / 最新条目时间：一次 groupBy 聚合拿全项目的库分组。 */
+export async function getDirectusLibraryStats(locale, projectId = "") {
+  assertLocale(locale);
+  const read = async (collection) => {
+    const params = new URLSearchParams({ "aggregate[count]": "*", "aggregate[max]": "date_created", groupBy: "library_id" });
+    if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+    const rows = await request(`/items/${collection}?${params}`);
+    return rows;
+  };
+  const stats = new Map();
+  const [termRows, memoryRows] = await Promise.all([read(collectionFor(locale)), read(memoryCollectionFor(locale))]);
+  for (const [kind, rows] of [["term", termRows], ["tm", memoryRows]]) {
+    for (const row of rows || []) {
+      const libraryId = row.library_id == null ? "" : String(row.library_id);
+      if (!libraryId) continue;
+      const bucket = stats.get(libraryId) || { entryCount: 0, termCount: 0, memoryCount: 0, lastEntryAt: "" };
+      const count = Number(row.count) || 0;
+      bucket.entryCount += count;
+      if (kind === "term") bucket.termCount += count;
+      else bucket.memoryCount += count;
+      const stamp = row.max?.date_created || "";
+      if (stamp && stamp > bucket.lastEntryAt) bucket.lastEntryAt = stamp;
+      stats.set(libraryId, bucket);
+    }
+  }
+  return stats;
+}
+
+/**
+ * 批量删除条目（"删库并删除库内条目"用）。Directus 支持 DELETE /items/<collection>
+ * 带 id 数组；分批 200 条，避免一个请求体过大。
+ */
+export async function deleteDirectusLibraryEntries(locale, kind, ids = []) {
+  assertLocale(locale);
+  const collection = kind === "tm" ? memoryCollectionFor(locale) : collectionFor(locale);
+  let deleted = 0;
+  for (let index = 0; index < ids.length; index += 200) {
+    const chunk = ids.slice(index, index + 200);
+    if (!chunk.length) continue;
+    await request(`/items/${collection}`, { method: "DELETE", body: chunk, timeoutMs: 60_000 });
+    deleted += chunk.length;
+  }
+  return deleted;
+}
+
+/** 单条术语：编辑要基于现有行合并，不能整条覆盖（否则会丢 library_id 等归属）。 */
+export async function getDirectusAsset(locale, id) {
+  const collection = collectionFor(locale);
+  try {
+    const item = await request(`/items/${collection}/${encodeURIComponent(String(id))}?fields=${TERM_ENTRY_FIELDS},domains,content_tags,asset_tier,case_sensitive,preserve_original,version,version_group_id,lifecycle_status,valid_from,valid_to,projects,channels,platforms,regions,superseded_by`);
+    return toTerm(item);
+  } catch (error) {
+    if (isMissingItem(error)) return null;
+    throw error;
+  }
 }
 
 export async function saveDirectusAsset(locale, input) {

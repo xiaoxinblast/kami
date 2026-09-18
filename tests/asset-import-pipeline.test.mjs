@@ -40,15 +40,15 @@ test("导入任务在开始就带上批次号，服务重启后「继续导入�
   );
   // 之前批次号只在成功（或抛错）时才写进任务载荷：进程被杀就没有 batchId，
   // 任务中心虽然给出「继续导入」，点了却提示"没有可续传的批次"。
-  assert.match(commitRoute, /payload: \{ batchId: String\(body\.batchId \|\| ""\), filename, purpose, aiCleaning, styleEvidence, resumable: false \}/u);
+  assert.match(commitRoute, /payload: \{ batchId: String\(body\.batchId \|\| ""\), filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false \}/u);
   const resumeRoute = server.slice(
     server.indexOf('url.pathname === "/api/assets-import/resume"'),
     server.indexOf('url.pathname === "/api/batch/columns"')
   );
-  assert.match(resumeRoute, /payload: \{ batchId, filename, purpose, aiCleaning, styleEvidence, resumable: false \}/u);
+  assert.match(resumeRoute, /payload: \{ batchId, filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false \}/u);
   // 后台链路写队列拿到批次号后立刻补写，TM 导入同理。
   assert.match(server, /persistedBatchId = persisted\.batchId;/u);
-  assert.match(server, /payload: \{ batchId: batch, filename, purpose, aiCleaning, styleEvidence, resumable: false \}/u);
+  assert.match(server, /payload: \{ batchId: batch, filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false \}/u);
 });
 
 test("中断：跑批循环在分块边界停下，任务标成可继续而不是一直进行中", async () => {
@@ -222,7 +222,7 @@ test("人工 TM 导入支持后台任务：接口立刻返回任务号，页面�
   assert.match(server, /function countProgressReport\(report, from, to\)/u);
 
   const app = await read("../public/app.js");
-  assert.match(app, /styleEvidence: state\.memoryStyleEvidence, background: true/u);
+  assert.match(app, /styleEvidence: state\.memoryStyleEvidence, tmLibraryId: state\.memoryImportTargetId \|\| "", background: true/u);
   assert.match(app, /#memoryImportProgressText/u);
   // 复核确认那条路径也跟同一批次的进度，不再只有按钮文字。
   assert.match(app, /const backgroundTaskId = state\.importPreview\.backgroundTaskId \|\| "";/u);

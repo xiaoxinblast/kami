@@ -56,6 +56,14 @@ test("记忆库选择文件后显示清单并自动预检", { skip: !process.env
       else if (path === "/api/projects") payload = { projects: [{ id: "project-1", name: "测试项目", settings: createDefaultProjectSettings() }] };
       else if (path === "/api/assets") payload = { locale: "zh-CN", revision: 0, terms: [] };
       else if (path === "/api/memories") payload = { memories: [] };
+      else if (path === "/api/projects/project-1/libraries") payload = {
+        projectId: "project-1",
+        libraries: [
+          { id: "tm-master", projectId: "project-1", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1, entryCount: 0 },
+          { id: "tm-working", projectId: "project-1", name: "工作 TM", kind: "translation_memory", role: "working", enabled: true, priority: 2, entryCount: 0 },
+          { id: "term-1", projectId: "project-1", name: "术语库", kind: "term_base", role: "reference", enabled: true, priority: 1, entryCount: 0 }
+        ]
+      };
       else if (path === "/api/feedback/pending" || path === "/api/feedback") payload = [];
       else if (path === "/api/qa-cases/pending") payload = [];
       else if (path === "/api/style-profiles") payload = { styleProfiles: [], evidencePools: [], learningRuns: [], userProfiles: [] };
@@ -64,6 +72,12 @@ test("记忆库选择文件后显示清单并自动预检", { skip: !process.env
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForSelector(".nav-item");
     await page.getByRole("button", { name: "记忆库 TM" }).click();
+
+    // 行内「导入」：目标库跟着这一行走，弹窗里要写清目标库。
+    await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-working"]');
+    await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-working"] [data-library-action="import"]').click();
+    await page.waitForSelector("#memoryImportDialog[open]");
+    assert.match(await page.locator("#memoryImportTarget").textContent(), /工作 TM/u);
 
     const xlsx = { name: "a.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: Buffer.from("test") };
     const csv = { name: "b.csv", mimeType: "text/csv", buffer: Buffer.from("日语,简体中文\n用語,术语\n") };

@@ -40,7 +40,11 @@ test("项目管理提供新建向导、删除入口和稳定的表单重置", as
   assert.match(html, /同时删除后台数据/u);
   assert.match(html, /删除选中项目/u);
   assert.match(script, /const formElement = event\.currentTarget;/u);
-  assert.match(script, /formElement\.reset\(\)/u);
+  // 术语弹窗现在同时服务"新增单条"和"编辑术语"：重置统一走 resetTermDialog()，
+  // 它在内部 reset 表单并清掉编辑态的 id，写完不会把上一条的值留在框里。
+  assert.match(script, /function resetTermDialog\(\)/u);
+  assert.match(script, /form\.reset\(\);/u);
+  assert.match(script, /resetTermDialog\(\);\s*\n\s*\$\("#assetDialog"\)\.close\(\)/u);
   assert.doesNotMatch(script, /event\.currentTarget\.reset\(\)/u);
   assert.match(script, /api\(`\/api\/projects\/\$\{encodeURIComponent\(projectId\)\}\$\{purge \? "\?purge=1" : ""\}`, \{ method: "DELETE" \}\)/u);
   assert.match(script, /确认永久删除/u);

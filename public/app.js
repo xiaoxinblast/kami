@@ -38,9 +38,19 @@ const state = {
   feedbackAll: [],
   feedbackStatusFilter: "pending",
   styleData: null,
-  assets: {},
   memories: [],
   memoryTotal: 0,
+  // 术语库 / 记忆库按"库"管理：库列表 + 选中库后的条目视图。
+  assetLibraries: [],
+  memoryLibraries: [],
+  assetLibraryId: "",
+  memoryLibraryId: "",
+  assetEntries: [],
+  assetEntryTotal: 0,
+  memoryEntryTotal: 0,
+  importTermLibraryId: "",
+  importTmLibraryId: "",
+  memoryImportTargetId: "",
   memoryImportFile: null,
   memoryImportPreview: null,
   styleGuideFile: null,
@@ -165,7 +175,6 @@ async function selectProject(projectId) {
   state.projectSettings = project.settings || null;
   localStorage.setItem("kami-project-id", project.id);
   renderProjectSelector();
-  state.assets = {};
   await loadAssets(state.assetLocale);
   await loadMemories(state.memoryLocale);
   toast(`已切换到项目：${project.name}`);
@@ -179,7 +188,6 @@ async function createProjectFromWizard({ name, description }) {
   state.projectSettings = created.project.settings || null;
   localStorage.setItem("kami-project-id", created.project.id);
   renderProjectSelector();
-  state.assets = {};
   await Promise.all([loadAssets(state.assetLocale), loadMemories(state.memoryLocale)]);
   return created.project;
 }
@@ -290,7 +298,6 @@ async function deleteProjectFromDialog(event) {
     $("#deleteProjectDialog").close();
     $("#deleteProjectData").checked = false;
     await loadProjects();
-    state.assets = {};
     await loadAssets(state.assetLocale);
     await loadMemories(state.memoryLocale);
     if (failed.length) toast(`已删除 ${projectIds.length - failed.length} 个项目，${failed.length} 个失败：${failed[0].reason?.message || "未知错误"}`);
@@ -320,6 +327,8 @@ async function openProjectSettings({ tab = "libraries" } = {}) {
         state.projects = state.projects.map((item) => item.id === project.id ? project : item);
         renderProjectSelector();
         toast("项目设置已保存");
+        // 资源库是术语库 / 记忆库页的同一份数据：保存后两个页面的库列表与导入下拉都要跟着更新。
+        Promise.all([loadAssetsSafeRefresh("term"), loadAssetsSafeRefresh("tm")]).catch(() => {});
       }
     });
     projectSettingsPanel.open(project, Array.isArray(libraryPayload.libraries) ? libraryPayload.libraries : [], { initialTab: tab });
@@ -532,6 +541,8 @@ function switchView(view) {
   $("#viewDescription").textContent = description;
   if (view === "assets") updateAssetLocale(state.assetLocale);
   if (view === "memories") updateMemoryLocale(state.memoryLocale);
+  if (view === "assets") renderLibraryShell("term");
+  if (view === "memories") renderLibraryShell("tm");
   if (view === "tasks") loadTasks().catch((error) => toast(error.message));
   if (view === "styles") loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message));
   if (view === "workbench") setTranslationMode(state.translationMode);
@@ -3798,11 +3809,11 @@ function stopLogAutoRefresh() {
 }
 
 async function loadAssets(locale) {
-  const projectQuery = state.activeProjectId ? `&projectId=${encodeURIComponent(state.activeProjectId)}` : "";
-  const assets = await api(`/api/assets?locale=${encodeURIComponent(locale)}${projectQuery}`);
-  state.assets[locale] = assets;
-  $("#assetRevision").textContent = `${assets.terms.length} 条`;
-  renderAssets();
+  state.assetLocale = locale;
+  await loadProjectLibraries();
+  renderLibraryTable("term");
+  if (state.assetLibraryId) await loadLibraryEntries("term", { append: false });
+  else renderAssetLibrarySummary();
 }
 
 function updateBatchSegmentationOptions(filename = "") {
@@ -3824,32 +3835,23 @@ async function updateMemoryLocale(locale) {
 
 const MEMORY_PAGE_SIZE = 500;
 let memorySearchTimer;
+let termSearchTimer;
 
 /**
  * 记忆库按页读取：标题写"已显示 N / 共 M 条"，搜索也交给服务端。
  * 之前接口固定 limit=500 且前端只在前 500 条里过滤，用户会以为库里只有 500 条。
  */
 async function loadMemories(locale, { append = false } = {}) {
-  const params = new URLSearchParams({ locale, limit: String(MEMORY_PAGE_SIZE) });
-  if (state.activeProjectId) params.set("projectId", state.activeProjectId);
-  const search = $("#memorySearch")?.value.trim() || "";
-  if (search) params.set("search", search);
-  if (append) params.set("offset", String((state.memories || []).length));
-  const payload = await api(`/api/memories?${params}`);
-  const items = payload.memories || [];
-  state.memories = append ? [...(state.memories || []), ...items] : items;
-  state.memoryTotal = Number(payload.total ?? state.memories.length) || 0;
-  renderMemoryCount();
-  renderMemories();
+  state.memoryLocale = locale;
+  await loadProjectLibraries();
+  renderLibraryTable("tm");
+  if (state.memoryLibraryId) await loadLibraryEntries("tm", { append: false });
+  else renderMemoryLibrarySummary();
+  return undefined;
 }
 
 function renderMemoryCount() {
-  const loaded = (state.memories || []).length;
-  const total = Math.max(Number(state.memoryTotal) || 0, loaded);
-  $("#memoryCount").textContent = loaded < total ? `已显示 ${loaded} / 共 ${total} 条` : `${total} 条`;
-  const hasMore = loaded < total;
-  $("#memoryMoreBar").hidden = !hasMore;
-  if (hasMore) $("#memoryMoreMeta").textContent = `还有 ${total - loaded} 条未显示`;
+  renderEntryCount("tm");
 }
 
 /**
@@ -4085,6 +4087,12 @@ function renderAssetPreflight() {
     ? ` 其中库内已存在相同对照 ${duplicates.existing || 0} 条（入库时跳过）、与库内译法冲突 ${duplicates.conflict || 0} 条（不会覆盖库内条目，要改用术语库页面手动改）。`
     : "";
   $("#assetPreflightSummary").textContent = `已识别 ${preview.files?.length || 0} 个文件、${preview.statistics?.entries || 0} 条双语条目。去向：${purposeLabel}；${cleaningText}。${duplicateText}确认后进入后台导入。`;
+  const termLibrary = libraryById("term", state.importTermLibraryId);
+  const tmLibrary = libraryById("tm", state.importTmLibraryId);
+  const targetParts = state.assetImportPurpose === "tm"
+    ? [`人工 TM → ${tmLibrary?.name || "主 TM"}`]
+    : [`术语 → ${termLibrary?.name || "默认术语库"}`, `句段 → ${tmLibrary?.name || "主 TM"}`];
+  $("#assetPreflightTarget").textContent = `目标库：${targetParts.join(" · ")}（在「项目设置 → 资源库」里调整）`;
 }
 
 async function confirmAssetPreflight() {
@@ -4114,7 +4122,9 @@ async function confirmAssetPreflight() {
       candidates,
       purpose,
       aiCleaning,
-      styleEvidence
+      styleEvidence,
+      termLibraryId: state.importTermLibraryId || "",
+      tmLibraryId: state.importTmLibraryId || ""
     }) });
     const returnView = state.assetImportReturnView;
     const accepted = Number(result.accepted) || candidates.length;
@@ -4210,6 +4220,27 @@ function validateMemoryImportFiles(files) {
   return "";
 }
 
+/** 记忆库页行内「导入」：目标库固定为这一行，打开弹窗再选文件（预检 → 确认写库）。 */
+function openMemoryImportDialog(libraryId) {
+  const library = libraryById("tm", libraryId);
+  state.memoryImportTargetId = String(libraryId || "");
+  state.memoryImportFiles = [];
+  state.memoryImportFile = null;
+  state.memoryImportPreview = null;
+  const picker = $("#memoryFile");
+  if (picker) picker.value = "";
+  $("#memoryImportTarget").textContent = library
+    ? `目标库：${library.name}（${libraryRoleLabel("tm", library)} · 优先级 ${Number(library.priority) || 1}）`
+    : "目标库：主 TM";
+  $("#memoryImportButton").disabled = true;
+  $("#memoryImportButton").textContent = "预检 TM";
+  renderMemoryImportFiles();
+  $("#memoryImportNote").textContent = `选择文件后会自动本地预检（不调用模型）；确认后写入「${library?.name || "主 TM"}」，并自动接回当前项目中可唯一定位的原翻译轨迹。`;
+  $("#memoryImportPreview").hidden = true;
+  $("#memoryImportProgress").hidden = true;
+  $("#memoryImportDialog").showModal();
+}
+
 async function previewMemoryImport() {
   const files = state.memoryImportFiles.length ? state.memoryImportFiles : [state.memoryImportFile].filter(Boolean);
   if (!files.length) return;
@@ -4281,7 +4312,7 @@ async function commitMemoryImport() {
   try {
     $("#memoryImportConfirm").disabled = true;
     // 写入改为后台任务：几千条要跑几分钟，界面得有进度、也要允许关页面。
-    const started = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: state.memoryStyleEvidence, background: true }) });
+    const started = await api("/api/tm-import/commit", { method: "POST", body: JSON.stringify({ ...projectPayload(), batchId: preview.batchId, filename: preview.filename, candidates, styleEvidence: state.memoryStyleEvidence, tmLibraryId: state.memoryImportTargetId || "", background: true }) });
     const taskId = started.taskId || started.backgroundTaskId;
     $("#memoryImportProgress").hidden = false;
     $("#memoryImportProgressText").textContent = `已提交后台写入 ${started.accepted ?? candidates.length} 条…`;
@@ -4303,7 +4334,8 @@ async function commitMemoryImport() {
     const skippedText = Number(summary?.skipped) ? `；跳过 ${summary.skipped} 条` : "";
     const evidenceText = state.memoryStyleEvidence ? "，并已写入风格学习证据池" : "";
     if (task?.status === "completed") {
-      $("#memoryImportNote").textContent = `TM 已写入当前项目主 TM：${summary?.memories ?? 0} 条${evidenceText}；接回原翻译轨迹 ${summary?.trajectoriesLinked || 0} 条${skippedText}。`;
+      const targetName = libraryById("tm", state.memoryImportTargetId)?.name || "目标 TM";
+      $("#memoryImportNote").textContent = `TM 已写入「${targetName}」：${summary?.memories ?? 0} 条${evidenceText}；接回原翻译轨迹 ${summary?.trajectoriesLinked || 0} 条${skippedText}。`;
       toast("人工 TM 导入完成");
     } else {
       $("#memoryImportNote").textContent = `后台写入未完成：${task?.progress?.message || "请到任务中心查看"}。可在任务中心点「继续导入」补齐。`;
@@ -4311,7 +4343,7 @@ async function commitMemoryImport() {
     }
     $("#memoryImportPreview").hidden = true;
     state.memoryImportPreview = null;
-    await loadMemories(state.memoryLocale);
+    await loadAssetsSafeRefresh("tm");
   } catch (error) {
     $("#memoryImportNote").textContent = error.message;
     toast(error.message);
@@ -4323,27 +4355,405 @@ async function commitMemoryImport() {
 function renderMemories() {
   // 搜索已在服务端完成：这里直接渲染服务端返回的这一页，不能再按输入框二次过滤，
   // 否则会把服务端匹配到的条目又筛掉（大小写、全半角等口径不一致）。
-  const items = state.memories || [];
-  $("#memoryList").innerHTML = items.length ? items.map((item) => `
-    <div class="asset-row"><div class="asset-row-main"><strong>${escapeHtml(item.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(item.target)}</strong><div class="asset-meta"><span>${item.qualityStatus === "human_approved" ? "主 TM / 人工确认" : item.qualityStatus === "machine_verified" ? "工作 TM / 机器译文" : "候选"}</span>${item.sourceFile ? `<span>${escapeHtml(item.sourceFile)}</span>` : ""}${item.sourceRow ? `<span>第 ${item.sourceRow} 行</span>` : ""}${item.catMatchKind ? `<span>${escapeHtml(item.catMatchKind)}</span>` : ""}</div></div></div>
-  `).join("") : '<div class="empty-list">当前项目没有匹配的 TM 条目</div>';
+  renderLibraryEntries("tm");
 }
 
-function renderAssets() {
-  const data = state.assets[state.assetLocale];
-  if (!data) return;
-  const query = $("#assetSearch").value.trim().toLowerCase();
-  const terms = data.terms.filter((term) => [term.source, term.target, ...(term.aliases || [])].some((value) => value.toLowerCase().includes(query)));
-  $("#assetList").innerHTML = terms.length ? terms.map((term) => `
-    <div class="asset-row"><div class="asset-row-main"><strong>${escapeHtml(term.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(term.target)}</strong><div class="asset-meta"><span>正式术语</span>${(term.contentTypes || []).map((type) => `<span>${escapeHtml(state.bootstrap.contentTypes[type]?.label || type)}</span>`).join("")}${(term.contentTags || []).map((tag) => `<span>${escapeHtml(Object.values(state.bootstrap.contentTags || {}).find((group) => group[tag])?.[tag] || tag)}</span>`).join("")}${term.provenance ? `<span>${escapeHtml(term.provenance)}</span>` : ""}</div>${String(term.note || "").trim() ? `<p class="asset-note" title="${escapeHtml(term.note)}"><em>注释</em>${escapeHtml(term.note)}</p>` : ""}</div><button class="delete-term" data-id="${term.id}" title="删除术语" aria-label="删除术语">×</button></div>
-  `).join("") : '<div class="empty-list asset-empty">当前筛选没有术语</div>';
-  $$(".delete-term").forEach((button) => button.addEventListener("click", async () => {
-    if (!confirm("确认从日语→简体中文术语库删除这条术语？")) return;
-    const projectQuery = state.activeProjectId ? `&projectId=${encodeURIComponent(state.activeProjectId)}` : "";
-    await api(`/api/assets/${encodeURIComponent(button.dataset.id)}?locale=${encodeURIComponent(state.assetLocale)}${projectQuery}`, { method: "DELETE" });
-    await loadAssets(state.assetLocale);
-    toast("已从日语→简体中文术语库删除");
-  }));
+/** 术语库 / 记忆库共用的库列表与条目视图。kind: "term" | "tm" */
+const ENTRY_PAGE_SIZE = 500;
+
+function projectLibraryList(kind) {
+  return kind === "term" ? state.assetLibraries : state.memoryLibraries;
+}
+
+function libraryById(kind, id) {
+  return projectLibraryList(kind).find((library) => library.id === String(id)) || null;
+}
+
+function libraryKindLabel(kind) {
+  return kind === "term" ? "术语库" : "TM";
+}
+
+function libraryRoleLabel(kind, library) {
+  if (kind === "term") return "术语库";
+  if (library?.role === "master") return "主 TM";
+  if (library?.role === "working") return "工作 TM";
+  return "参考 TM";
+}
+
+function activeLibraryId(kind) {
+  return kind === "term" ? state.assetLibraryId : state.memoryLibraryId;
+}
+
+function activeEntries(kind) {
+  return kind === "term" ? state.assetEntries : state.memories;
+}
+
+function entrySearchValue(kind) {
+  return ($(kind === "term" ? "#assetSearch" : "#memorySearch")?.value || "").trim();
+}
+
+/**
+ * 库列表与导入下拉的唯一数据源：项目设置里的资源库 + 实时条目数。
+ * 项目设置保存、库开关、删库之后都要重新调用它，保证两处永远一致。
+ */
+async function loadProjectLibraries() {
+  if (!state.activeProjectId) return [];
+  const payload = await api(`/api/projects/${encodeURIComponent(state.activeProjectId)}/libraries?withStats=1`);
+  const libraries = Array.isArray(payload.libraries) ? payload.libraries : [];
+  state.assetLibraries = libraries.filter((library) => library.kind === "term_base");
+  state.memoryLibraries = libraries.filter((library) => library.kind === "translation_memory");
+  renderImportTargetOptions();
+  return libraries;
+}
+
+/** 双语资产导入页的目标库下拉：只列启用中的库作为可选项，默认取主 TM / 首选术语库。 */
+function renderImportTargetOptions() {
+  const optionsOf = (libraries) => libraries
+    .map((library) => `<option value="${escapeHtml(library.id)}" ${library.enabled ? "" : "disabled"}>${escapeHtml(library.name)}${library.enabled ? "" : "（未启用）"}</option>`)
+    .join("");
+  const termSelect = $("#importTermLibrary");
+  if (termSelect) {
+    termSelect.innerHTML = optionsOf(state.assetLibraries);
+    const usable = state.assetLibraries.find((library) => library.id === state.importTermLibraryId && library.enabled)
+      || state.assetLibraries.find((library) => library.enabled)
+      || state.assetLibraries[0];
+    state.importTermLibraryId = usable?.id || "";
+    termSelect.value = state.importTermLibraryId;
+  }
+  const tmSelect = $("#importTmLibrary");
+  if (tmSelect) {
+    tmSelect.innerHTML = optionsOf(state.memoryLibraries);
+    const usable = state.memoryLibraries.find((library) => library.id === state.importTmLibraryId && library.enabled)
+      || state.memoryLibraries.find((library) => library.role === "master" && library.enabled)
+      || state.memoryLibraries.find((library) => library.enabled)
+      || state.memoryLibraries[0];
+    state.importTmLibraryId = usable?.id || "";
+    tmSelect.value = state.importTmLibraryId;
+  }
+}
+
+function formatLibraryTime(value) {
+  if (!value) return "—";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp));
+}
+
+function libraryRowMarkup(kind, library) {
+  const entries = Number(library.entryCount) || 0;
+  const roleLabel = libraryRoleLabel(kind, library);
+  const roleClass = kind === "term" ? "term" : (library.role || "reference");
+  const id = escapeHtml(library.id);
+  return `<tr class="library-row${library.enabled ? "" : " is-disabled"}" data-library-kind="${kind}" data-library-id="${id}">
+    <td><label class="library-toggle"><input type="checkbox" data-library-toggle="1" data-kind="${kind}" data-id="${id}" ${library.enabled ? "checked" : ""} aria-label="启用/停用 ${escapeHtml(library.name)}" /><span aria-hidden="true"></span></label></td>
+    <td><span class="library-badge ${roleClass}">${escapeHtml(roleLabel)}</span></td>
+    <td><strong>${escapeHtml(library.name || "未命名资源库")}</strong><small>${escapeHtml(library.description || "")}</small></td>
+    <td>日 → 简中</td>
+    <td class="library-count">${entries}</td>
+    <td>${Number(library.priority) || 1}</td>
+    <td>${escapeHtml(formatLibraryTime(library.lastEntryAt))}</td>
+    <td class="library-actions">
+      <button class="button secondary small" type="button" data-library-action="open" data-kind="${kind}" data-id="${id}">打开</button>
+      <button class="button ghost small" type="button" data-library-action="import" data-kind="${kind}" data-id="${id}" ${library.enabled ? "" : "disabled"} title="${library.enabled ? "导入到这个库" : "未启用的库不能作为导入目标"}">导入</button>
+      <button class="button ghost small" type="button" data-library-action="export" data-kind="${kind}" data-id="${id}">导出</button>
+      <button class="button ghost small" type="button" data-library-action="settings" data-kind="${kind}" data-id="${id}">设置</button>
+      <button class="button ghost small danger" type="button" data-library-action="delete" data-kind="${kind}" data-id="${id}">删除</button>
+    </td></tr>`;
+}
+
+function renderLibraryTable(kind) {
+  const body = $(kind === "term" ? "#assetLibraryBody" : "#memoryLibraryBody");
+  if (!body) return;
+  const libraries = projectLibraryList(kind);
+  const total = libraries.reduce((sum, library) => sum + (Number(library.entryCount) || 0), 0);
+  const mergeRow = `<tr class="library-row is-merge" data-library-kind="${kind}" data-library-id="">
+    <td><span class="library-merge-dot" title="合并视图不改变任何库的启用状态"></span></td>
+    <td><span class="library-badge merge">合并</span></td>
+    <td><strong>全部库（合并视图）</strong><small>把当前语言的 ${libraries.length} 个${libraryKindLabel(kind)}合并查看</small></td>
+    <td>日 → 简中</td>
+    <td class="library-count">${total}</td>
+    <td>—</td><td>—</td>
+    <td class="library-actions">
+      <button class="button secondary small" type="button" data-library-action="open" data-kind="${kind}" data-id="">打开</button>
+      <button class="button ghost small" type="button" data-library-action="export" data-kind="${kind}" data-id="">导出</button>
+    </td></tr>`;
+  const rows = libraries.map((library) => libraryRowMarkup(kind, library)).join("");
+  body.innerHTML = `${mergeRow}${rows}` || mergeRow;
+  // 打开了具体库时表头写的是"已显示 N / 共 M 条"，不要被库列表的总数覆盖。
+  if (!activeLibraryId(kind)) {
+    if (kind === "term") renderAssetLibrarySummary();
+    else renderMemoryLibrarySummary();
+  }
+}
+
+function renderAssetLibrarySummary() {
+  const total = state.assetLibraries.reduce((sum, library) => sum + (Number(library.entryCount) || 0), 0);
+  $("#assetRevision").textContent = `${total} 条`;
+  $("#assetList").innerHTML = "";
+}
+
+function renderMemoryLibrarySummary() {
+  const total = state.memoryLibraries.reduce((sum, library) => sum + (Number(library.entryCount) || 0), 0);
+  $("#memoryCount").textContent = `${total} 条`;
+  const more = $("#memoryMoreBar");
+  if (more) more.hidden = true;
+  $("#memoryList").innerHTML = "";
+}
+
+/** 两级切换：库列表 ↔ 条目视图，面包屑显示当前库。 */
+function renderLibraryShell(kind) {
+  const libraryId = activeLibraryId(kind);
+  const listView = $(kind === "term" ? "#assetLibraryView" : "#memoryLibraryView");
+  const entryView = $(kind === "term" ? "#assetEntryView" : "#memoryEntryView");
+  const breadcrumb = $(kind === "term" ? "#assetBreadcrumb" : "#memoryBreadcrumb");
+  const nameNode = $(kind === "term" ? "#assetBreadcrumbName" : "#memoryBreadcrumbName");
+  const metaNode = $(kind === "term" ? "#assetBreadcrumbMeta" : "#memoryBreadcrumbMeta");
+  const library = libraryId ? libraryById(kind, libraryId) : null;
+  if (listView) listView.hidden = Boolean(libraryId);
+  if (entryView) entryView.hidden = !libraryId;
+  if (breadcrumb) breadcrumb.hidden = !libraryId;
+  if (library) {
+    if (nameNode) nameNode.textContent = library.name || "未命名资源库";
+    if (metaNode) metaNode.textContent = `${libraryRoleLabel(kind, library)} · ${Number(library.entryCount) || 0} 条 · 日 → 简中 · 优先级 ${Number(library.priority) || 1}`;
+  }
+}
+
+async function loadLibraryEntries(kind, { append = false } = {}) {
+  const libraryId = activeLibraryId(kind);
+  const locale = kind === "term" ? state.assetLocale : state.memoryLocale;
+  const params = new URLSearchParams({ locale, kind, limit: String(ENTRY_PAGE_SIZE), search: entrySearchValue(kind) });
+  if (state.activeProjectId) params.set("projectId", state.activeProjectId);
+  if (libraryId) params.set("libraryId", libraryId);
+  if (append) params.set("offset", String(activeEntries(kind).length));
+  const payload = await api(`/api/library-entries?${params}`);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  if (kind === "term") {
+    state.assetEntries = append ? [...state.assetEntries, ...items] : items;
+    state.assetEntryTotal = Number(payload.total) || 0;
+  } else {
+    state.memories = append ? [...state.memories, ...items] : items;
+    state.memoryEntryTotal = Number(payload.total) || 0;
+  }
+  renderLibraryEntries(kind);
+  renderEntryCount(kind);
+}
+
+function renderEntryCount(kind) {
+  if (kind === "term") {
+    const loaded = state.assetEntries.length;
+    const total = Math.max(state.assetEntryTotal, loaded);
+    $("#assetRevision").textContent = loaded < total ? `已显示 ${loaded} / 共 ${total} 条` : `${total} 条`;
+    const more = $("#assetMoreBar");
+    if (more) {
+      more.hidden = loaded >= total;
+      if (loaded < total) $("#assetMoreMeta").textContent = `还有 ${total - loaded} 条未显示`;
+    }
+    return;
+  }
+  const loaded = state.memories.length;
+  const total = Math.max(state.memoryEntryTotal, loaded);
+  $("#memoryCount").textContent = loaded < total ? `已显示 ${loaded} / 共 ${total} 条` : `${total} 条`;
+  const more = $("#memoryMoreBar");
+  if (more) {
+    more.hidden = loaded >= total;
+    if (loaded < total) $("#memoryMoreMeta").textContent = `还有 ${total - loaded} 条未显示`;
+  }
+}
+
+function entriesEmptyText(kind) {
+  return entrySearchValue(kind) ? "当前筛选没有条目" : `这个${libraryKindLabel(kind)}里还没有条目`;
+}
+
+function renderLibraryEntries(kind) {
+  const items = activeEntries(kind);
+  if (kind === "term") {
+    $("#assetList").innerHTML = items.length ? items.map((term) => `
+      <div class="asset-row" data-entry-id="${escapeHtml(term.id)}"><div class="asset-row-main"><strong>${escapeHtml(term.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(term.target)}</strong><div class="asset-meta"><span>${escapeHtml(libraryById("term", term.libraryId)?.name || "正式术语")}</span>${(term.contentTypes || []).map((type) => `<span>${escapeHtml(state.bootstrap.contentTypes[type]?.label || type)}</span>`).join("")}${term.provenance ? `<span>${escapeHtml(term.provenance)}</span>` : ""}</div>${String(term.note || "").trim() ? `<p class="asset-note" title="${escapeHtml(term.note)}"><em>注释</em>${escapeHtml(term.note)}</p>` : ""}</div><div class="asset-row-actions"><button class="button ghost small" type="button" data-term-action="edit" data-id="${escapeHtml(term.id)}">编辑</button><button class="button ghost small danger" type="button" data-term-action="delete" data-id="${escapeHtml(term.id)}">删除</button></div></div>
+    `).join("") : `<div class="empty-list asset-empty">${entriesEmptyText("term")}</div>`;
+    return;
+  }
+  $("#memoryList").innerHTML = items.length ? items.map((item) => `
+    <div class="asset-row" data-entry-id="${escapeHtml(item.id)}"><div class="asset-row-main"><strong>${escapeHtml(item.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(item.target)}</strong><div class="asset-meta"><span>${escapeHtml(libraryById("tm", item.libraryId)?.name || (item.qualityStatus === "human_approved" ? "人工确认" : item.qualityStatus === "machine_verified" ? "机器译文" : "候选"))}</span><span>${item.qualityStatus === "human_approved" ? "人工确认" : item.qualityStatus === "machine_verified" ? "机器译文" : "候选"}</span>${item.entryKey ? `<span>${escapeHtml(item.entryKey)}</span>` : ""}${item.sourceFile ? `<span>${escapeHtml(item.sourceFile)}</span>` : ""}${item.sourceRow ? `<span>第 ${item.sourceRow} 行</span>` : ""}</div></div><div class="asset-row-actions"><button class="button ghost small" type="button" data-memory-action="edit" data-id="${escapeHtml(item.id)}">编辑</button><button class="button ghost small danger" type="button" data-memory-action="delete" data-id="${escapeHtml(item.id)}">删除</button></div></div>
+  `).join("") : `<div class="empty-list">${entriesEmptyText("tm")}</div>`;
+}
+
+async function openLibrary(kind, libraryId) {
+  if (kind === "term") state.assetLibraryId = String(libraryId || "");
+  else state.memoryLibraryId = String(libraryId || "");
+  renderLibraryShell(kind);
+  const search = $(kind === "term" ? "#assetSearch" : "#memorySearch");
+  if (search) search.value = "";
+  await loadLibraryEntries(kind, { append: false });
+}
+
+async function closeLibrary(kind) {
+  if (kind === "term") {
+    state.assetLibraryId = "";
+    state.assetEntries = [];
+    state.assetEntryTotal = 0;
+  } else {
+    state.memoryLibraryId = "";
+    state.memories = [];
+    state.memoryEntryTotal = 0;
+  }
+  renderLibraryShell(kind);
+  await loadAssetsSafeRefresh(kind);
+}
+
+/** 刷新库列表（含实时条目数）；库内条目视图打开时一并刷新。 */
+async function loadAssetsSafeRefresh(kind) {
+  await loadProjectLibraries();
+  renderLibraryTable(kind);
+  if (activeLibraryId(kind)) await loadLibraryEntries(kind, { append: false });
+  else if (kind === "term") renderAssetLibrarySummary();
+  else renderMemoryLibrarySummary();
+}
+
+async function toggleLibraryEnabled(kind, libraryId, enabled) {
+  const library = libraryById(kind, libraryId);
+  if (!library) return;
+  await api(`/api/projects/${encodeURIComponent(state.activeProjectId)}/libraries/${encodeURIComponent(libraryId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled })
+  });
+  toast(enabled ? `已启用「${library.name}」，它会参与翻译检索` : `已停用「${library.name}」，它不再参与翻译检索`);
+  await loadAssetsSafeRefresh(kind);
+}
+
+async function deleteLibrary(kind, libraryId) {
+  const library = libraryById(kind, libraryId);
+  if (!library) return;
+  const count = Number(library.entryCount) || 0;
+  const choice = await openChoiceDialog({
+    kicker: "DELETE LIBRARY",
+    title: `删除「${library.name}」`,
+    summary: `这个库里现在有 ${count} 条条目。库设置会被删除，你要怎么处理库内条目？`,
+    options: [
+      { id: "keep", label: "仅删除库", hint: `${count} 条条目保留在数据库里，但不再归属任何库、也不再参与检索` },
+      { id: "purge", label: `连条目一起删除（${count} 条）`, hint: "永久删除库内全部条目，无法恢复" }
+    ]
+  });
+  if (!choice) return;
+  try {
+    if (choice === "purge" && count > 0) {
+      const locale = kind === "term" ? state.assetLocale : state.memoryLocale;
+      await api(`/api/library-entries?locale=${encodeURIComponent(locale)}&kind=${kind}&projectId=${encodeURIComponent(state.activeProjectId)}&libraryId=${encodeURIComponent(libraryId)}`, { method: "DELETE" });
+    }
+    await api(`/api/projects/${encodeURIComponent(state.activeProjectId)}/libraries/${encodeURIComponent(libraryId)}`, { method: "DELETE" });
+    if (activeLibraryId(kind) === libraryId) {
+      if (kind === "term") state.assetLibraryId = "";
+      else state.memoryLibraryId = "";
+      renderLibraryShell(kind);
+    }
+    toast(choice === "purge" ? `已删除「${library.name}」与库内 ${count} 条条目` : `已删除「${library.name}」，库内条目保留但不再归属`);
+    await loadAssetsSafeRefresh(kind);
+  } catch (error) { toast(error.message); }
+}
+
+/** 行内导入：术语走双语资产导入预检，TM 走人工 TM 预检弹窗，目标库就是这一行。 */
+function importIntoLibrary(kind, libraryId) {
+  const library = libraryById(kind, libraryId);
+  if (!library) return;
+  if (library.enabled !== true) return toast(`「${library.name}」未启用，不能作为导入目标`);
+  if (kind === "term") {
+    state.importTermLibraryId = library.id;
+    if ($("#importTermLibrary")) $("#importTermLibrary").value = library.id;
+    $("#termLibraryFile").click();
+    return;
+  }
+  openMemoryImportDialog(library.id);
+}
+
+async function exportLibrary(kind, libraryId, button) {
+  const library = libraryId ? libraryById(kind, libraryId) : null;
+  const label = library ? library.name : `全部${libraryKindLabel(kind)}`;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "提交中…";
+  }
+  try {
+    await api("/api/library-export", {
+      method: "POST",
+      body: JSON.stringify({
+        ...projectPayload(),
+        locale: kind === "term" ? state.assetLocale : state.memoryLocale,
+        kind,
+        libraryId: libraryId || ""
+      })
+    });
+    toast(`「${label}」导出已进入任务中心，跑完在那里下载 Excel`);
+  } catch (error) { toast(error.message); }
+  finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "导出";
+    }
+  }
+}
+
+function openTermEditDialog(entry) {
+  const form = $("#assetForm");
+  if (!form || !entry) return;
+  form.reset();
+  form.source.value = entry.source || "";
+  form.target.value = entry.target || "";
+  form.aliases.value = (entry.aliases || []).join(", ");
+  form.forbidden.value = (entry.forbidden || []).join(", ");
+  form.contentType.value = (entry.contentTypes || [])[0] || "general";
+  form.note.value = entry.note || "";
+  $("#assetDialogId").value = entry.id;
+  $("#assetDialogTitle").textContent = "编辑术语";
+  $("#assetDialogSubmit").textContent = "保存修改";
+  const library = entry.libraryId ? libraryById("term", entry.libraryId) : null;
+  $("#assetDialogTarget").textContent = `所属库：${library?.name || "未归属"} · 修改不会改变库归属`;
+  $("#assetDialog").showModal();
+}
+
+function resetTermDialog() {
+  const form = $("#assetForm");
+  if (!form) return;
+  form.reset();
+  $("#assetDialogId").value = "";
+  $("#assetDialogTitle").textContent = "新增单条术语";
+  $("#assetDialogSubmit").textContent = "保存到当前语言库";
+  const library = state.assetLibraryId ? libraryById("term", state.assetLibraryId) : null;
+  $("#assetDialogTarget").textContent = library
+    ? `将保存到：${library.name}`
+    : "将保存到：项目里优先级最高的启用术语库（想指定库请先在术语库页打开那个库）";
+}
+
+async function deleteTermEntry(entry) {
+  if (!entry) return;
+  if (!confirm(`确认删除术语「${entry.source} → ${entry.target}」？删除后翻译不再参考它。`)) return;
+  await api(`/api/assets/${encodeURIComponent(entry.id)}?locale=${encodeURIComponent(state.assetLocale)}&projectId=${encodeURIComponent(state.activeProjectId || "")}`, { method: "DELETE" });
+  toast("已删除术语");
+  await loadAssetsSafeRefresh("term");
+}
+
+function openMemoryEntryDialog(entry) {
+  const form = $("#memoryEntryForm");
+  if (!form || !entry) return;
+  form.reset();
+  form.source.value = entry.source || "";
+  form.target.value = entry.target || "";
+  form.entryKey.value = entry.entryKey || "";
+  $("#memoryEntryId").value = entry.id;
+  const library = entry.libraryId ? libraryById("tm", entry.libraryId) : null;
+  $("#memoryEntryMeta").textContent = [
+    `所属库：${library?.name || "未归属"}`,
+    entry.qualityStatus === "human_approved" ? "人工确认" : entry.qualityStatus === "machine_verified" ? "机器译文" : "候选",
+    entry.sourceFile ? `来源 ${entry.sourceFile}${entry.sourceRow ? ` 第 ${entry.sourceRow} 行` : ""}` : "",
+    "修改不会改变库归属"
+  ].filter(Boolean).join(" · ");
+  $("#memoryEntryDialog").showModal();
+}
+
+async function deleteMemoryEntry(entry) {
+  if (!entry) return;
+  if (!confirm(`确认删除这条 TM 条目？\n${entry.source}\n→ ${entry.target}`)) return;
+  await api(`/api/memories/${encodeURIComponent(entry.id)}?locale=${encodeURIComponent(state.memoryLocale)}`, { method: "DELETE" });
+  toast("已删除 TM 条目");
+  await loadAssetsSafeRefresh("tm");
 }
 
 async function setImportFile(file) {
@@ -5659,7 +6069,7 @@ function bindEvents() {
       Promise.resolve(task).catch((error) => toast(error.message));
     }
     else if (state.view === "feedback") loadFeedbackPage().catch((error) => toast(error.message));
-    else $("#assetDialog").showModal();
+    else { resetTermDialog(); $("#assetDialog").showModal(); }
   });
   $("#secondaryAction").addEventListener("click", () => {
     if (state.view === "autoqa") return clearAutoQa();
@@ -5759,7 +6169,71 @@ function bindEvents() {
   $("#batchDropZone").addEventListener("dragover", (event) => { event.preventDefault(); $("#batchDropZone").classList.add("dragging"); });
   $("#batchDropZone").addEventListener("dragleave", () => $("#batchDropZone").classList.remove("dragging"));
   $("#batchDropZone").addEventListener("drop", (event) => { event.preventDefault(); $("#batchDropZone").classList.remove("dragging"); setBatchFile(event.dataTransfer.files[0]); });
-  $("#assetSearch").addEventListener("input", renderAssets);
+  $("#assetSearch").addEventListener("input", () => {
+    clearTimeout(termSearchTimer);
+    termSearchTimer = setTimeout(() => {
+      if (state.view !== "assets" || !state.assetLibraryId) return;
+      loadLibraryEntries("term", { append: false }).catch((error) => toast(error.message));
+    }, 300);
+  });
+  $("#assetMore").addEventListener("click", () => loadLibraryEntries("term", { append: true }).catch((error) => toast(error.message)));
+  // 库列表：启用开关、打开 / 导入 / 导出 / 设置 / 删除。
+  for (const [kind, selector] of [["term", "#assetLibraryBody"], ["tm", "#memoryLibraryBody"]]) {
+    $(selector).addEventListener("click", (event) => {
+      const toggle = event.target.closest("[data-library-toggle]");
+      if (toggle) {
+        toggleLibraryEnabled(kind, toggle.dataset.id, toggle.checked).catch((error) => {
+          toggle.checked = !toggle.checked;
+          toast(error.message);
+        });
+        return;
+      }
+      const button = event.target.closest("[data-library-action]");
+      if (!button) return;
+      const libraryId = button.dataset.id || "";
+      if (button.dataset.libraryAction === "open") openLibrary(kind, libraryId).catch((error) => toast(error.message));
+      else if (button.dataset.libraryAction === "import") importIntoLibrary(kind, libraryId);
+      else if (button.dataset.libraryAction === "export") exportLibrary(kind, libraryId, button);
+      else if (button.dataset.libraryAction === "settings") openProjectSettings({ tab: "libraries" });
+      else if (button.dataset.libraryAction === "delete") deleteLibrary(kind, libraryId);
+    });
+  }
+  $("#assetBreadcrumbBack").addEventListener("click", () => closeLibrary("term").catch((error) => toast(error.message)));
+  $("#memoryBreadcrumbBack").addEventListener("click", () => closeLibrary("tm").catch((error) => toast(error.message)));
+  $("#assetList").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-term-action]");
+    if (!button) return;
+    const entry = state.assetEntries.find((item) => item.id === button.dataset.id);
+    if (button.dataset.termAction === "edit") openTermEditDialog(entry);
+    else if (button.dataset.termAction === "delete") deleteTermEntry(entry).catch((error) => toast(error.message));
+  });
+  $("#memoryList").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-memory-action]");
+    if (!button) return;
+    const entry = state.memories.find((item) => item.id === button.dataset.id);
+    if (button.dataset.memoryAction === "edit") openMemoryEntryDialog(entry);
+    else if (button.dataset.memoryAction === "delete") deleteMemoryEntry(entry).catch((error) => toast(error.message));
+  });
+  $("#importTermLibrary")?.addEventListener("change", (event) => { state.importTermLibraryId = event.target.value; });
+  $("#importTmLibrary")?.addEventListener("change", (event) => { state.importTmLibraryId = event.target.value; });
+  $("#memoryEntryForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const id = $("#memoryEntryId").value;
+    if (!id) return;
+    const submit = form.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    try {
+      await api(`/api/memories/${encodeURIComponent(id)}?locale=${encodeURIComponent(state.memoryLocale)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ source: form.source.value, target: form.target.value, entryKey: form.entryKey.value })
+      });
+      $("#memoryEntryDialog").close();
+      toast("TM 条目已更新");
+      await loadAssetsSafeRefresh("tm");
+    } catch (error) { toast(error.message); }
+    finally { submit.disabled = false; }
+  });
   $("#termLibraryFile").addEventListener("change", (event) => {
     const files = event.target.files;
     if (!files.length) return;
@@ -5770,10 +6244,11 @@ function bindEvents() {
     clearTimeout(memorySearchTimer);
     memorySearchTimer = setTimeout(() => {
       if (state.view !== "memories") return;
-      loadMemories(state.memoryLocale).catch((error) => toast(error.message));
+      if (!state.memoryLibraryId) return;
+      loadLibraryEntries("tm", { append: false }).catch((error) => toast(error.message));
     }, 300);
   });
-  $("#memoryMore").addEventListener("click", () => loadMemories(state.memoryLocale, { append: true }).catch((error) => toast(error.message)));
+  $("#memoryMore").addEventListener("click", () => loadLibraryEntries("tm", { append: true }).catch((error) => toast(error.message)));
   $("#memoryFile").addEventListener("change", (event) => {
     state.memoryImportFiles = [...event.target.files];
     state.memoryImportFile = state.memoryImportFiles[0] || null;
@@ -5864,15 +6339,29 @@ function bindEvents() {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
+    const editingId = $("#assetDialogId").value;
+    const payload = {
+      source: form.get("source"), target: form.get("target"),
+      aliases: String(form.get("aliases") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean),
+      forbidden: String(form.get("forbidden") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean),
+      contentTypes: [form.get("contentType")], domains: ["game"], enforcement: "preferred", note: form.get("note")
+    };
     try {
-      await api("/api/assets", { method: "POST", body: JSON.stringify({ ...projectPayload(), locale: state.assetLocale, term: {
-        source: form.get("source"), target: form.get("target"), aliases: String(form.get("aliases") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean),
-        forbidden: String(form.get("forbidden") || "").split(/[,，]/).map((value) => value.trim()).filter(Boolean), contentTypes: [form.get("contentType")], domains: ["game"], enforcement: "preferred", note: form.get("note")
-      } }) });
-      formElement.reset();
+      if (editingId) {
+        // 编辑只改内容：库归属由服务端保留，不会被"默认库"覆盖。
+        await api(`/api/assets/${encodeURIComponent(editingId)}?locale=${encodeURIComponent(state.assetLocale)}`, { method: "PATCH", body: JSON.stringify(payload) });
+      } else {
+        await api("/api/assets", { method: "POST", body: JSON.stringify({
+          ...projectPayload(),
+          locale: state.assetLocale,
+          // 打开某个库时"新增单条"就加进这个库；在库列表页则用项目默认库。
+          term: { ...payload, ...(state.assetLibraryId ? { libraryId: state.assetLibraryId } : {}) }
+        }) });
+      }
+      resetTermDialog();
       $("#assetDialog").close();
-      await loadAssets(state.assetLocale);
-      toast(`已保存到${state.bootstrap.locales[state.assetLocale].label}术语库`);
+      await loadAssetsSafeRefresh("term");
+      toast(editingId ? "术语已更新" : `已保存到${state.bootstrap.locales[state.assetLocale].label}术语库`);
     } catch (error) { toast(error.message); }
   });
   $("#feedbackBell").addEventListener("click", () => {

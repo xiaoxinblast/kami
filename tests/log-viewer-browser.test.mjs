@@ -65,9 +65,18 @@ test("日志页面：等级筛选、搜索、记录等级、清空，并记录�
         clientLogs.push(JSON.parse(request.postData() || "{}"));
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
       }
-      if (url.pathname === "/api/memories") {
+      if (url.pathname === "/api/library-entries") {
         // 故意失败一次：界面要把失败写进日志，而不是只闪一句提示。
         return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "记忆库读取失败（测试）" }) });
+      }
+      if (url.pathname === "/api/projects/project-1/libraries") {
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            projectId: "project-1",
+            libraries: [{ id: "tm-master", projectId: "project-1", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1, entryCount: 3 }]
+          })
+        });
       }
       let payload = {};
       if (url.pathname === "/api/bootstrap") payload = {
@@ -128,10 +137,13 @@ test("日志页面：等级筛选、搜索、记录等级、清空，并记录�
     }
 
     // 界面侧的报错要进日志（记忆库接口在这里故意 500）
+    // 打开某个库会去读条目，这里注入的 500 就是"界面侧报错要进日志"的素材。
     await page.locator('.nav-item[data-view="memories"]').click();
+    await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-master"]');
+    await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-master"] [data-library-action="open"]').click();
     await page.waitForFunction(() => document.querySelectorAll("#logNavBadge").length === 1);
     await page.waitForTimeout(600);
-    assert.ok(clientLogs.some((entry) => entry.level === "error" && /\/api\/memories/u.test(entry.message)), `界面报错要上报：${JSON.stringify(clientLogs)}`);
+    assert.ok(clientLogs.some((entry) => entry.level === "error" && /\/api\/library-entries/u.test(entry.message)), `界面报错要上报：${JSON.stringify(clientLogs)}`);
 
     // 清空
     await logNav.click();

@@ -55,7 +55,8 @@ test("记忆库支持批量选择文件导入，并可选择是否写入风格�
   assert.match(script, /for \(const \[index, file\] of files\.entries\(\)\)/u);
   assert.match(script, /本地预检识别 \$\{preview\.candidates\.length\} 条双语 TM（来自 \$\{files\.length - failures\.length\} \/ \$\{files\.length\} 个文件/u);
   // 提交走后台任务，页面按任务进度显示进度条。
-  assert.match(script, /candidates, styleEvidence: state\.memoryStyleEvidence, background: true \}\)/u);
+  // 提交走后台任务，并且带上"导入到哪个库"（库页行内导入的目标库）。
+  assert.match(script, /candidates, styleEvidence: state\.memoryStyleEvidence, tmLibraryId: state\.memoryImportTargetId \|\| "", background: true \}\)/u);
   assert.match(html, /id="memoryImportProgress"/u);
 });
 
