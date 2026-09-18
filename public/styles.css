@@ -366,6 +366,9 @@ select { min-width: 150px; }
 .qa-scope-row { display: flex; flex-wrap: wrap; gap: 12px; }
 .style-pool.is-total { padding: 12px 0; border-bottom: 1px solid #e8ece8; }
 .style-pool.is-total strong { font-size: 13px; }
+.style-pool-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.style-pool-heading > div { display: grid; gap: 2px; }
+.style-pool-heading small { color: var(--muted); font-size: 11px; }
 /* 审校回填结果：匹配/未匹配/歧义逐条列出来，不让用户猜是哪几条 */
 .review-import-details { display: grid; gap: 10px; max-height: 48vh; overflow-y: auto; margin: 4px 0 12px; }
 .review-import-details > div { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; }

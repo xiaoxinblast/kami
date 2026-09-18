@@ -3747,6 +3747,35 @@ function formatStyleTime(value) {
  * 人工导入的指南由 /api/style-guides/import 命名成"风格指南 · <文件名>"，
  * 用它跟从译文里蒸馏出来的译者画像区分（两者都存在 user_profiles 里）。
  */
+/**
+ * 立即重新蒸馏：不用等下一次批次/导入结束。逐个作用域按同一套门禁判定，
+ * 够条件（证据 ≥ 阈值、距上次蒸馏的新增 ≥ 增长窗口、且没有待审草稿）才会调模型。
+ */
+async function distillStyleNow(button) {
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "蒸馏中…";
+  try {
+    const result = await api("/api/style-profiles/distill", {
+      method: "POST",
+      body: JSON.stringify({ ...projectPayload(), locale: state.styleLocale })
+    });
+    const distilled = (result.results || []).filter((item) => item.distilled);
+    if (distilled.length) {
+      toast(`已重新蒸馏：${distilled.map((item) => `${contentTypeLabel(item.contentType)}×${item.domain} v${item.profile.version}（${item.profile.rules} 条规则）`).join("、")}`);
+    } else {
+      const first = (result.results || [])[0];
+      toast(first ? `暂未蒸馏：${first.reason || "未达条件"}` : "当前还没有风格证据可蒸馏");
+    }
+    await loadStyleGuidance(state.styleLocale);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "立即重新蒸馏";
+  }
+}
+
 function renderManualGuide(profiles) {
   const container = $("#manualGuideStatus");
   if (!container) return;
@@ -3814,10 +3843,12 @@ function renderStyleGuidance() {
     return `<div class="style-pool"><div><strong>${escapeHtml(contentTypeLabel(pool.contentType))} · ${escapeHtml(pool.domain)}</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 8 条直接证据）</small>${sampledNote}</div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
   }).join("");
   $("#styleEvidencePools").innerHTML = pools.length
-    ? `<div class="style-pool-heading"><strong>正在积累的证据池</strong><small>同一作用域累计达到 ${poolThreshold} 条才生成专用风格草稿；通用规范对所有语体生效</small></div>
+    ? `<div class="style-pool-heading"><div><strong>正在积累的证据池</strong><small>同一作用域累计达到 ${poolThreshold} 条才生成专用风格草稿；通用规范对所有语体生效</small></div><button class="button secondary small" type="button" id="styleDistillNow">立即重新蒸馏</button></div>
       <div class="style-pool is-total"><div><strong>全部证据</strong><small>覆盖 ${pools.length} 个作用域 · 翻译时按"同语体同领域 → 通用"自动取用</small></div><div class="style-pool-progress"><i style="width:${poolPercent}%"></i></div><span>${poolTotal} / ${poolThreshold}</span></div>
       <details class="advanced-scope"><summary>按作用域查看（${pools.length} 个）</summary>${poolDetail}</details>`
     : '<div class="empty-list compact">还没有完整双语句段进入风格证据池；导入短术语不会产生风格。</div>';
+  // 池子每次重画，按钮要重新挂：不用等下一次批次跑完就能手动触发蒸馏。
+  $("#styleDistillNow")?.addEventListener("click", (event) => distillStyleNow(event.currentTarget));
   $("#styleGuidanceList").innerHTML = items.length ? items.map((item) => {
     // 蒸馏结果同样是带小节的文档：小节标题单独显示，规则在小节内编号，
     // 标题既不算规则、也不会因为「；」被拆成两条。

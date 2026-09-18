@@ -1,5 +1,5 @@
 import { distillBatchStyleLearningWithModel, distillStyleProfileWithModel, distillUserProfileWithModel, getProviderConfig, reviewEvolutionWithModel } from "./provider.mjs";
-import { getQaRuns, getStyleEvidence, getStyleProfile, listStyleProfiles, saveStyleLearningRun, saveStyleProfile, saveUserProfile } from "./store.mjs";
+import { countStyleEvidenceByScope, getQaRuns, getStyleEvidence, getStyleProfile, listStyleProfiles, saveStyleLearningRun, saveStyleProfile, saveUserProfile } from "./store.mjs";
 import { STYLE_DISTILL_GROWTH_WINDOW, STYLE_DISTILL_THRESHOLD, evaluateStyleDistillDecision, readStyleDistillState } from "./style-distill-gate.mjs";
 import { positiveEvidenceOnly, shapeDistillEvidence } from "./style-delta.mjs";
 import { DEFAULT_STALE_ROUNDS, applyRulePatch, renderInstruction, summarizeRules } from "./style-rules.mjs";
@@ -10,6 +10,11 @@ import { logWarn } from "./logger.mjs";
 export const DISTILL_THRESHOLD = STYLE_DISTILL_THRESHOLD;
 export const DISTILL_GROWTH_WINDOW = STYLE_DISTILL_GROWTH_WINDOW;
 export const PROFILE_THRESHOLD = 3;
+
+/** 证据池按「语体 × 领域」聚合的键，与 countStyleEvidenceByScope 保持一致。 */
+function scopeTotalKey(contentType, domain = "general") {
+  return `${contentType || "general"}\u0000${domain || "general"}`;
+}
 
 function sampleEvidence(evidence, limits = {}) {
   const human = evidence.filter((item) => item.provenance === "human-accept");
@@ -107,12 +112,15 @@ export async function distillStyleProfileIfReady({
   threshold = DISTILL_THRESHOLD, growthWindow = DISTILL_GROWTH_WINDOW,
   positiveLimit = 50, negativeLimit = 15, staleRounds = DEFAULT_STALE_ROUNDS
 }) {
-  const [evidence, existingProfiles] = await Promise.all([
+  const [evidence, existingProfiles, scopeTotals] = await Promise.all([
     getStyleEvidence(locale, { projectId, contentType, domain, exactScope: true, limit: 1_000 }),
-    listStyleProfiles(locale, null, { projectId, contentType, domain })
+    listStyleProfiles(locale, null, { projectId, contentType, domain }),
+    // 抓取上限是 1000：拿列表长度当"池子有多大"，池子超过 1000 条后增长窗口就永远无法满足。
+    countStyleEvidenceByScope(locale, { projectId }).catch(() => new Map())
   ]);
+  const scopeTotal = Number(scopeTotals.get(scopeTotalKey(contentType, domain))?.total) || evidence.length;
   const decision = evaluateStyleDistillDecision({
-    evidenceCount: evidence.length,
+    evidenceCount: scopeTotal,
     ...readStyleDistillState(existingProfiles.styleProfiles, { contentType, domain }),
     threshold,
     growthWindow
@@ -139,7 +147,7 @@ export async function distillStyleProfileIfReady({
     instruction: renderInstruction(applied.rules, previousProfile?.instruction),
     rules: applied.rules,
     examples: (previousProfile?.examples || []).slice(0, 12),
-    evidenceCount: evidence.length,
+    evidenceCount: scopeTotal,
     evidenceIds: evidence.slice(0, 200).map((item) => item.id),
     generatedBy: getProviderConfig().model,
     sourceBatchId,
@@ -175,15 +183,18 @@ export async function runEvolutionReview({
   threshold = DISTILL_THRESHOLD, growthWindow = DISTILL_GROWTH_WINDOW,
   positiveLimit = 50, negativeLimit = 15, staleRounds = DEFAULT_STALE_ROUNDS
 }) {
-  const [evidence, qaRunsRaw, previousProfile] = await Promise.all([
+  const [evidence, qaRunsRaw, previousProfile, scopeTotals] = await Promise.all([
     getStyleEvidence(locale, { projectId, contentType, domain, exactScope: true, limit: 1_000 }),
     getQaRuns(locale, { projectId, contentType, domain, limit: 60 }),
-    getStyleProfile(locale, contentType, domain, { projectId })
+    getStyleProfile(locale, contentType, domain, { projectId }),
+    countStyleEvidenceByScope(locale, { projectId }).catch(() => new Map())
   ]);
   const qaRuns = dedupeQaRuns(qaRunsRaw);
+  // 报告里也写真实池子大小，跟判定口径一致。
+  const scopeTotal = Number(scopeTotals.get(scopeTotalKey(contentType, domain))?.total) || evidence.length;
   const result = {
     locale, contentType, domain, batchId, projectId,
-    evidenceCount: evidence.length,
+    evidenceCount: scopeTotal,
     qaRunsReviewed: qaRuns.length,
     distilled: null,
     profile: null,

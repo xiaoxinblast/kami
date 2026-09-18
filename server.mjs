@@ -2692,6 +2692,50 @@ async function apiHandler(req, res, url) {
       evidencePools: [...pools.values()].sort((a, b) => b.evidenceCount - a.evidenceCount)
     });
   }
+  if (req.method === "POST" && url.pathname === "/api/style-profiles/distill") {
+    // 立即重新蒸馏：不用等下一次批次/导入结束。逐作用域走同一套门禁，够条件才调模型。
+    const body = await readJsonBody(req);
+    const locale = assertActiveLocale(body.locale || "zh-CN");
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    const tuning = getSettings();
+    const totals = await countStyleEvidenceByScope(locale, { projectId });
+    const scopes = [...totals.values()].filter((bucket) => Number(bucket.total) > 0);
+    const results = [];
+    for (const bucket of scopes) {
+      const outcome = await distillStyleProfileIfReady({
+        locale,
+        projectId,
+        contentType: bucket.contentType,
+        domain: bucket.domain,
+        threshold: tuning.learning.styleDistillThreshold,
+        growthWindow: tuning.learning.styleDistillGrowthWindow,
+        positiveLimit: tuning.learning.distillPositiveSamples,
+        negativeLimit: tuning.learning.distillNegativeSamples,
+        staleRounds: tuning.learning.ruleStaleRounds
+      }).catch((error) => ({ distilled: null, failed: error.message }));
+      results.push({
+        contentType: bucket.contentType,
+        domain: bucket.domain,
+        evidenceCount: Number(bucket.total) || 0,
+        distilled: Boolean(outcome.distilled),
+        profile: outcome.distilled
+          ? { id: outcome.distilled.id, name: outcome.distilled.name, version: outcome.distilled.version, rules: (outcome.distilled.rules || []).length }
+          : null,
+        skipped: outcome.skipped || "",
+        reason: outcome.reason || outcome.failed || ""
+      });
+    }
+    logInfo("手动重新蒸馏风格规范", {
+      locale, projectId, scopes: results.length,
+      distilled: results.filter((item) => item.distilled).length
+    });
+    return json(res, 200, {
+      locale, projectId, results,
+      distilled: results.filter((item) => item.distilled).length,
+      skipped: results.filter((item) => !item.distilled).length
+    });
+  }
   if (req.method === "GET" && url.pathname.startsWith("/api/style-profiles/evaluation-jobs/")) {
     const jobId = decodeURIComponent(url.pathname.slice("/api/style-profiles/evaluation-jobs/".length));
     const job = styleEvaluationJobs.get(jobId);

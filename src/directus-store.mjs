@@ -707,7 +707,8 @@ export async function saveDirectusStyleProfile(input) {
     status: input.status || "active"
   } });
   if (previous?.id && saved.status === "active") await request(`/items/style_profiles/${previous.id}`, { method: "PATCH", body: { status: "inactive" } });
-  return { id: saved.id, projectId, name: saved.name, source: "style-library", instruction: saved.instructions, reviewRubric: saved.review_rubric || null, examples: saved.examples || [], rules: arrayValue(saved.rules), version: saved.version, locale, contentType: saved.content_type, contentTags: arrayValue(saved.content_tags), domain: saved.domain, sourceBatchId: saved.source_batch_id || "", learningRunId: saved.learning_run_id || "", status: saved.status };
+  // evidenceCount 要一起回：它是下一轮"增长窗口"的基线，JSON 存储本来就返回整条记录。
+  return { id: saved.id, projectId, name: saved.name, source: "style-library", instruction: saved.instructions, reviewRubric: saved.review_rubric || null, examples: saved.examples || [], rules: arrayValue(saved.rules), version: saved.version, evidenceCount: Number(saved.evidence_count) || 0, locale, contentType: saved.content_type, contentTags: arrayValue(saved.content_tags), domain: saved.domain, sourceBatchId: saved.source_batch_id || "", learningRunId: saved.learning_run_id || "", status: saved.status };
 }
 
 function mapStyleLearningRun(item) {

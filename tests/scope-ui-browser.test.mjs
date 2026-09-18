@@ -28,6 +28,7 @@ test("语体领域收进高级，结果里能看到本次命中的作用域", { 
 
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const distillCalls = [];
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.route("**/api/**", async (route) => {
@@ -63,6 +64,16 @@ test("语体领域收进高级，结果里能看到本次命中的作用域", { 
       }
       if (url.pathname === "/api/match") {
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ matches: [] }) });
+      }
+      if (url.pathname === "/api/style-profiles/distill") {
+        distillCalls.push(JSON.parse(request.postData() || "{}"));
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            locale: "zh-CN", projectId: "project-1", distilled: 1, skipped: 0,
+            results: [{ contentType: "general", domain: "general", evidenceCount: 8134, distilled: true, profile: { id: "sp-v2", name: "简体中文 general 风格", version: 2, rules: 9 }, skipped: "", reason: "" }]
+          })
+        });
       }
       let payload = {};
       if (url.pathname === "/api/bootstrap") payload = {
@@ -126,6 +137,20 @@ test("语体领域收进高级，结果里能看到本次命中的作用域", { 
     assert.match(poolText, /8134 \/ 8/u, `总进度要合并显示：${poolText}`);
     assert.match(poolText, /按作用域查看（2 个）/u);
     assert.equal(await page.locator("#styleEvidencePools details.advanced-scope").evaluate((node) => node.open), false, "细分默认收起");
+
+    // ⑤ 立即重新蒸馏：不用等下一次批次，点了就打蒸馏接口并刷新
+    const distillButton = page.locator("#styleDistillNow");
+    assert.equal(await distillButton.count(), 1, "证据池旁要有「立即重新蒸馏」");
+    // 证据池每次重画都会换掉按钮节点，满载时一次点击可能落在旧节点上：允许重试一次。
+    for (let attempt = 0; attempt < 2 && distillCalls.length === 0; attempt += 1) {
+      await distillButton.click({ timeout: 10_000 }).catch(() => {});
+      await page.waitForTimeout(400);
+    }
+    await page.waitForFunction(() => /已重新蒸馏/.test(document.querySelector("#toast")?.textContent || ""));
+    assert.equal(distillCalls.length, 1);
+    assert.equal(distillCalls[0].locale, "zh-CN");
+    assert.equal(distillCalls[0].projectId, "project-1");
+    assert.match(await page.locator("#toast").textContent(), /待分类文本×general v2（9 条规则）/u, "结果要说清蒸馏出了哪个作用域的哪一版");
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/scope-pool-merged.png`, fullPage: true, animations: "disabled" });
