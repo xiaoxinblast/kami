@@ -77,7 +77,18 @@ function supportsBatchApi(version) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
+  let response;
+  try {
+    response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
+  } catch (error) {
+    // fetch 直接抛错说明请求根本没到服务端（工作台在重启 / 已停止 / 连接被掐断），
+    // 这时浏览器只会给一句 Failed to fetch，对用户没有任何指导意义。
+    const detail = String(error?.message || "");
+    const generic = /Failed to fetch|Load failed|NetworkError|network error/iu.test(detail);
+    throw new Error(generic
+      ? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"
+      : `请求失败（${detail}）：请确认工作台仍在运行`);
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
   return payload;
@@ -2655,8 +2666,35 @@ async function loadMemories(locale) {
 }
 
 /**
+ * 文件清单 + 逐文件状态。用户最需要的是"它确实在动"：每个文件一行，
+ * 状态从 待预检 → 识别中 → 已识别 N 条 / 失败，而不是一句静止的"正在预检"。
+ */
+function renderImportFileList(container, files, states) {
+  if (!container) return;
+  const totalBytes = files.reduce((sum, file) => sum + (file?.size || 0), 0);
+  const done = files.filter((file) => states.get(file.name)?.status === "done" || states.get(file.name)?.status === "failed").length;
+  const failed = files.filter((file) => states.get(file.name)?.status === "failed").length;
+  container.hidden = !files.length;
+  if (!files.length) { container.innerHTML = ""; return; }
+  container.innerHTML = `<div class="import-file-head"><strong>${files.length} 个文件 · ${formatBytes(totalBytes)}</strong><span>已预检 ${done} / ${files.length}${failed ? ` · 失败 ${failed}` : ""}</span></div>
+    <ul>${files.map((file) => {
+      const state = states.get(file.name) || { status: "pending" };
+      const label = state.status === "done" ? `已识别 ${state.entries || 0} 条`
+        : state.status === "running" ? "识别中…"
+          : state.status === "failed" ? `失败：${state.error || "解析失败"}`
+            : "待预检";
+      return `<li class="${state.status}"><span class="import-file-name">${escapeHtml(file.name)}</span><small>${escapeHtml(formatBytes(file.size))}</small><em>${escapeHtml(label)}</em></li>`;
+    }).join("")}</ul>`;
+}
+
+function elapsedText(startedAt) {
+  return `${((Date.now() - startedAt) / 1000).toFixed(1)} 秒`;
+}
+
+/**
  * 双语资产预检。去向与清洗开关在**上传前**就已经定了：整批一个类型，
  * 需要混合处理时分两次导入，避免"同一个文件既当术语又当 TM"。
+ * 预检逐文件进行，进度与每个文件的结果都直接显示在拖入区下方。
  */
 async function setImportFiles(files = [], {
   intent = "auto",
@@ -2685,14 +2723,47 @@ async function setImportFiles(files = [], {
   state.assetImportWizard = fromWizard;
   assetPreflightOutcome = null;
   $("#filePrompt").textContent = selected.length === 1 ? selected[0].name : `已选择 ${selected.length} 个文件`;
-  $("#fileMeta").textContent = "正在进行本地预检；不会调用模型，也不会写入数据库";
   $("#dropZone").classList.add("has-file");
+  const fileStates = new Map(selected.map((file) => [file.name, { status: "pending", entries: 0, error: "" }]));
+  renderImportFileList($("#importFileList"), selected, fileStates);
+  const startedAt = Date.now();
+  const progress = (message, percent) => {
+    $("#fileMeta").textContent = `${message} · 已用时 ${elapsedText(startedAt)}（本地解析，不调用模型）`;
+    updateImportProgress({ message, percent });
+  };
   try {
-    const preview = await api("/api/assets-import/preview", { method: "POST", body: JSON.stringify({
-      ...projectPayload(),
-      files: await Promise.all(selected.map(async (file) => ({ filename: file.name, base64: await fileToBase64(file) })))
-    }) });
-    state.assetPreflight = preview;
+    // 一个文件一个请求：进度是真实的 N/M，而且某个文件坏了不会把整批带崩。
+    const merged = { batchId: "", files: [], candidates: [], statistics: { files: 0, entries: 0, anomalies: 0 } };
+    const failures = [];
+    for (const [index, file] of selected.entries()) {
+      fileStates.get(file.name).status = "running";
+      renderImportFileList($("#importFileList"), selected, fileStates);
+      progress(`正在预检 ${index + 1} / ${selected.length}：${file.name}`, Math.round((index / selected.length) * 100));
+      try {
+        const result = await api("/api/assets-import/preview", { method: "POST", body: JSON.stringify({
+          ...projectPayload(),
+          files: [{ filename: file.name, base64: await fileToBase64(file) }]
+        }) });
+        if (!merged.batchId) merged.batchId = result.batchId;
+        merged.files.push(...(result.files || []));
+        merged.candidates.push(...(result.candidates || []));
+        merged.statistics.files += result.files?.length || 0;
+        merged.statistics.entries += result.statistics?.entries || 0;
+        merged.statistics.anomalies += result.statistics?.anomalies || 0;
+        fileStates.get(file.name).status = "done";
+        fileStates.get(file.name).entries = result.statistics?.entries || 0;
+      } catch (error) {
+        failures.push({ filename: file.name, error: error.message });
+        merged.files.push({ filename: file.name, type: "invalid", entries: 0, anomalies: [error.message], defaultPurpose: "term" });
+        merged.statistics.files += 1;
+        merged.statistics.anomalies += 1;
+        fileStates.get(file.name).status = "failed";
+        fileStates.get(file.name).error = error.message;
+      }
+      renderImportFileList($("#importFileList"), selected, fileStates);
+    }
+    progress(`预检完成：${selected.length - failures.length} / ${selected.length} 个文件，共 ${merged.statistics.entries} 条双语条目`, 100);
+    state.assetPreflight = { ...merged, failures };
     renderAssetPreflight();
     resetAssetImportProgress();
     $("#assetPreflightDialog").showModal();
@@ -2702,6 +2773,9 @@ async function setImportFiles(files = [], {
     }
     return { submitted: false };
   } catch (error) {
+    $("#importFileList").hidden = false;
+    $("#fileMeta").textContent = `预检中断：${error.message}`;
+    updateImportProgress({ message: `预检中断：${error.message}`, percent: 100 });
     toast(error.message);
     return { submitted: false };
   }
@@ -2865,26 +2939,93 @@ async function watchAssetImportTask(taskId, { returnView = "" } = {}) {
   }
 }
 
+/** 已选的人工 TM 文件列表 + 逐文件预检状态。 */
+function renderMemoryImportFiles(states = new Map()) {
+  const container = $("#memoryImportFiles");
+  const files = state.memoryImportFiles.length ? state.memoryImportFiles : [state.memoryImportFile].filter(Boolean);
+  if (!container) return;
+  const button = $("#memoryImportButton");
+  if (button) button.textContent = files.length > 1 ? `预检 ${files.length} 个文件` : "预检 TM";
+  renderImportFileList(container, files, states);
+}
+
+function formatBytes(bytes = 0) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const MEMORY_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+/** base64 会放大约 1/3，服务端导入类请求额度 48MB，这里按 24MB 原始体积设闸。 */
+const MEMORY_IMPORT_TOTAL_BYTES = 24 * 1024 * 1024;
+
+function validateMemoryImportFiles(files) {
+  const tooBig = files.find((file) => file.size > MEMORY_IMPORT_FILE_BYTES);
+  if (tooBig) return `${tooBig.name} 超过单文件 10MB 上限`;
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total > MEMORY_IMPORT_TOTAL_BYTES) return `本次合计 ${formatBytes(total)} 超过 24MB 上限，请分批导入`;
+  return "";
+}
+
 async function previewMemoryImport() {
   const files = state.memoryImportFiles.length ? state.memoryImportFiles : [state.memoryImportFile].filter(Boolean);
   if (!files.length) return;
   const invalid = files.find((file) => !/\.(xlsx|csv|xliff|mqxliff)$/iu.test(file.name));
   if (invalid) return toast(`${invalid.name}：人工 TM 只支持 .xlsx、.csv、.xliff、.mqxliff`);
+  const sizeError = validateMemoryImportFiles(files);
+  if (sizeError) {
+    $("#memoryImportNote").textContent = sizeError;
+    renderMemoryImportFiles(new Map(files.map((file) => [file.name, { status: "failed", entries: 0, error: sizeError }])));
+    return toast(sizeError);
+  }
   try {
-    $("#memoryImportNote").textContent = files.length > 1 ? `正在读取 ${files.length} 个文件的双语条目……` : "正在读取双语条目……";
-    const preview = await api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({
-      ...projectPayload(),
+    $("#memoryImportButton").disabled = true;
+    const startedAt = Date.now();
+    const fileStates = new Map(files.map((file) => [file.name, { status: "pending", entries: 0, error: "" }]));
+    renderMemoryImportFiles(fileStates);
+    const candidates = [];
+    const failures = [];
+    let batchId = "";
+    for (const [index, file] of files.entries()) {
+      fileStates.get(file.name).status = "running";
+      renderMemoryImportFiles(fileStates);
+      $("#memoryImportNote").textContent = `正在本地预检 ${index + 1} / ${files.length}：${file.name} · 已用时 ${elapsedText(startedAt)}（解析表格 / XLIFF，不调用模型）`;
+      try {
+        const result = await api("/api/tm-import/preview", { method: "POST", body: JSON.stringify({
+          ...projectPayload(),
+          filename: file.name,
+          files: [{ filename: file.name, base64: await fileToBase64(file) }]
+        }) });
+        if (!batchId) batchId = result.batchId;
+        const found = (result.candidates || []).map((candidate) => ({ ...candidate, selected: candidate.selected !== false }));
+        candidates.push(...found);
+        fileStates.get(file.name).status = "done";
+        fileStates.get(file.name).entries = found.length;
+      } catch (error) {
+        failures.push({ filename: file.name, error: error.message });
+        fileStates.get(file.name).status = "failed";
+        fileStates.get(file.name).error = error.message;
+      }
+      renderMemoryImportFiles(fileStates);
+    }
+    const preview = {
+      batchId,
       filename: files.length === 1 ? files[0].name : `${files[0].name} 等 ${files.length} 个文件`,
-      files: await Promise.all(files.map(async (file) => ({ filename: file.name, base64: await fileToBase64(file) })))
-    }) });
-    preview.candidates = (preview.candidates || []).map((candidate) => ({ ...candidate, selected: candidate.selected !== false }));
+      candidates
+    };
     state.memoryImportPreview = preview;
     const evidenceText = state.memoryStyleEvidence ? "确认后同时写入主 TM 与风格学习证据。" : "确认后只写入主 TM，不进入风格证据池。";
-    $("#memoryImportNote").textContent = `本地预检识别 ${preview.candidates.length} 条双语 TM（来自 ${files.length} 个文件）；尚未调用模型，也尚未写入数据库。${evidenceText}`;
+    const failureText = failures.length ? `；${failures.length} 个文件解析失败：${failures.map((item) => `${item.filename}（${item.error}）`).join("、")}` : "";
+    $("#memoryImportNote").textContent = `本地预检识别 ${preview.candidates.length} 条双语 TM（来自 ${files.length - failures.length} / ${files.length} 个文件，用时 ${elapsedText(startedAt)}）；尚未调用模型，也尚未写入数据库${failureText}。${evidenceText}`;
     $("#memoryImportPreview").hidden = false;
     $("#memoryImportPreviewBody").innerHTML = preview.candidates.slice(0, 500).map((candidate, index) => `<tr><td><input type="checkbox" data-memory-index="${index}" ${candidate.selected ? "checked" : ""} /></td><td>${escapeHtml(candidate.entryId || "")}</td><td>${escapeHtml(candidate.source)}</td><td>${escapeHtml(candidate.target)}</td><td>${escapeHtml([candidate.sourceFile, candidate.sourceRow ? `第 ${candidate.sourceRow} 行` : ""].filter(Boolean).join(" · "))}</td></tr>`).join("") || '<tr><td colspan="5" class="table-empty">没有可写入的双语条目</td></tr>';
     $("#memoryImportConfirm").disabled = !preview.candidates.length;
-  } catch (error) { $("#memoryImportNote").textContent = error.message; toast(error.message); }
+  } catch (error) {
+    $("#memoryImportNote").textContent = `预检失败：${error.message}`;
+    toast(error.message);
+  } finally {
+    $("#memoryImportButton").disabled = false;
+  }
 }
 
 async function commitMemoryImport() {
@@ -2980,6 +3121,7 @@ function resetImport() {
   $("#filePrompt").textContent = "拖入或点击选择双语资产文件";
   $("#fileMeta").textContent = "支持多选 .xlsx / .csv / .xliff / .mqxliff；先本地预检，再确认导入";
   $("#dropZone").classList.remove("has-file");
+  renderImportFileList($("#importFileList"), [], new Map());
   $("#mappingNote").textContent = "拖入表格后会自动识别结构并生成审核队列。";
   $("#importSummary").innerHTML = "<span>尚未清洗</span>";
   $("#importProgress").hidden = true;
@@ -4312,9 +4454,15 @@ function bindEvents() {
     state.memoryImportFiles = [...event.target.files];
     state.memoryImportFile = state.memoryImportFiles[0] || null;
     $("#memoryImportButton").disabled = !state.memoryImportFiles.length;
-    $("#memoryImportNote").textContent = state.memoryImportFiles.length
-      ? `${state.memoryImportFiles.length === 1 ? state.memoryImportFiles[0].name : `${state.memoryImportFiles.length} 个文件`} · 等待预检`
-      : "选择文件后先预检，确认后写入主 TM。";
+    $("#memoryImportButton").textContent = state.memoryImportFiles.length > 1 ? `重新预检 ${state.memoryImportFiles.length} 个文件` : "重新预检 TM";
+    renderMemoryImportFiles();
+    if (!state.memoryImportFiles.length) {
+      $("#memoryImportNote").textContent = "选择文件后会自动本地预检；确认后写入主 TM。";
+      $("#memoryImportPreview").hidden = true;
+      return;
+    }
+    // 选中即预检：等用户再点一次按钮，很多人会以为"没导入"。
+    previewMemoryImport();
   });
   $("#memoryImportButton").addEventListener("click", () => previewMemoryImport());
   $("#memoryImportConfirm").addEventListener("click", () => commitMemoryImport());

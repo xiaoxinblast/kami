@@ -55,6 +55,8 @@ const PORT = Number(process.env.PORT || 4173);
 const AUTO_QA_EMBEDDING_SEGMENT_LIMIT = 80;
 const AUTO_QA_MODEL_ALIGNMENT_SEGMENT_LIMIT = 24;
 const MAX_BODY_BYTES = 15 * 1024 * 1024;
+/** 导入类请求要把多个文件按 base64 塞进一个 JSON，额度单独放宽。 */
+const IMPORT_BODY_BYTES = 48 * 1024 * 1024;
 const TERM_AI_CONCURRENCY = 5;
 const TERM_AI_BATCH_SIZE = 24;
 /** 术语批量写入的分块大小；导入 5000+ 条时逐条写会拖到分钟级。 */
@@ -508,17 +510,32 @@ function assertCurrentCandidate(candidate, currentChampion, evaluation = null, {
   return state;
 }
 
-async function readJsonBody(req) {
+/**
+ * 读取 JSON 请求体。
+ *
+ * `limitBytes` 默认 15MB；双语资产 / 人工 TM 的预检要把多个文件按 base64 塞进
+ * 一个请求（base64 会放大约 33%），所以这两条路由给更大的额度。
+ * 超限时先把剩余请求读完再抛错：直接掐断连接会让浏览器只看到
+ * "Failed to fetch"，用户根本看不到"文件太大"这句话。
+ */
+async function readJsonBody(req, { limitBytes = MAX_BODY_BYTES } = {}) {
   const chunks = [];
   let size = 0;
+  let overflowed = false;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
-      const error = new Error("请求内容超过 15MB 限制");
-      error.statusCode = 413;
-      throw error;
+    if (size > limitBytes) {
+      overflowed = true;
+      chunks.length = 0;
+      continue;
     }
     chunks.push(chunk);
+  }
+  if (overflowed) {
+    const megabytes = Math.round(limitBytes / (1024 * 1024));
+    const error = new Error(`请求内容超过 ${megabytes}MB 限制，请减少文件数量或改用更小的文件`);
+    error.statusCode = 413;
+    throw error;
   }
   if (!chunks.length) return {};
   try {
@@ -1594,7 +1611,7 @@ async function apiHandler(req, res, url) {
     return json(res, 201, await saveCorpus({ ...body, ...refined }));
   }
   if (req.method === "POST" && url.pathname === "/api/tm-import/preview") {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     // 记忆库可以一次选多个文件：files 数组优先，单文件参数继续兼容。
@@ -1646,10 +1663,10 @@ async function apiHandler(req, res, url) {
     });
   }
   if (req.method === "POST" && url.pathname === "/api/assets-import/preview") {
-    return json(res, 200, await previewBilingualAssets(await readJsonBody(req)));
+    return json(res, 200, await previewBilingualAssets(await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES })));
   }
   if (req.method === "POST" && url.pathname === "/api/assets-import/commit") {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     if (!body.batchId || !Array.isArray(body.candidates)) return json(res, 400, { error: "预检批次或候选无效" });
@@ -1697,7 +1714,7 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/assets-import/resume") {
     // 续传：用同一个批次的候选重跑一次。已写入的"原文+译文"会被当成重复跳过，
     // 所以中断、失败、服务重启之后都能安全补齐，不需要重新上传文件。
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     const batchId = String(body.batchId || "").trim();
@@ -1732,7 +1749,7 @@ async function apiHandler(req, res, url) {
     return json(res, 202, { taskId: task.id, batchId, accepted: candidates.length });
   }
   if (req.method === "POST" && url.pathname === "/api/tm-import/commit") {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
     if (!body.batchId || !Array.isArray(body.candidates)) return json(res, 400, { error: "TM 导入批次或候选无效" });
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });

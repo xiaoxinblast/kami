@@ -51,7 +51,9 @@ test("记忆库支持批量选择文件导入，并可选择是否写入风格�
   assert.match(html, /id="memoryFile"[^>]+accept="\.xliff,\.mqxliff,\.xlsx,\.csv" multiple/u);
   assert.match(html, /id="memoryStyleEvidence" checked/u);
   assert.match(script, /state\.memoryImportFiles = \[\.\.\.event\.target\.files\]/u);
-  assert.match(script, /files: await Promise\.all\(files\.map\(async \(file\) => \(\{ filename: file\.name, base64: await fileToBase64\(file\) \}\)\)\)/u);
+  // 逐文件预检：进度按文件推进，单个文件坏了不影响其余文件。
+  assert.match(script, /for \(const \[index, file\] of files\.entries\(\)\)/u);
+  assert.match(script, /本地预检识别 \$\{preview\.candidates\.length\} 条双语 TM（来自 \$\{files\.length - failures\.length\} \/ \$\{files\.length\} 个文件/u);
   assert.match(script, /candidates, styleEvidence: state\.memoryStyleEvidence \}\)/u);
 });
 
@@ -71,4 +73,26 @@ test("双语资产导入在前端按后台任务展示进度，并可续跑", as
   assert.match(script, /async function continueImportTask/u);
   assert.match(script, /api\("\/api\/assets-import\/resume"/u);
   assert.match(script, /data-action="continue-import"/u);
+});
+
+test("预检逐个文件进行，并在界面上显示清单、进度与失败原因", async () => {
+  const [html, script, styles] = await Promise.all([
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8")
+  ]);
+  assert.match(html, /id="importFileList"/u);
+  assert.match(script, /function renderImportFileList\(container, files, states\)/u);
+  assert.match(script, /for \(const \[index, file\] of selected\.entries\(\)\)/u);
+  assert.match(script, /progress\(`正在预检 \$\{index \+ 1\} \/ \$\{selected\.length\}：\$\{file\.name\}`, Math\.round\(\(index \/ selected\.length\) \* 100\)\)/u);
+  assert.match(script, /progress\(`预检完成：\$\{selected\.length - failures\.length\} \/ \$\{selected\.length\} 个文件，共 \$\{merged\.statistics\.entries\} 条双语条目`, 100\)/u);
+  assert.match(styles, /\.import-file-list, \.memory-import-files \{/u);
+  assert.match(styles, /\.import-file-list li\.running em/u);
+  // 请求根本没到服务端时，不能只把浏览器的 Failed to fetch 丢给用户。
+  assert.match(script, /throw new Error\(generic\s*\n\s*\? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"/u);
+  // 导入类请求的额度单独放宽，超限也要给出可读提示而不是掐断连接。
+  const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  assert.match(server, /const IMPORT_BODY_BYTES = 48 \* 1024 \* 1024;/u);
+  assert.match(server, /async function readJsonBody\(req, \{ limitBytes = MAX_BODY_BYTES \} = \{\}\)/u);
+  assert.match(server, /请求内容超过 \$\{megabytes\}MB 限制，请减少文件数量或改用更小的文件/u);
 });
