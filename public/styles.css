@@ -356,6 +356,7 @@ select { min-width: 150px; }
 .guide-doc-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
 .guide-doc-footer small { color: var(--muted); font-size: 11px; }
 .style-rule-count { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
+.batch-learning-actions { display: flex; align-items: center; gap: 8px; }
 /* 审校回填结果：匹配/未匹配/歧义逐条列出来，不让用户猜是哪几条 */
 .review-import-details { display: grid; gap: 10px; max-height: 48vh; overflow-y: auto; margin: 4px 0 12px; }
 .review-import-details > div { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; }

@@ -10,10 +10,12 @@ import {
   deleteDirectusAsset,
   deleteDirectusLibraryEntries,
   deleteDirectusMemory,
+  countDirectusStyleEvidenceByScope,
   getDirectusAsset,
   getDirectusAssets,
   getDirectusAssetStats,
   getDirectusLibraryStats,
+  getDirectusStyleLearningRun,
   listDirectusLibraryFiles,
   listDirectusLibraryEntries,
   updateDirectusMemory,
@@ -508,6 +510,29 @@ async function getJsonStyleLearningRuns(locale, options = {}) {
       && (!options.status || item.status === options.status))
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, Math.min(500, Math.max(1, Number(options.limit) || 100)));
+}
+
+async function getJsonStyleLearningRun(id) {
+  const items = await readJson(join(ROOT, "styles", "learning-runs.json"), []);
+  return items.find((item) => item.id === String(id)) || null;
+}
+
+async function countJsonStyleEvidenceByScope(locale, { projectId = "" } = {}) {
+  const items = await readJson(join(ROOT, "styles", "evidence.json"), []);
+  const stats = new Map();
+  for (const item of items) {
+    if (item.locale !== assertLocale(locale)) continue;
+    if (projectId && String(item.projectId || "") !== String(projectId)) continue;
+    const contentType = item.contentType || "general";
+    const domain = item.domain || "general";
+    const key = `${contentType}\u0000${domain}`;
+    const bucket = stats.get(key) || { contentType, domain, total: 0, byProvenance: {} };
+    bucket.total += 1;
+    const provenance = item.provenance || "other";
+    bucket.byProvenance[provenance] = (bucket.byProvenance[provenance] || 0) + 1;
+    stats.set(key, bucket);
+  }
+  return stats;
 }
 
 async function locateJsonStyleProfile(id) {
@@ -1802,6 +1827,15 @@ export async function saveStyleLearningRun(input) {
 
 export async function getStyleLearningRuns(locale, options) {
   return usesDirectus() ? getDirectusStyleLearningRuns(locale, options) : getJsonStyleLearningRuns(locale, options);
+}
+
+export async function getStyleLearningRun(id) {
+  return usesDirectus() ? getDirectusStyleLearningRun(id) : getJsonStyleLearningRun(id);
+}
+
+/** 风格证据的真实条数（按语体 × 领域 × 来源聚合），用于证据池显示。 */
+export async function countStyleEvidenceByScope(locale, options) {
+  return usesDirectus() ? countDirectusStyleEvidenceByScope(locale, options) : countJsonStyleEvidenceByScope(locale, options);
 }
 
 export async function saveQaRun(input) {

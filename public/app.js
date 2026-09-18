@@ -3762,11 +3762,16 @@ function renderStyleGuidance() {
   renderManualGuide(profiles);
   $("#styleLearningCount").textContent = `${learningRuns.length} 个批次范围`;
   $("#styleLearningRuns").innerHTML = learningRuns.length ? renderLearningCards(learningRuns) : '<div class="empty-list compact">还没有可展示的批次学习记录；导入完整双语句段后会在这里说明 AI 具体学到了什么。</div>';
+  // 渲染完要挂事件：这一块的卡片里有"重跑模型浓缩"这类按记录操作的按钮。
+  bindStyleLearningLinks($("#styleLearningRuns"));
   const pools = profiles.evidencePools || [];
   $("#styleEvidencePools").innerHTML = pools.length ? `<div class="style-pool-heading"><strong>正在积累的证据池</strong><small>每个分类独立累计，达到 8 条才生成风格草稿</small></div>${pools.map((pool) => {
     const percent = Math.min(100, Math.round((pool.evidenceCount / Math.max(1, pool.threshold)) * 100));
     const sources = pool.sources || {};
-    return `<div class="style-pool"><div><strong>${escapeHtml(contentTypeLabel(pool.contentType))} · ${escapeHtml(pool.domain)}</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 8 条直接证据）</small></div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
+    const sampledNote = Number(pool.sampled) && Number(pool.sampled) < Number(pool.evidenceCount)
+      ? `<small>分析取样：${pool.sampled} 条（改写 / 负例按取样统计）</small>`
+      : "";
+    return `<div class="style-pool"><div><strong>${escapeHtml(contentTypeLabel(pool.contentType))} · ${escapeHtml(pool.domain)}</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 8 条直接证据）</small>${sampledNote}</div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
   }).join("")}` : '<div class="empty-list compact">还没有完整双语句段进入风格证据池；导入短术语不会产生风格。</div>';
   $("#styleGuidanceList").innerHTML = items.length ? items.map((item) => {
     // 蒸馏结果同样是带小节的文档：小节标题单独显示，规则在小节内编号，
@@ -5226,7 +5231,7 @@ function renderLearningCards(runs, { showJump = false } = {}) {
       ${rules.length ? `<div class="batch-learning-rules">${rules.map((rule) => `<div><span>${escapeHtml(rule.category)}</span><p>${escapeHtml(rule.text)}</p>${Number.isFinite(rule.confidence) ? `<small>${Math.round((rule.confidence <= 1 ? rule.confidence * 100 : rule.confidence))}%</small>` : ""}</div>`).join("")}</div>` : '<div class="batch-detail-empty">模型没有返回可拆分的规则条目，已保留学习摘要。</div>'}
       ${examples.length ? `<details class="style-examples"><summary>查看 ${examples.length} 个本批代表例句</summary>${examples.map((example) => `<div><strong>${example.type === "negative" ? "反例" : "正例"}</strong><p>${escapeHtml(example.source || "")}</p><p>${escapeHtml(example.target || "")}</p><small>${escapeHtml(example.reason || "")}</small></div>`).join("")}</details>` : ""}
       ${run.caveat ? `<p class="batch-learning-caveat">${escapeHtml(run.caveat)}</p>` : ""}
-      <div class="batch-learning-foot"><small>${escapeHtml(profileMeta)}</small>${showJump && run.locale ? `<button class="button ghost small style-learning-link" type="button" data-style-learning-locale="${escapeHtml(run.locale)}">查看风格指导</button>` : ""}</div>
+      <div class="batch-learning-foot"><small>${escapeHtml(profileMeta)}</small><div class="batch-learning-actions">${modelCondenseFailed(run) && run.id ? `<button class="button secondary small" type="button" data-rerun-condense="${escapeHtml(run.id)}">重跑模型浓缩</button>` : ""}${showJump && run.locale ? `<button class="button ghost small style-learning-link" type="button" data-style-learning-locale="${escapeHtml(run.locale)}">查看风格指导</button>` : ""}</div></div>
     </article>`;
   }).join("");
 }
@@ -5239,6 +5244,30 @@ function bindStyleLearningLinks(container) {
     switchView("styles");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }));
+  container?.querySelectorAll("[data-rerun-condense]").forEach((button) => button.addEventListener("click", () => rerunBatchCondense(button)));
+}
+
+/** 这一批是不是"模型浓缩没成功、只留了本地统计"（据此决定要不要给重跑入口）。 */
+function modelCondenseFailed(run) {
+  const caveat = String(run?.caveat || "");
+  return caveat.includes("模型浓缩失败") || caveat.includes("模型浓缩暂不可用");
+}
+
+/** 重跑本批浓缩：模型通了就换成模型产出，仍然失败就把新的失败原因写在卡片上。 */
+async function rerunBatchCondense(button) {
+  const id = button.dataset.rerunCondense;
+  if (!id || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "重跑中…";
+  try {
+    const result = await api(`/api/style-learning-runs/${encodeURIComponent(id)}/refresh`, { method: "POST", body: JSON.stringify(projectPayload()) });
+    toast(result.failed ? `模型浓缩仍然失败：${result.learning?.caveat || "未知原因"}` : "已用模型重新浓缩这一批，记录已更新");
+    await loadStyleGuidance(state.styleLocale);
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+    button.textContent = "重跑模型浓缩";
+  }
 }
 
 function renderImportBatchLearning() {

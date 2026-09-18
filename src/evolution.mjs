@@ -3,6 +3,7 @@ import { getQaRuns, getStyleEvidence, getStyleProfile, listStyleProfiles, saveSt
 import { STYLE_DISTILL_GROWTH_WINDOW, STYLE_DISTILL_THRESHOLD, evaluateStyleDistillDecision, readStyleDistillState } from "./style-distill-gate.mjs";
 import { positiveEvidenceOnly, shapeDistillEvidence } from "./style-delta.mjs";
 import { DEFAULT_STALE_ROUNDS, applyRulePatch, renderInstruction, summarizeRules } from "./style-rules.mjs";
+import { logWarn } from "./logger.mjs";
 
 // 阈值统一由设置面板提供（环境变量已在 settings-store 里优先合并）。
 // 这几个导出保留为出厂值，供未注入设置时的纯函数默认与测试使用。
@@ -43,7 +44,7 @@ function evidenceTags(evidence = [], limit = 8) {
   return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, limit).map(([tag]) => tag);
 }
 
-function fallbackBatchLearning(examples, contentType) {
+function fallbackBatchLearning(examples, contentType, failureReason = "") {
   const sourceAverage = examples.reduce((sum, item) => sum + [...item.source].length, 0) / examples.length;
   const targetAverage = examples.reduce((sum, item) => sum + [...item.target].length, 0) / examples.length;
   const hasDialoguePunctuation = examples.filter((item) => /[，,。！？!?…]/u.test(item.source)).length;
@@ -54,12 +55,15 @@ function fallbackBatchLearning(examples, contentType) {
       { category: "标点与语气", observation: `${hasDialoguePunctuation}/${examples.length} 条日语证据包含对话停顿或句末标点`, guidance: "依据角色语气保留停顿与情绪强度，并遵循简体中文自然标点。", confidence: 0.5 }
     ],
     examples: examples.slice(0, 3).map((item) => ({ type: "positive", source: item.source, target: item.target, reason: "本批已对齐译例" })),
-    caveat: "模型浓缩暂不可用，本记录由本地统计生成，仅作为可见学习记录，不直接启用。",
+    // 失败原因要写出来：过去是静默 catch，用户只看到"暂不可用"，既不知道为什么也没法重试。
+    caveat: failureReason
+      ? `模型浓缩失败：${failureReason}；本记录由本地统计生成，仅作为可见学习记录，不直接启用。`
+      : "模型浓缩暂不可用，本记录由本地统计生成，仅作为可见学习记录，不直接启用。",
     confidence: 0.5
   };
 }
 
-export async function distillBatchStyleLearning({ batchId, filename, locale, contentType, domain, projectId = "", evidence = [] }) {
+export async function distillBatchStyleLearning({ batchId, filename, locale, contentType, domain, projectId = "", evidence = [], learningRunId = "" }) {
   const examples = batchExamples(evidence);
   if (!examples.length) return null;
   let learning;
@@ -67,10 +71,18 @@ export async function distillBatchStyleLearning({ batchId, filename, locale, con
     learning = await distillBatchStyleLearningWithModel({
       batchId, filename, locale, contentType, domain, examples
     });
-  } catch {
-    learning = fallbackBatchLearning(examples, contentType);
+  } catch (error) {
+    learning = fallbackBatchLearning(examples, contentType, error?.message || "未知原因");
+    logWarn("本批风格浓缩失败，已退回本地统计", {
+      batchId,
+      filename,
+      contentType,
+      domain,
+      reason: error?.message || String(error)
+    });
   }
   return saveStyleLearningRun({
+    id: learningRunId || undefined,
     projectId,
     batchId,
     filename,

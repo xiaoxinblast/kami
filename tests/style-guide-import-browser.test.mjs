@@ -29,6 +29,8 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
   let importBody = null;
   let imported = false;
   let guideStatus = "active";
+  let condenseRerun = false;
+  const condenseCalls = [];
   const profileActions = [];
   // 8058 字那种规模：正文尾部放一行唯一标记，只有真的渲染全文才看得到。
   const guideTail = "尾部校验：省略号一律使用 ……（U+2026 两个一组）。";
@@ -61,6 +63,11 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
         if (url.pathname.endsWith("/reject")) guideStatus = "inactive";
         if (url.pathname.endsWith("/activate")) guideStatus = "active";
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "up-1", status: guideStatus }) });
+      }
+      if (url.pathname === "/api/style-learning-runs/run-1/refresh") {
+        condenseCalls.push(url.pathname);
+        condenseRerun = true;
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ failed: false, learning: { id: "run-1" } }) });
       }
       let payload = {};
       if (url.pathname === "/api/bootstrap") payload = {
@@ -95,7 +102,22 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
             ].join("\n"),
             examples: [], version: 1, evidenceCount: 12, status: "draft"
           }],
-          evidencePools: [], learningRuns: []
+          // 证据池：真实 8134 条（旧实现只有 limit=1000 的列表长度，会显示成 1000）。
+          evidencePools: [{
+            contentType: "general", domain: "general", evidenceCount: 8134, threshold: 8, sampled: 1000,
+            sources: { tableImport: 8134, humanAccept: 0, qaReview: 0, revised: 0, negative: 0, other: 0 }
+          }],
+          // 本批学习：模型浓缩失败的那条记录，要能看到原因并给重跑入口。
+          learningRuns: [{
+            id: "run-1", projectId: "project-1", batchId: "d937ea6a-1111-2222-3333-444455556666", filename: "已翻译批次（25 个文件）",
+            locale: "zh-CN", contentType: "general", domain: "general", evidenceCount: 9332,
+            summary: condenseRerun ? "模型浓缩：本批以短句节奏为主，称谓统一。" : "本批已收集 30 组同类双语证据，主要呈现短句节奏。",
+            rules: [{ category: "长度与节奏", text: "优先保持信息密度", confidence: 0.55 }],
+            examples: [], confidence: condenseRerun ? 0.78 : 0.5, status: "observed",
+            caveat: condenseRerun
+              ? ""
+              : "模型浓缩失败：connect ECONNREFUSED 127.0.0.1:59998；本记录由本地统计生成，仅作为可见学习记录，不直接启用。"
+          }]
         }
         : { userProfiles: [], styleProfiles: [], evidencePools: [], learningRuns: [] };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
@@ -151,6 +173,29 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
     // 人工指南不再混进"当前规则与待批准规范"的逐条列表
     assert.equal(await page.locator("#styleGuidanceList .style-guidance-card", { hasText: "风格指南 · 品牌语气" }).count(), 0, "人工指南不按条列在规则表里");
     assert.equal(await page.locator('.manual-guide-card [data-action="disable"]').count(), 1, "启用状态要给停用入口");
+
+    // 证据池显示真实条数（不是被 1000 上限截断的列表长度），并说明分析取样是多少
+    const poolText = await page.locator("#styleEvidencePools").textContent();
+    assert.match(poolText, /8134 \/ 8/u, `证据池要显示真实总数：${poolText}`);
+    assert.match(poolText, /分析取样：1000 条/u);
+
+    // 本批学习：模型浓缩失败要写明原因，并给「重跑模型浓缩」入口
+    const learningText = await page.locator("#styleLearningRuns").textContent();
+    assert.match(learningText, /模型浓缩失败：connect ECONNREFUSED 127\.0\.0\.1:59998/u, `失败原因要显示出来：${learningText}`);
+    const rerunButton = page.locator('#styleLearningRuns [data-rerun-condense="run-1"]');
+    assert.equal(await rerunButton.count(), 1, "失败过的记录要给重跑入口");
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-condense-failed.png`, fullPage: true, animations: "disabled" });
+    }
+    await rerunButton.click();
+    await page.waitForFunction(() => document.querySelector("#styleLearningRuns")?.textContent?.includes("模型浓缩：本批以短句节奏为主"));
+    assert.deepEqual(condenseCalls, ["/api/style-learning-runs/run-1/refresh"]);
+    assert.match(await page.locator("#styleLearningRuns").textContent(), /78% 置信/u, "重跑后用模型结果替换本地统计");
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-learning-pool.png`, fullPage: true, animations: "disabled" });
+    }
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/manual-style-guide.png`, fullPage: true, animations: "disabled" });

@@ -14,7 +14,7 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, listLibraryEntries, listLibraryFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidenceByScope, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
@@ -2657,6 +2657,8 @@ async function apiHandler(req, res, url) {
       getQaRuns(locale, { projectId, limit: 500 }),
       getStyleLearningRuns(locale, { projectId, limit: 30 })
     ]);
+    // 证据池的数字要用真实总数：limit=1000 的列表长度会把 8134 条显示成 1000。
+    const evidenceTotals = await countStyleEvidenceByScope(locale, { projectId }).catch(() => new Map());
     const pools = new Map();
     const ensurePool = (contentType, domain) => {
       const key = `${contentType || "general"}\u0000${domain || "general"}`;
@@ -2668,13 +2670,20 @@ async function apiHandler(req, res, url) {
     };
     for (const item of evidence) {
       const pool = ensurePool(item.contentType, item.domain);
-      pool.evidenceCount += 1;
       if (isNegativeEvidence(item)) pool.sources.negative += 1;
-      else if (item.provenance === "table-import" || (!item.provenance && item.sourceFile)) pool.sources.tableImport += 1;
-      else if (item.provenance === "human-accept") pool.sources.humanAccept += 1;
-      else pool.sources.other += 1;
       // 改写证据带着机器初稿，是信息量最高的一类，单独计数便于判断这个池子够不够"有话可说"。
       if (!isNegativeEvidence(item) && classifyChange(item) === "revised") pool.sources.revised += 1;
+    }
+    // 真实条数与来源分布走聚合（不受取样上限影响）；改写/负例这两项仍按取样统计。
+    for (const bucket of evidenceTotals.values()) {
+      const pool = ensurePool(bucket.contentType, bucket.domain);
+      pool.evidenceCount = bucket.total;
+      const tableImport = Number(bucket.byProvenance["table-import"]) || 0;
+      const humanAccept = Number(bucket.byProvenance["human-accept"]) || 0;
+      pool.sources.tableImport = tableImport;
+      pool.sources.humanAccept = humanAccept;
+      pool.sources.other = Math.max(0, bucket.total - tableImport - humanAccept);
+      pool.sampled = evidence.filter((item) => (item.contentType || "general") === bucket.contentType && (item.domain || "general") === bucket.domain).length;
     }
     for (const item of qaRuns) ensurePool(item.contentType, item.domain).sources.qaReview += 1;
     return json(res, 200, {
@@ -2692,6 +2701,28 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     return json(res, 200, job);
+  }
+  if (req.method === "POST" && /^\/api\/style-learning-runs\/[^/]+\/refresh$/u.test(url.pathname)) {
+    // 重跑"本批风格浓缩"：模型失败时记录里只剩本地统计，这里用同一批证据再调一次模型，
+    // 成功后就地更新那条记录（不新增记录、不改状态）。
+    const id = decodeURIComponent(url.pathname.slice("/api/style-learning-runs/".length, -"/refresh".length));
+    const run = await getStyleLearningRun(id);
+    if (!run) return json(res, 404, { error: "未找到这条批次学习记录" });
+    const evidence = await getStyleEvidence(run.locale, { projectId: run.projectId, batchId: run.batchId, limit: 1_000 });
+    if (!evidence.length) return json(res, 400, { error: "这批风格证据已经不在库里，无法重跑浓缩" });
+    const learning = await distillBatchStyleLearning({
+      batchId: run.batchId,
+      filename: run.filename,
+      locale: run.locale,
+      contentType: run.contentType,
+      domain: run.domain,
+      projectId: run.projectId,
+      evidence,
+      learningRunId: run.id
+    });
+    const failed = String(learning?.caveat || "").includes("模型浓缩失败");
+    logInfo("重跑本批风格浓缩", { id: run.id, batchId: run.batchId, evidence: evidence.length, failed });
+    return json(res, 200, { learning, failed });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/style-profiles/") && url.pathname.endsWith("/evaluate")) {
     const id = decodeURIComponent(url.pathname.slice("/api/style-profiles/".length, -"/evaluate".length));

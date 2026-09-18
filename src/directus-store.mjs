@@ -763,6 +763,44 @@ export async function getDirectusStyleLearningRuns(locale, options = {}) {
   return (await request(`/items/style_learning_runs?${params}`)).map(mapStyleLearningRun);
 }
 
+/** 单条本批学习记录（重跑模型浓缩时要先把原记录的批次与作用域读回来）。 */
+export async function getDirectusStyleLearningRun(id) {
+  try {
+    const item = await request(`/items/style_learning_runs/${encodeURIComponent(String(id))}?fields=id,project_id,batch_id,filename,target_locale,content_type,content_tags,domain,evidence_count,summary,rules,examples,caveat,confidence,status,promoted_profile_id,generated_by,date_created`);
+    return mapStyleLearningRun(item);
+  } catch (error) {
+    if (isMissingItem(error)) return null;
+    throw error;
+  }
+}
+
+/**
+ * 风格证据的真实条数：按「语体 × 领域 × 来源」一次聚合。
+ * 页面过去拿 limit=1000 的列表长度当总数，8134 条会被显示成 1000。
+ */
+export async function countDirectusStyleEvidenceByScope(locale, { projectId = "" } = {}) {
+  const params = new URLSearchParams({ "aggregate[count]": "*" });
+  params.append("groupBy[]", "content_type");
+  params.append("groupBy[]", "domain");
+  params.append("groupBy[]", "provenance");
+  params.set("filter[target_locale][_eq]", assertLocale(locale));
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  const rows = await request(`/items/style_evidence?${params}`, { timeoutMs: 60_000 });
+  const stats = new Map();
+  for (const row of rows || []) {
+    const contentType = row.content_type || "general";
+    const domain = row.domain || "general";
+    const key = `${contentType}\u0000${domain}`;
+    const bucket = stats.get(key) || { contentType, domain, total: 0, byProvenance: {} };
+    const count = Number(row.count) || 0;
+    bucket.total += count;
+    const provenance = row.provenance || "other";
+    bucket.byProvenance[provenance] = (bucket.byProvenance[provenance] || 0) + count;
+    stats.set(key, bucket);
+  }
+  return stats;
+}
+
 export async function saveDirectusQaRun(input) {
   return request("/items/qa_runs", { method: "POST", body: {
     project_id: input.projectId || "",
