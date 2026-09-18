@@ -80,6 +80,8 @@ const state = {
   logErrorCount: 0,
   reviewImportBatchId: "",
   batchHasStoredOriginal: false,
+  batchSegmentFilter: "",
+  batchQaCursor: -1,
   batchClassification: null,
   batchStyleProfile: null,
   projectSettings: null
@@ -1677,6 +1679,64 @@ function renderBatchDetails(segment) {
   </details>`;
 }
 
+/**
+ * 分段属于哪一类 QA 状态：需要复核（分数低 / AIQA 未完成 / 有阻断项）、
+ * 建议确认（有 warning 建议）、通过、待翻译、已跳过。
+ * 翻译界面的筛选与"跳到下一条待处理"用它，口径与任务中心的待处理计数一致。
+ */
+function batchSegmentGroup(segment) {
+  if (!segment.selected) return "skipped";
+  if (segment.status === "error") return "attention";
+  if (segment.status !== "done") return "pending";
+  const result = segment.result || {};
+  const issues = result.issues || [];
+  if (result.aiQa?.fallbackReason) return "attention";
+  if (Number.isFinite(result.qaScore) && result.qaScore < 90) return "attention";
+  if (issues.some((issue) => ["error", "critical"].includes(issue.severity))) return "attention";
+  if (segment.accepted) return "pass";
+  if (issues.length) return "suggest";
+  return "pass";
+}
+
+const BATCH_QA_CHIPS = [["", "全部"], ["attention", "需要复核"], ["suggest", "建议确认"], ["pending", "待翻译"], ["pass", "通过"], ["skipped", "已跳过"]];
+
+/** 任务中心「N 条待处理」：打开这条批次并直接跳到第一条待处理分段。 */
+async function jumpToTaskQa(batchId, button) {
+  const task = findBatchTask(batchId);
+  if (!task) return toast("找不到这条批次任务");
+  if (button) button.disabled = true;
+  try {
+    await openTask(batchId);
+    if (state.batchPreview?.batchId !== batchId) return;
+    state.batchQaCursor = -1;
+    jumpToNextBatchIssue();
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+/** 跳到下一条待处理分段（需要复核 / 建议确认），在当前筛选结果里循环，滚动并高亮。 */
+function jumpToNextBatchIssue() {
+  const segments = state.batchPreview?.segments || [];
+  const filter = state.batchSegmentFilter || "";
+  const pool = segments.filter((segment) => (filter
+    ? batchSegmentGroup(segment) === filter
+    : ["attention", "suggest"].includes(batchSegmentGroup(segment))));
+  if (!pool.length) return toast("没有待处理的分段");
+  state.batchQaCursor = (Number(state.batchQaCursor) + 1) % pool.length;
+  const target = pool[state.batchQaCursor];
+  // 当前筛选可能把它隐藏了：先切到"全部"，保证目标可见。
+  if (filter && pool.length === 1) {
+    state.batchSegmentFilter = "";
+    renderBatchSegments();
+  }
+  const row = document.querySelector(`.batch-segment[data-segment-id="${CSS.escape(String(target.id))}"]`);
+  if (!row) return;
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  row.classList.add("is-highlighted");
+  setTimeout(() => row.classList.remove("is-highlighted"), 2_500);
+}
+
 function renderBatchSegments() {
   const container = $("#batchSegments");
   const segments = state.batchPreview?.segments || [];
@@ -1685,6 +1745,7 @@ function renderBatchSegments() {
     $("#batchProgressText").textContent = "等待解析";
     $("#batchProgressMeta").textContent = "0 / 0";
     $("#batchProgressBar").style.width = "0%";
+    $("#batchQaFilter").hidden = true;
     return;
   }
   const selected = segments.filter((segment) => segment.selected);
@@ -1695,7 +1756,17 @@ function renderBatchSegments() {
   $("#batchProgressText").textContent = `${state.batchRunning ? (state.batchPaused ? "将在当前段后暂停" : "批次翻译中") : completed === selected.length ? "批次已完成" : failed ? "部分分段待重试" : "分段已就绪"}${styleSuffix}`;
   $("#batchProgressMeta").textContent = `${completed} / ${selected.length}${failed ? ` · ${failed} 失败` : ""}`;
   $("#batchProgressBar").style.width = `${percent}%`;
-  container.innerHTML = segments.map((segment) => {
+  // 筛选 chips + 跳转：几十上百段时不用靠肉眼滚（口径与任务中心"待处理"一致）。
+  const counts = { "": segments.length, attention: 0, suggest: 0, pending: 0, pass: 0, skipped: 0 };
+  segments.forEach((segment) => { counts[batchSegmentGroup(segment)] += 1; });
+  const filter = state.batchSegmentFilter || "";
+  $("#batchQaFilter").hidden = false;
+  $("#batchQaChips").innerHTML = BATCH_QA_CHIPS
+    .filter(([value]) => value === "" || counts[value] > 0)
+    .map(([value, label]) => `<button class="qa-filter-chip${filter === value ? " active" : ""}" type="button" data-batch-filter="${value}">${label} ${counts[value]}</button>`)
+    .join("");
+  const visibleSegments = filter ? segments.filter((segment) => batchSegmentGroup(segment) === filter) : segments;
+  container.innerHTML = visibleSegments.map((segment) => {
     const [className, label, meta] = batchStatus(segment);
     const acceptEnabled = segment.status === "done" && segment.translation && !segment.accepted;
     return `<div class="batch-segment ${segment.status === "running" ? "is-running" : ""} ${segment.status === "error" ? "has-error" : ""}" data-segment-id="${segment.id}">
@@ -1705,8 +1776,13 @@ function renderBatchSegments() {
       <div class="segment-status ${className}"><strong>${segment.accepted ? "已采纳" : label}</strong><small>${escapeHtml(meta)}</small>${acceptEnabled ? `<button class="button ghost small accept-segment" data-id="${segment.id}">采纳</button>` : ""}</div>
       ${renderBatchDetails(segment)}
     </div>`;
-  }).join("");
+  }).join("") || '<div class="empty-list batch-empty">当前筛选下没有分段。</div>';
   $("#acceptAllSegments").hidden = !segments.some((segment) => segment.status === "done" && segment.translation && !segment.accepted);
+  $$("#batchQaChips .qa-filter-chip").forEach((chip) => chip.addEventListener("click", () => {
+    state.batchSegmentFilter = chip.dataset.batchFilter || "";
+    state.batchQaCursor = -1;
+    renderBatchSegments();
+  }));
   $("#batchToAutoQa").hidden = !segments.some((segment) => segment.status === "done" && String(segment.translation || "").trim());
   $$(".batch-segment-check").forEach((checkbox) => checkbox.addEventListener("change", () => {
     const segment = segments.find((item) => item.id === checkbox.dataset.id);
@@ -2156,6 +2232,7 @@ function renderTasks() {
     else if (action === "pause-task") pauseBatchTask(id, button);
     else if (action === "continue-task") continueBatchTask(id, button);
     else if (action === "import-review") importReviewTask(id, button);
+    else if (action === "jump-qa") jumpToTaskQa(id, button);
     else if (action === "cancel-task") cancelBatchTask(id, button);
     else if (action === "cancel-background") cancelBackgroundTaskRow(id, button);
     else if (action === "delete-background") deleteBackgroundTaskRow(id, button);
@@ -2445,7 +2522,9 @@ function renderBatchTaskRow(task) {
   return `<article class="task-row" data-task-id="${escapeHtml(task.batchId)}">
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.filename)}</strong><span class="task-status ${escapeHtml(task.status)}">${cancelled ? "已中断" : taskStatusLabel(task.status)}</span><span class="task-type-chip">批次</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:${progress}%"></i></div><span>${task.completedSegments} / ${task.totalSegments}</span></div>
-    <div class="task-qa"><strong>${task.qaPending ? `${task.qaPending} 条待处理` : "QA 已清"}</strong>${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
+    <div class="task-qa">${task.qaPending
+      ? `<button class="qa-jump" type="button" data-action="jump-qa" title="打开这条批次并跳到第一条待处理"><strong>${task.qaPending} 条待处理</strong><small>点击定位 →</small></button>`
+      : "<strong>QA 已清</strong>"}${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
     <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">导出</button></div>
   </article>`;
 }
@@ -2781,6 +2860,9 @@ function applyStoredBatchRun(run) {
   $("#batchDropZone").classList.add("has-file");
   switchView("workbench");
   setTranslationMode("batch");
+  // 打开历史任务时清掉上一次的 QA 筛选，免得看起来"段落少了"。
+  state.batchSegmentFilter = "";
+  state.batchQaCursor = -1;
   renderBatchSegments();
   refreshActions();
 }
@@ -5479,6 +5561,7 @@ function bindEvents() {
   });
   $("#cancelBatchAction")?.addEventListener("click", () => cancelBatchRun().catch((error) => toast(error.message)));
   $("#reviewImportFile").addEventListener("change", (event) => submitReviewImport(event.target.files?.[0]));
+  $("#batchJumpNext").addEventListener("click", () => jumpToNextBatchIssue());
   $("#qaSourceTabs").addEventListener("click", (event) => {
     const tab = event.target.closest(".qa-source-tab");
     if (tab) setQaSource(tab.dataset.qaSource);

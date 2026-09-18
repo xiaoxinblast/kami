@@ -401,6 +401,12 @@ select { min-width: 150px; }
 .qa-issue.error strong, .qa-issue.critical strong { color: #8a352f; }
 .qa-issue span { color: #3d4c43; font-size: 12px; line-height: 1.65; }
 .qa-issue em { color: #4b6152; font-size: 11px; font-style: normal; }
+/* 翻译界面分段队列上的 QA 筛选：定位待处理段落用 */
+.batch-qa-filter { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0 8px; }
+.task-qa .qa-jump { display: grid; gap: 2px; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.task-qa .qa-jump strong { color: #8a5a16; text-decoration: underline dotted; }
+.task-qa .qa-jump:hover strong { color: #6d4408; }
+.task-qa .qa-jump small { color: var(--muted); font-size: 10px; }
 /*
  * 侧边栏底部的日志入口：紧贴在状态块上面那条分隔线之上。
  * 之前它和 .sidebar-status 都写了 margin-top:auto，flex 会把剩余空白平分，

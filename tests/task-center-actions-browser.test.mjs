@@ -49,7 +49,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
           status: 200, contentType: "application/json",
           body: JSON.stringify([
             batch(),
-            batch({ id: "batch-2", batchId: "batch-2", filename: "interrupted.xlsx", status: "needs_attention", runState: "paused", runnerOptions: { route: "auto", reflect: true, cancelled: true } }),
+            batch({ id: "batch-2", batchId: "batch-2", filename: "interrupted.xlsx", status: "needs_attention", runState: "paused", qaPending: 2, runnerOptions: { route: "auto", reflect: true, cancelled: true } }),
             {
               id: "task-1", type: "background", taskType: "asset_import", title: "导入 · terms.xlsx", locale: "zh-CN",
               status: "in_progress", contentType: "general", domain: "general", totalSegments: 100, completedSegments: 40,
@@ -95,7 +95,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
             batchId: "batch-2", filename: "interrupted.xlsx", format: "xlsx", locale: "zh-CN", contentType: "general", domain: "game",
             segmentationMode: "unit", runState: "paused", runnerOptions: { route: "auto", reflect: true },
             segments: [
-              { id: "seg-1", source: "メンテナンスは明日開始します。", translation: "维护明天开始。", selected: true, status: "done", locator: { type: "xlsx-cell", sheet: "S", address: "B2", row: 2, column: 2, entryId: "ID-1" } },
+              { id: "seg-1", source: "メンテナンスは明日開始します。", translation: "维护明天开始。", selected: true, status: "done", result: { qaScore: 97, issues: [{ severity: "warning", category: "accuracy_omission", message: "未体现「变得能够…」的状态变化", suggestion: "…了。" }], aiQa: { status: "passed" } }, locator: { type: "xlsx-cell", sheet: "S", address: "B2", row: 2, column: 2, entryId: "ID-1" } },
               { id: "seg-2", source: "アップデートをダウンロードしています。", translation: "正在下载更新。", selected: true, status: "done", locator: { type: "xlsx-cell", sheet: "S", address: "B3", row: 3, column: 2, entryId: "ID-2" } }
             ]
           })
@@ -248,6 +248,25 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     assert.equal(await page.locator('[data-export-option="pick-source"]').count(), 1, "老批次要能补选原文件");
     assert.equal(await page.locator('[data-export-option="in-place"]').count(), 0);
     await page.locator('#exportOptionsDialog .icon-button[data-close="exportOptionsDialog"]').click();
+
+    // 待处理定位：任务中心那行「N 条待处理」可点，打开批次并跳到第一条
+    const jumpButton = page.locator('#taskList .task-row[data-task-id="batch-2"] [data-action="jump-qa"]');
+    assert.equal(await jumpButton.count(), 1, "有待处理时那个计数要是可点的");
+    await jumpButton.click();
+    await page.waitForSelector("#view-workbench.active");
+    await page.waitForFunction(() => Boolean(document.querySelector(".batch-segment.is-highlighted")), null, { timeout: 10_000 });
+    assert.match(await page.locator("#batchQaFilter").textContent(), /建议确认 1/u, "分段队列要有 QA 筛选 chips");
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/batch-qa-filter.png`, animations: "disabled" });
+    }
+    await page.locator('#batchQaChips .qa-filter-chip[data-batch-filter="suggest"]').click();
+    await page.waitForFunction(() => document.querySelectorAll("#batchSegments .batch-segment").length === 1);
+    assert.match(await page.locator("#batchSegments .batch-segment").textContent(), /未体现/u);
+    await page.locator("#batchJumpNext").click();
+    await page.waitForFunction(() => Boolean(document.querySelector("#batchSegments .batch-segment.is-highlighted")));
+    await page.locator('#batchQaChips .qa-filter-chip[data-batch-filter=""]').click();
+    await page.waitForFunction(() => document.querySelectorAll("#batchSegments .batch-segment").length === 2);
 
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });

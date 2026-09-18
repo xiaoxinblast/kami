@@ -129,6 +129,10 @@
                 <div class="batch-progress-summary"><strong id="batchProgressText">等待解析</strong><span id="batchProgressMeta">0 / 0</span><button class="button ghost small" id="batchToAutoQa" hidden>转译文质检</button><button class="button ghost small" id="acceptAllSegments" hidden>全部采纳</button></div>
               </div>
               <div class="batch-progress-track"><i id="batchProgressBar"></i></div>
+              <div class="batch-qa-filter" id="batchQaFilter" hidden>
+                <div class="qa-filters" id="batchQaChips" role="group" aria-label="按 QA 状态筛选分段"></div>
+                <button class="button ghost small" id="batchJumpNext" type="button">跳到下一条待处理</button>
+              </div>
               <div class="batch-segments" id="batchSegments"><div class="empty-list batch-empty">粘贴文本或拖入文件后，会自动识别正文并生成分句队列。</div></div>
             </article>
           </div>
