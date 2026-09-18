@@ -1233,6 +1233,7 @@ async function commitTermImport(body, onProgress = null) {
           locale, source, target, contentType: evidenceContentType, domain: evidenceDomain,
           contentTags,
           machineTranslation,
+          entryKey: candidate.entryKey || "",
           batchId: body.batchId, sourceFile, sourceRow: candidate.sourceRow || candidate.rowNumber, projectId, status: "accepted", provenance: linkedTrajectory ? "external-review-import" : "table-import"
         }) : null;
         if (evidence) {

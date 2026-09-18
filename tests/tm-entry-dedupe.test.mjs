@@ -7,8 +7,8 @@ import { join } from "node:path";
 process.env.KAMI_DATA_DIR = mkdtempSync(join(tmpdir(), "kami-tm-entry-"));
 delete process.env.KAMI_STORE;
 
-const { getMemories, initializeStore, saveMemory } = await import("../src/store.mjs");
-const { memoryMatchAttempts } = await import("../src/translation-memory.mjs");
+const { getMemories, getStyleEvidence, initializeStore, saveMemory, saveStyleEvidence } = await import("../src/store.mjs");
+const { memoryMatchAttempts, styleEvidenceMatch } = await import("../src/translation-memory.mjs");
 const { extractXliffPairs } = await import("../src/xliff-document.mjs");
 const { buildContextPack } = await import("../src/context-pack.mjs");
 const { classifyContent } = await import("../src/classifier.mjs");
@@ -106,4 +106,38 @@ test("定位顺序：先按条目 ID，再退回原文+译文", () => {
     { kind: "pair", source: "s", target: "t" }
   ]);
   assert.deepEqual(memoryMatchAttempts({ source: "s", target: "t" }), [{ kind: "pair", source: "s", target: "t" }]);
+});
+
+const evidence = (input) => saveStyleEvidence({ locale: "zh-CN", projectId: "project-1", contentType: "dialogue", domain: "game", ...input });
+
+test("风格证据：同条目 ID 同作用域只保留最新一条", async () => {
+  await evidence({ source: "ヴァネッサ", target: "ヴァネッサ（旧）", machineTranslation: "旧机翻", entryKey: "EVIDENCE_KEY_1", sourceFile: "a.mqxliff" });
+  await evidence({ source: "ヴァネッサ", target: "瓦妮莎", machineTranslation: "新机翻", note: "改稿", entryKey: "EVIDENCE_KEY_1", sourceFile: "a.mqxliff" });
+
+  const rows = (await getStyleEvidence("zh-CN", { projectId: "project-1" })).filter((item) => item.entryKey === "EVIDENCE_KEY_1");
+  assert.equal(rows.length, 1, "同 ID 同作用域只应留一条");
+  assert.equal(rows[0].target, "瓦妮莎");
+  assert.equal(rows[0].machineTranslation, "新机翻");
+  assert.equal(rows[0].note, "改稿");
+});
+
+test("风格证据：同条目 ID 但换了作用域各自留一条", async () => {
+  await evidence({ source: "シド", target: "希德", entryKey: "EVIDENCE_KEY_2", contentType: "dialogue", domain: "game" });
+  await evidence({ source: "シド", target: "希德", entryKey: "EVIDENCE_KEY_2", contentType: "ui", domain: "game" });
+
+  const rows = (await getStyleEvidence("zh-CN", { projectId: "project-1" })).filter((item) => item.entryKey === "EVIDENCE_KEY_2");
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((item) => item.contentType).sort(), ["dialogue", "ui"]);
+});
+
+test("风格证据：没有条目 ID 时保持追加语义", async () => {
+  await evidence({ source: "プレミアムパス", target: "高级通行证" });
+  await evidence({ source: "プレミアムパス", target: "高级通行证" });
+
+  const rows = (await getStyleEvidence("zh-CN", { projectId: "project-1" })).filter((item) => item.source === "プレミアムパス");
+  assert.equal(rows.length, 2, "表格导入等没有条目 ID 的证据仍逐条累积");
+  assert.equal(styleEvidenceMatch({ entryKey: "" }), null);
+  assert.deepEqual(styleEvidenceMatch({ entryKey: "k", locale: "zh-CN", contentType: "dialogue", domain: "game", projectId: "p" }), {
+    entryKey: "k", locale: "zh-CN", contentType: "dialogue", domain: "game", projectId: "p"
+  });
 });

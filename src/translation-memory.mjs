@@ -23,6 +23,24 @@ export function memoryMatchAttempts({ source = "", target = "", entryKey = "" } 
   return attempts;
 }
 
+/**
+ * 风格证据的身份：同一条目 ID + 同一作用域（语种 + 语体 + 领域 + 项目）只保留最新一条，
+ * 改稿重导时更新那一条，而不是让同一句在同一作用域里反复堆积、把蒸馏样本撑成重复项。
+ * 没有条目 ID（表格导入、QA 采纳、同事反馈）时返回 null，保持追加语义——那些证据本身就是语料累积。
+ */
+export function styleEvidenceMatch({ entryKey = "", locale = "", contentType = "general", domain = "general", projectId = "" } = {}) {
+  const key = String(entryKey || "").trim();
+  const targetLocale = String(locale || "").trim();
+  if (!key || !targetLocale) return null;
+  return {
+    entryKey: key,
+    locale: targetLocale,
+    contentType: String(contentType || "general"),
+    domain: String(domain || "general"),
+    projectId: String(projectId || "").trim()
+  };
+}
+
 function tokenOverlap(left, right) {
   const a = new Set([...normalizeSource(left)]);
   const b = new Set([...normalizeSource(right)]);

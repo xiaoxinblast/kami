@@ -489,6 +489,7 @@ const definitions = [
       selectField("polarity", "证据极性", [["正例", "positive"], ["反例", "negative"]], { defaultValue: "positive", width: "half", sort: 8 }),
       textField("note", "备注 / 否决理由", { multiline: true, sort: 9, note: "反例记录同事为什么否决这条译文。" }),
       textField("source_file", "来源文件", { width: "half", sort: 10 }),
+      textField("entry_key", "条目身份键", { width: "half", sort: 10, note: "memoQ x-mmq-context 等稳定条目 ID：同 ID 同作用域只保留最新证据。" }),
       { field: "source_row", type: "integer", meta: { interface: "input", width: "half", sort: 11, translations: label("来源行号") }, schema: { is_nullable: true } },
       textField("batch_id", "来源导入批次 ID", { width: "half", sort: 12 }),
       selectField("status", "状态", [["可用", "accepted"], ["待复核", "pending"], ["已拒绝", "rejected"]], { defaultValue: "pending", sort: 13 }),

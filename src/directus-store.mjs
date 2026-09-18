@@ -3,7 +3,7 @@ import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { fetchWithTimeout } from "./provider.mjs";
 import { sanitizeProjectSettings } from "./project-config.mjs";
-import { memoryMatchAttempts } from "./translation-memory.mjs";
+import { memoryMatchAttempts, styleEvidenceMatch } from "./translation-memory.mjs";
 
 export const LOCALE_COLLECTIONS = Object.freeze({
   "zh-CN": "terms_zh_cn",
@@ -386,14 +386,16 @@ export async function getDirectusStyleProfile(locale, contentType, domain = "gen
 
 export async function saveDirectusStyleEvidence(input) {
   const embedding = input.embedding ?? await embedSource(input.source);
-  const saved = await request("/items/style_evidence", { method: "POST", body: {
+  const locale = assertLocale(input.locale);
+  const body = {
     project_id: input.projectId || "",
-    target_locale: assertLocale(input.locale),
+    target_locale: locale,
     content_type: input.contentType || "general",
     content_tags: input.contentTags || [],
     domain: input.domain || "general",
     source: String(input.source || "").trim(),
     target: String(input.target || "").trim(),
+    entry_key: String(input.entryKey || ""),
     source_file: input.sourceFile || "",
     source_row: Number(input.sourceRow) || null,
     batch_id: input.batchId || "",
@@ -403,13 +405,30 @@ export async function saveDirectusStyleEvidence(input) {
     polarity: input.polarity === "negative" ? "negative" : "positive",
     note: String(input.note || "").trim(),
     ...(embedding ? { embedding } : {})
-  } });
+  };
+  // 同条目 ID + 同作用域只留最新：命中就 PATCH 那一条，避免同一句在证据池里重复铺开。
+  const match = styleEvidenceMatch({ entryKey: input.entryKey, locale, contentType: body.content_type, domain: body.domain, projectId: body.project_id });
+  let existingId = "";
+  if (match) {
+    const params = new URLSearchParams({ limit: "1", sort: "-date_created", fields: "id" });
+    params.set("filter[target_locale][_eq]", match.locale);
+    params.set("filter[entry_key][_eq]", match.entryKey);
+    params.set("filter[content_type][_eq]", match.contentType);
+    params.set("filter[domain][_eq]", match.domain);
+    if (match.projectId) params.set("filter[project_id][_eq]", match.projectId);
+    else params.set("filter[project_id][_empty]", "true");
+    const found = await request(`/items/style_evidence?${params}`);
+    existingId = found[0]?.id || "";
+  }
+  const saved = existingId
+    ? await request(`/items/style_evidence/${existingId}`, { method: "PATCH", body })
+    : await request("/items/style_evidence", { method: "POST", body });
   return { id: saved.id, ...input };
 }
 
 export async function getDirectusStyleEvidence(locale, options = {}) {
   assertLocale(locale);
-  const params = new URLSearchParams({ limit: String(Math.min(1000, options.limit || 1000)), sort: "-date_created", fields: "id,project_id,target_locale,content_type,content_tags,domain,source,target,machine_translation,polarity,note,source_file,source_row,batch_id,status,provenance,embedding,date_created" });
+  const params = new URLSearchParams({ limit: String(Math.min(1000, options.limit || 1000)), sort: "-date_created", fields: "id,project_id,target_locale,content_type,content_tags,domain,source,target,entry_key,machine_translation,polarity,note,source_file,source_row,batch_id,status,provenance,embedding,date_created" });
   params.set("filter[target_locale][_eq]", locale);
   if (options.projectId) params.set("filter[project_id][_eq]", String(options.projectId));
   if (options.contentType) params.set("filter[content_type][_eq]", options.contentType);
@@ -423,6 +442,7 @@ export async function getDirectusStyleEvidence(locale, options = {}) {
     .map((item) => ({
       id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type || "general", contentTags: arrayValue(item.content_tags), domain: item.domain || "general",
       source: item.source, target: item.target, sourceFile: item.source_file || "", sourceRow: Number(item.source_row) || null,
+      entryKey: item.entry_key || "",
       machineTranslation: item.machine_translation || "",
       polarity: item.polarity === "negative" ? "negative" : "positive",
       note: item.note || "",

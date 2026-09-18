@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { assertLocale, LOCALES } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { createDefaultProjectSettings, sanitizeProjectSettings } from "./project-config.mjs";
-import { memoryMatchAttempts } from "./translation-memory.mjs";
+import { memoryMatchAttempts, styleEvidenceMatch } from "./translation-memory.mjs";
 import {
   deleteDirectusAsset,
   getDirectusAssets,
@@ -403,8 +403,16 @@ async function saveJsonStyleEvidence(input) {
   const items = await readJson(path, []);
   const source = String(input.source || "").trim();
   const embedding = input.embedding ?? await embedSource(source);
+  const match = styleEvidenceMatch({ entryKey: input.entryKey, locale: input.locale, contentType: input.contentType, domain: input.domain, projectId: input.projectId });
+  const existing = match
+    ? items.find((item) => String(item.entryKey || "").trim() === match.entryKey
+      && String(item.locale || "") === match.locale
+      && String(item.contentType || "general") === match.contentType
+      && String(item.domain || "general") === match.domain
+      && String(item.projectId || "").trim() === match.projectId)
+    : null;
   const item = {
-    id: randomUUID(),
+    id: existing?.id || randomUUID(),
     ...input,
     projectId: String(input.projectId || ""),
     machineTranslation: String(input.machineTranslation || "").trim(),
@@ -413,7 +421,8 @@ async function saveJsonStyleEvidence(input) {
     ...(embedding ? { embedding } : {}),
     createdAt: new Date().toISOString()
   };
-  items.push(item);
+  if (existing) items[items.indexOf(existing)] = item;
+  else items.push(item);
   await writeJsonAtomic(path, items);
   return item;
 }
