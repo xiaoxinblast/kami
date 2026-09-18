@@ -278,6 +278,14 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
     await page.locator("#memoryBreadcrumbBack").click();
     await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-working"]');
 
+    // 主 TM 也有文件层，但这只是浏览维度：文案必须写清"匹配仍是整个库"。
+    await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-master"] [data-library-action="open"]').click();
+    await page.waitForSelector('#memoryFileBody .library-row[data-file-key="Asia_Batch15_new.xlsx_zho-CN.mqxliff"]');
+    assert.match(await page.locator("#memoryFilesNote").textContent(), /整个库（跨全部文件）/u, "主 TM 不能让人以为按文件匹配");
+    assert.doesNotMatch(await page.locator("#memoryFilesNote").textContent(), /只在同一个文件内参与/u);
+    await page.locator("#memoryBreadcrumbBack").click();
+    await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-master"]');
+
     // 导出的任务行要能直接下载（库导出复用 batch_export 的下载按钮）
     await page.locator('.nav-item[data-view="tasks"]').click();
     await page.waitForSelector('#taskList .task-row[data-task-id="export-1"]');

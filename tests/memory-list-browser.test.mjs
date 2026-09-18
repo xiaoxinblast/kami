@@ -82,7 +82,8 @@ test("记忆库显示总数、按页加载，搜索走服务端", { skip: !proce
     // 第三层：TM 库先进"来源文件"列表，再进条目（工作 TM 是按文件分开的）。
     await page.waitForSelector('#memoryFileBody .library-row[data-file-key="Asia_batch18_new.xlsx_zho-CN.mqxliff"]');
     assert.match(await page.locator("#memoryFileBody").textContent(), /Asia_batch18_new\.xlsx_zho-CN\.mqxliff/u);
-    assert.match(await page.locator("#memoryFilesView .isolation-note").textContent(), /按翻译文件分开/u);
+    // 主 TM 的文件层只是浏览维度：文案要写清匹配仍是整个库（工作 TM 才会写"按文件分开"）。
+    assert.match(await page.locator("#memoryFilesView .isolation-note").textContent(), /整个库（跨全部文件）/u);
     await page.locator('#memoryFileBody [data-file-action="open"]').click();
     await page.waitForSelector("#memoryList .asset-row");
     assert.equal(memoryQueries.at(-1).get("libraryId"), "tm-master", "条目列表要按打开的库过滤");

@@ -4629,6 +4629,15 @@ function renderLibraryFiles(kind) {
   const body = $("#memoryFileBody");
   if (!body) return;
   const files = state.memoryLibraryFiles || [];
+  // 文件分组只是浏览/导出/清理的维度，会不会影响翻译匹配要看库的角色：
+  // 工作 TM 的机器草稿按文件隔离；主 TM / 参考 TM 的匹配永远是整个库（跨文件）。
+  const library = libraryById("tm", state.memoryLibraryId);
+  const note = $("#memoryFilesNote");
+  if (note) {
+    note.textContent = library?.role === "working"
+      ? "工作 TM 按翻译文件分开：每个文件一批机器译文，只在同一个文件内参与一致性参考；这里的「打开」只看该文件的条目。"
+      : "文件分组只用于浏览、导出与清理。翻译匹配取的是整个库（跨全部文件），人工确认译文不受文件限制。";
+  }
   body.innerHTML = files.length ? files.map((file) => {
     const key = escapeHtml(file.sourceFile || "__none__");
     const label = file.sourceFile || "未标注来源";
