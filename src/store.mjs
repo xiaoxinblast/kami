@@ -12,6 +12,7 @@ import {
   getDirectusAssetStats,
   getDirectusMetadata,
   getDirectusMemories,
+  countDirectusMemories,
   getDirectusQaCases,
   getDirectusStyleProfile,
   getDirectusStyleEvidence,
@@ -319,11 +320,21 @@ async function getJsonMemories(locale, options = {}) {
   assertLocale(locale);
   const items = await readJson(join(ROOT, "memories", `${locale}.json`), []);
   const projectId = String(options.projectId || "").trim();
-  return items.filter((item) =>
+  const matched = items.filter((item) =>
     (!projectId || item.projectId === projectId)
     && (!options.contentType || (options.exactContentType ? item.contentType === options.contentType : options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general"))
     && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
+    && (!String(options.search || "").trim() || [item.source, item.target].some((value) => String(value || "").toLowerCase().includes(String(options.search).trim().toLowerCase())))
   );
+  // 与 Directus 实现保持同一口径：最新在前，支持 offset/limit 分页（limit<=0 表示全量）。
+  const sorted = [...matched].sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")));
+  const offset = Math.max(0, Math.trunc(Number(options.offset)) || 0);
+  const limit = Number(options.limit) > 0 ? Math.min(1_000, Number(options.limit)) : sorted.length;
+  return offset || limit < sorted.length ? sorted.slice(offset, offset + limit) : sorted;
+}
+
+async function countJsonMemories(locale, options = {}) {
+  return (await getJsonMemories(locale, { ...options, offset: 0, limit: 0 })).length;
 }
 
 async function saveJsonMemory(locale, input) {
@@ -1533,6 +1544,10 @@ export async function completeImport(batchId, decisions, summary) {
 
 export async function getMemories(locale, options) {
   return usesDirectus() ? getDirectusMemories(locale, options) : getJsonMemories(locale, options);
+}
+
+export async function countMemories(locale, options) {
+  return usesDirectus() ? countDirectusMemories(locale, options) : countJsonMemories(locale, options);
 }
 
 export async function saveMemory(locale, input) {

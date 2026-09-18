@@ -18,6 +18,7 @@ import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, ex
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
+import { countMemories } from "./src/store.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
@@ -65,6 +66,9 @@ const TERM_AI_BATCH_SIZE = 24;
 const TERM_WRITE_BATCH_SIZE = 200;
 /** 跳过明细只保留前若干条，其余按原因计数。 */
 const SKIPPED_DETAIL_LIMIT = 200;
+/** 记忆库列表一页的条数与单页上限：一次渲染上万行 DOM 会卡，页面按页追加。 */
+const MEMORY_LIST_LIMIT = 500;
+const MEMORY_LIST_MAX = 1_000;
 const TRANSLATION_PROMPT_VERSION = "kami-translation-v3";
 const importProgress = new Map();
 const AUTO_SHUTDOWN_ENABLED = process.env.KAMI_AUTO_SHUTDOWN === "1";
@@ -1608,7 +1612,21 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/memories") {
     const locale = assertActiveLocale(url.searchParams.get("locale") || "zh-CN");
-    return json(res, 200, { memories: await getMemories(locale, { projectId: url.searchParams.get("projectId") || "", contentType: "general", domain: "general", limit: 500 }) });
+    // 列表按页取，另外单独统计总数：页面写"已显示 N / 共 M 条"，搜索也在服务端做，
+    // 否则用户只能搜到已加载的那一页。
+    const filters = {
+      projectId: url.searchParams.get("projectId") || "",
+      contentType: "general",
+      domain: "general",
+      search: (url.searchParams.get("search") || "").trim()
+    };
+    const limit = Math.min(MEMORY_LIST_MAX, Math.max(1, Number(url.searchParams.get("limit")) || MEMORY_LIST_LIMIT));
+    const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset")) || 0));
+    const [memories, total] = await Promise.all([
+      getMemories(locale, { ...filters, limit, offset }),
+      countMemories(locale, filters)
+    ]);
+    return json(res, 200, { memories, total, limit, offset });
   }
   if (req.method === "GET" && url.pathname === "/api/assets") {
     const locale = assertActiveLocale(url.searchParams.get("locale"));

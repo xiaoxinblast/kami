@@ -319,6 +319,9 @@ select { min-width: 150px; }
 .batch-column-row select[data-role="source_text"] { border-color: var(--lime-deep); background: #f6fbef; font-weight: 700; }
 .batch-column-hint { margin: 0 0 4px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .batch-column-hint.is-error { color: #b4453c; }
+/* 记忆库分页：一次只渲染一页，剩下的按钮按需追加，避免上万行 DOM 拖慢页面 */
+.asset-more-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.asset-more-bar small { color: var(--muted); font-size: 11px; }
 .import-progress.is-failed { border-color: #e7c9c5; background: #fdf6f5; }
 .import-progress.is-failed .import-progress-head strong { color: #b4453c; }
 .smart-import-capabilities { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-top: 12px; }

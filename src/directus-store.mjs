@@ -241,11 +241,46 @@ export async function initializeDirectusStore() {
   ].map((collection) => request(`/items/${collection}?limit=1&fields=id`)));
 }
 
-export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, exactContentType = false, projectId = "" } = {}) {
+/**
+ * 记忆库列表与计数共用的 Directus 过滤条件。
+ *
+ * contentType / domain 传 "general"（默认）表示不按语体/领域收窄，语义与读取后的 JS 过滤一致；
+ * search 同时匹配日语原文与简体中文译文。
+ */
+function applyMemoryFilters(params, { projectId = "", contentType = "general", domain = "general", exactContentType = false, search = "" } = {}) {
+  let group = 0;
+  const nextGroup = () => `filter[_and][${group++}]`;
+  if (projectId) params.set(`${nextGroup()}[project_id][_eq]`, String(projectId));
+  if (contentType && contentType !== "general") {
+    const base = nextGroup();
+    if (exactContentType) params.set(`${base}[content_type][_eq]`, String(contentType));
+    else {
+      params.set(`${base}[_or][0][content_type][_eq]`, String(contentType));
+      params.set(`${base}[_or][1][content_type][_eq]`, "general");
+    }
+  }
+  if (domain && domain !== "general") {
+    const base = nextGroup();
+    params.set(`${base}[_or][0][domain][_eq]`, String(domain));
+    params.set(`${base}[_or][1][domain][_eq]`, "general");
+  }
+  if (search) {
+    const base = nextGroup();
+    params.set(`${base}[_or][0][source][_icontains]`, String(search));
+    params.set(`${base}[_or][1][target][_icontains]`, String(search));
+  }
+  return params;
+}
+
+export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, offset = 0, search = "", exactContentType = false, projectId = "" } = {}) {
   const collection = memoryCollectionFor(locale);
   const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(1000, limit));
-  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_updated,-date_created", fields: "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,entry_id,entry_key,previous_source,next_source,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,project_id,library_id,campaign,platform,region,audience,superseded_by,date_created,date_updated" });
-  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  // 按 date_created 排序，不用 date_updated：date_updated 允许为空，而 Postgres 的 DESC
+  // 把 NULL 排在最前面，会把真正最新的记忆挤出列表。
+  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_created", fields: "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,entry_id,entry_key,previous_source,next_source,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,project_id,library_id,campaign,platform,region,audience,superseded_by,date_created,date_updated" });
+  const start = Math.max(0, Math.trunc(Number(offset)) || 0);
+  if (start > 0) params.set("offset", String(start));
+  applyMemoryFilters(params, { projectId, contentType, domain, exactContentType, search });
   const items = await request(`/items/${collection}?${params}`);
   return items.filter((item) =>
     (!contentType || (exactContentType ? item.content_type === contentType : contentType === "general" || item.content_type === contentType || item.content_type === "general"))
@@ -287,6 +322,19 @@ export async function getDirectusMemories(locale, { contentType = "general", dom
     createdAt: item.date_created,
     updatedAt: item.date_updated
   }));
+}
+
+/**
+ * 记忆库总数：列表页要显示"已显示 N / 共 M 条"，这里走 aggregate 只取计数，不拉数据。
+ * 过滤条件与 getDirectusMemories 共用，保证列表长度和总数口径一致。
+ */
+export async function countDirectusMemories(locale, options = {}) {
+  const collection = memoryCollectionFor(locale);
+  const params = applyMemoryFilters(new URLSearchParams(), options);
+  params.set("aggregate[count]", "id");
+  const rows = await request(`/items/${collection}?${params}`);
+  const value = rows?.[0]?.count?.id ?? rows?.[0]?.count ?? 0;
+  return Number(value) || 0;
 }
 
 export async function saveDirectusMemory(locale, input) {

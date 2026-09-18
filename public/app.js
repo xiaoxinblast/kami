@@ -34,6 +34,7 @@ const state = {
   styleData: null,
   assets: {},
   memories: [],
+  memoryTotal: 0,
   memoryImportFile: null,
   memoryImportPreview: null,
   styleGuideFile: null,
@@ -2807,13 +2808,34 @@ async function updateMemoryLocale(locale) {
   await loadMemories(locale);
 }
 
-async function loadMemories(locale) {
-  const params = new URLSearchParams({ locale });
+const MEMORY_PAGE_SIZE = 500;
+let memorySearchTimer;
+
+/**
+ * 记忆库按页读取：标题写"已显示 N / 共 M 条"，搜索也交给服务端。
+ * 之前接口固定 limit=500 且前端只在前 500 条里过滤，用户会以为库里只有 500 条。
+ */
+async function loadMemories(locale, { append = false } = {}) {
+  const params = new URLSearchParams({ locale, limit: String(MEMORY_PAGE_SIZE) });
   if (state.activeProjectId) params.set("projectId", state.activeProjectId);
+  const search = $("#memorySearch")?.value.trim() || "";
+  if (search) params.set("search", search);
+  if (append) params.set("offset", String((state.memories || []).length));
   const payload = await api(`/api/memories?${params}`);
-  state.memories = payload.memories || [];
-  $("#memoryCount").textContent = `${state.memories.length} 条`;
+  const items = payload.memories || [];
+  state.memories = append ? [...(state.memories || []), ...items] : items;
+  state.memoryTotal = Number(payload.total ?? state.memories.length) || 0;
+  renderMemoryCount();
   renderMemories();
+}
+
+function renderMemoryCount() {
+  const loaded = (state.memories || []).length;
+  const total = Math.max(Number(state.memoryTotal) || 0, loaded);
+  $("#memoryCount").textContent = loaded < total ? `已显示 ${loaded} / 共 ${total} 条` : `${total} 条`;
+  const hasMore = loaded < total;
+  $("#memoryMoreBar").hidden = !hasMore;
+  if (hasMore) $("#memoryMoreMeta").textContent = `还有 ${total - loaded} 条未显示`;
 }
 
 /**
@@ -3271,8 +3293,9 @@ async function commitMemoryImport() {
 }
 
 function renderMemories() {
-  const query = $("#memorySearch")?.value.trim().toLowerCase() || "";
-  const items = (state.memories || []).filter((item) => [item.source, item.target].some((value) => String(value || "").toLowerCase().includes(query)));
+  // 搜索已在服务端完成：这里直接渲染服务端返回的这一页，不能再按输入框二次过滤，
+  // 否则会把服务端匹配到的条目又筛掉（大小写、全半角等口径不一致）。
+  const items = state.memories || [];
   $("#memoryList").innerHTML = items.length ? items.map((item) => `
     <div class="asset-row"><div class="asset-row-main"><strong>${escapeHtml(item.source)}</strong><span class="arrow">→</span><strong>${escapeHtml(item.target)}</strong><div class="asset-meta"><span>${item.qualityStatus === "human_approved" ? "主 TM / 人工确认" : item.qualityStatus === "machine_verified" ? "工作 TM / 机器译文" : "候选"}</span>${item.sourceFile ? `<span>${escapeHtml(item.sourceFile)}</span>` : ""}${item.sourceRow ? `<span>第 ${item.sourceRow} 行</span>` : ""}${item.catMatchKind ? `<span>${escapeHtml(item.catMatchKind)}</span>` : ""}</div></div></div>
   `).join("") : '<div class="empty-list">当前项目没有匹配的 TM 条目</div>';
@@ -4687,7 +4710,14 @@ function bindEvents() {
     switchView("import");
     setImportFiles(files, { intent: "terms", returnView: "assets" }).finally(() => { event.target.value = ""; });
   });
-  $("#memorySearch").addEventListener("input", renderMemories);
+  $("#memorySearch").addEventListener("input", () => {
+    clearTimeout(memorySearchTimer);
+    memorySearchTimer = setTimeout(() => {
+      if (state.view !== "memories") return;
+      loadMemories(state.memoryLocale).catch((error) => toast(error.message));
+    }, 300);
+  });
+  $("#memoryMore").addEventListener("click", () => loadMemories(state.memoryLocale, { append: true }).catch((error) => toast(error.message)));
   $("#memoryFile").addEventListener("change", (event) => {
     state.memoryImportFiles = [...event.target.files];
     state.memoryImportFile = state.memoryImportFiles[0] || null;
