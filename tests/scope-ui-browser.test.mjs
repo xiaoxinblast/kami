@@ -51,6 +51,7 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
             qualityTierLabel: "标准",
             qualityTierSource: "auto",
             tierReason: "常规句段，走标准流程",
+            tierStrength: "",
             routing: { tier: "standard", label: "标准档", description: "初译 + 模型质检，最多一轮修订。", risk: { tier: "medium", reasons: [] } },
             scopeUsage: {
               contentType: "dialogue",

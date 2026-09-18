@@ -5531,6 +5531,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
         qualityTierSource: tierDecision.manual ? "manual" : "auto",
         tierReason: tierDecision.reason,
         tierSignals: tierDecision.signals,
+        // 没配高质量模型时严苛档只能靠流程强度提升，界面必须说实话。
+        tierStrength: describeTierStrength({ tier: qualityTier, provider }),
         qualityUpgradeFrom,
         routing: {
           ...routing,
