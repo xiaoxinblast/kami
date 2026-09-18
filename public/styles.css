@@ -339,8 +339,13 @@ select { min-width: 150px; }
 .manual-guide-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .manual-guide-actions .style-examples { flex: 1; margin: 0; }
 .manual-guide-text { margin: 8px 0 0; max-height: 190px; overflow-y: auto; white-space: pre-wrap; color: #46584c; font-size: 11px; line-height: 1.7; }
-/* 侧边栏底部的日志入口：贴在状态块上方，和导航项同款样式 */
-.sidebar-log { margin-top: auto; }
+/*
+ * 侧边栏底部的日志入口：紧贴在状态块上面那条分隔线之上。
+ * 之前它和 .sidebar-status 都写了 margin-top:auto，flex 会把剩余空白平分，
+ * 结果按钮悬在半空、离分隔线很远。
+ */
+.sidebar-log { margin-top: auto; margin-bottom: 6px; }
+.sidebar-status { margin-top: 0; }
 .sidebar-log.active { color: var(--forest); background: var(--lime); }
 .sidebar-log .nav-badge { margin-left: auto; }
 /* 日志页：等级筛选 + 搜索 + 记录等级 + 自动刷新 */
@@ -353,8 +358,17 @@ select { min-width: 150px; }
 .log-search input { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font-size: 12px; }
 .log-verbosity { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .log-verbosity select { padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font-size: 12px; }
-.log-autorefresh { display: inline-flex; align-items: center; gap: 5px; color: #4b5a52; font-size: 12px; white-space: nowrap; cursor: pointer; }
-.log-autorefresh input { width: 15px; height: 15px; min-height: 0; margin: 0; accent-color: var(--forest); }
+/*
+ * 自动刷新用自定义小开关：原生 checkbox 在 Chrome 里是又大又蓝的方块，
+ * 和整套界面的绿色系不搭。视觉沿用 .import-toggle-box 的配色（未选灰、选中深绿）。
+ */
+.log-autorefresh { display: inline-flex; align-items: center; gap: 7px; color: #4b5a52; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.log-autorefresh input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.log-switch { position: relative; flex: 0 0 auto; width: 34px; height: 18px; border-radius: 999px; background: #d5ddd2; transition: background .16s ease; }
+.log-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(10,35,27,.22); transition: transform .16s ease; }
+.log-autorefresh input:checked + .log-switch { background: var(--forest); }
+.log-autorefresh input:checked + .log-switch::after { transform: translateX(16px); }
+.log-autorefresh input:focus-visible + .log-switch { outline: 2px solid var(--lime-deep); outline-offset: 2px; }
 .log-actions { display: flex; gap: 6px; margin-left: auto; }
 #logClear { color: #b4453c; border-color: #e7c9c5; }
 #logClear:hover { color: #8f3f39; background: #fdf6f5; }
@@ -796,6 +810,7 @@ dialog::backdrop { background: rgba(14,28,22,.45); }
   .nav { display: flex; flex: 1; }
   .nav-item { justify-content: center; padding: 9px; }
   .nav-icon { display: none; }
+  .sidebar-log { margin-top: 0; margin-bottom: 0; }
   .sidebar-status { display: none; }
   .main { padding: 20px 14px 36px; }
   .topbar { align-items: stretch; flex-direction: column; gap: 14px; }
