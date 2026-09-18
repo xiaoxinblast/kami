@@ -49,6 +49,13 @@
 .sp-input-with-suffix { position: relative; }
 .sp-input-with-suffix input { padding-right: 110px; }
 .sp-input-with-suffix em { position: absolute; top: 9px; right: 9px; color: #9aa49b; font-size: 10px; font-style: normal; pointer-events: none; }
+/* 模型角色的思考开关 + 强度：跟模型输入框同列，紧贴在下一条 */
+.sp-thinking { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
+.sp-switch { flex: 1; display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px; border: 1px solid #dfe6db; border-radius: 8px; color: #4b6152; background: #fafbf8; cursor: pointer; font-size: 12px; }
+.sp-switch input { width: 15px; height: 15px; min-height: 0; padding: 0; accent-color: var(--forest); }
+.sp-switch:has(input:checked) { border-color: #90a67d; background: #f3f8ee; }
+.sp-thinking select { flex: 0 0 116px; width: 116px; min-height: 32px; }
+.sp-thinking select:disabled { color: #9ba49b; background: #f2f4ef; }
 .sp-note { display: grid; grid-template-columns: 30px 1fr; gap: 10px; align-items: start; margin-top: 15px; padding: 12px 14px; border: 1px solid #dfe9df; border-radius: 11px; background: #f6faf4; }
 .sp-note::before { content: "i"; display: grid; place-items: center; grid-row: 1 / span 2; width: 28px; height: 28px; border-radius: 9px; color: var(--forest); background: var(--lime); font-size: 12px; font-weight: 900; }
 .sp-note strong, .sp-note p { grid-column: 2; }

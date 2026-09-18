@@ -32,6 +32,18 @@ function atomicWrite(path, content) {
   renameSync(temporary, path);
 }
 
+/** 每个模型角色的思考开关与思考强度；键名固定，方便面板按角色读写。 */
+export const MODEL_THINKING_ROLES = ["main", "fast", "quality", "mt"];
+
+function modelThinkingFields(config) {
+  const fields = {};
+  for (const role of MODEL_THINKING_ROLES) {
+    fields[`${role}Thinking`] = String(config?.[`${role}Thinking`] ?? "");
+    fields[`${role}Effort`] = String(config?.[`${role}Effort`] ?? "");
+  }
+  return fields;
+}
+
 export function saveProviderConfig(config, directory = DEFAULT_PROVIDER_DIRECTORY) {
   const target = paths(directory);
   const baseUrl = String(config.baseUrl || "").replace(/\/$/, "");
@@ -39,6 +51,7 @@ export function saveProviderConfig(config, directory = DEFAULT_PROVIDER_DIRECTOR
   const fastModel = String(config.fastModel || "");
   const qualityModel = String(config.qualityModel || "");
   const mtModel = String(config.mtModel || "");
+  const thinking = modelThinkingFields(config);
   const embeddingModel = String(config.embeddingModel || "");
   const embeddingBaseUrl = String(config.embeddingBaseUrl || "").replace(/\/$/, "");
   const apiKey = String(config.apiKey || "");
@@ -51,6 +64,7 @@ export function saveProviderConfig(config, directory = DEFAULT_PROVIDER_DIRECTOR
   else if (existsSync(target.embeddingSecret)) rmSync(target.embeddingSecret);
   atomicWrite(target.config, JSON.stringify({
     baseUrl, model, fastModel, qualityModel, mtModel, embeddingModel, embeddingBaseUrl,
+    ...thinking,
     inputPricePerMTok, outputPricePerMTok,
     apiKeyConfigured: Boolean(apiKey), embeddingApiKeyConfigured: Boolean(embeddingApiKey),
     updatedAt: new Date().toISOString()
@@ -80,6 +94,7 @@ export function loadProviderConfig(directory = DEFAULT_PROVIDER_DIRECTORY) {
         fastModel: metadata.fastModel || "",
         qualityModel: metadata.qualityModel || "",
         mtModel: metadata.mtModel || "",
+        ...modelThinkingFields(metadata),
         embeddingModel: metadata.embeddingModel || "",
         embeddingBaseUrl: metadata.embeddingBaseUrl || "",
         inputPricePerMTok: String(metadata.inputPricePerMTok ?? ""),

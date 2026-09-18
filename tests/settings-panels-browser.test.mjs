@@ -26,6 +26,7 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   const settings = defaultSettings();
+  const providerBodies = [];
   const providerConfig = { baseUrl: "http://localhost:11434/v1", model: "qwen3:14b", fastModel: "", qualityModel: "", mtModel: "", embeddingModel: "", embeddingBaseUrl: "", inputPricePerMTok: "", outputPricePerMTok: "", apiKeyConfigured: false, embeddingApiKeyConfigured: false };
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -49,7 +50,9 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
       else if (path === "/api/qa-cases/pending") payload = [];
       else if (path === "/api/style-profiles") payload = { styleProfiles: [], evidencePools: [], learningRuns: [], userProfiles: [] };
       else if (path === "/api/provider" && request.method() === "POST") {
-        Object.assign(providerConfig, JSON.parse(request.postData() || "{}"), { apiKeyConfigured: false });
+        const body = JSON.parse(request.postData() || "{}");
+        providerBodies.push(body);
+        Object.assign(providerConfig, body, { apiKeyConfigured: false });
         payload = providerConfig;
       }
       else if (path === "/api/settings" && request.method() === "POST") {
@@ -76,6 +79,17 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
     await page.locator('#providerDialog button[data-tab="models"]').click();
     assert.equal(await page.locator('#providerDialog input[name="model"]').inputValue(), "typed-model", "切分类后模型名不应被重置");
 
+    // 模型分工：每个角色都有思考开关与强度，默认开 + 高
+    assert.equal(await page.locator('#providerDialog input[name="mainThinking"]').isChecked(), true, "默认开启思考");
+    assert.equal(await page.locator('#providerDialog select[name="mainEffort"]').inputValue(), "high", "默认强度高（DeepSeek 默认值）");
+    assert.equal(await page.locator('#providerDialog input[name="fastThinking"]').count(), 1, "每个模型角色都要有思考开关");
+    await page.locator('#providerDialog select[name="mainEffort"]').selectOption("max");
+    await page.locator('#providerDialog input[name="mainThinking"]').uncheck();
+    await page.waitForFunction(() => document.querySelector('#providerDialog select[name="mainEffort"]')?.disabled === true);
+    assert.equal(await page.locator('#providerDialog input[name="mainThinking"]').isChecked(), false, "重绘后仍是关闭状态");
+    await page.locator('#providerDialog input[name="mainThinking"]').check();
+    assert.equal(await page.locator('#providerDialog select[name="mainEffort"]').inputValue(), "max", "重新打开思考要用回刚才选的强度");
+
     // 关窗（未保存）→ 重开应回到已保存值
     await page.locator("#providerDialog button[data-close-panel]").first().click();
     await page.locator("#openProvider").click();
@@ -83,9 +97,14 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
 
     // 保存 → 值落库，且继续切分类仍然保留
     await page.locator('#providerDialog input[name="baseUrl"]').fill("http://127.0.0.1:11435/v1");
+    await page.locator('#providerDialog button[data-tab="models"]').click();
+    await page.locator('#providerDialog input[name="mainThinking"]').check();
+    await page.locator('#providerDialog select[name="mainEffort"]').selectOption("max");
     await page.locator("#providerDialog button[data-save]").click();
     await page.waitForTimeout(300);
     assert.equal(await page.locator("#providerDialog").evaluate((node) => node.open), true, "保存后不应自动关闭面板");
+    assert.equal(providerBodies.at(-1).mainThinking, "enabled", "保存要带上思考开关");
+    assert.equal(providerBodies.at(-1).mainEffort, "max", "保存要带上思考强度");
     await page.locator('#providerDialog button[data-tab="pricing"]').click();
     await page.locator('#providerDialog button[data-tab="connection"]').click();
     assert.equal(await page.locator('#providerDialog input[name="baseUrl"]').inputValue(), "http://127.0.0.1:11435/v1");

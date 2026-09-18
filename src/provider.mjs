@@ -1,10 +1,15 @@
-import { loadProviderConfig, saveProviderConfig } from "./provider-store.mjs";
+import { MODEL_THINKING_ROLES, loadProviderConfig, saveProviderConfig } from "./provider-store.mjs";
 import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-qa.mjs";
 
 const loadedProvider = loadProviderConfig();
 let persistence = loadedProvider.persistence;
-let runtimeConfig = {
+const THINKING_VALUES = new Set(["enabled", "disabled"]);
+const EFFORT_VALUES = new Set(["low", "high", "max"]);
+/** 上游明确拒绝思考参数后不再重复尝试，避免每次调用都先失败一次。 */
+let thinkingUnsupported = false;
+
+const baseRuntimeConfig = {
   baseUrl: process.env.LLM_BASE_URL || loadedProvider.config.baseUrl || "http://localhost:11434/v1",
   apiKey: process.env.LLM_API_KEY || loadedProvider.config.apiKey || "",
   model: process.env.LLM_MODEL || loadedProvider.config.model || "qwen3:14b",
@@ -17,6 +22,57 @@ let runtimeConfig = {
   inputPricePerMTok: process.env.LLM_INPUT_PRICE_PER_MTOK ?? loadedProvider.config.inputPricePerMTok ?? "",
   outputPricePerMTok: process.env.LLM_OUTPUT_PRICE_PER_MTOK ?? loadedProvider.config.outputPricePerMTok ?? ""
 };
+for (const role of MODEL_THINKING_ROLES) {
+  baseRuntimeConfig[`${role}Thinking`] = loadedProvider.config[`${role}Thinking`] || "";
+  baseRuntimeConfig[`${role}Effort`] = loadedProvider.config[`${role}Effort`] || "";
+}
+
+function normalizeThinking(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return THINKING_VALUES.has(text) ? text : "enabled";
+}
+
+function normalizeEffort(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return EFFORT_VALUES.has(text) ? text : "high";
+}
+
+/** 取某个模型角色的思考设置；缺省等价于上游默认（开思考、强度高）。 */
+function roleThinking(source, role) {
+  return { thinking: normalizeThinking(source?.[`${role}Thinking`]), effort: normalizeEffort(source?.[`${role}Effort`]) };
+}
+
+/** 主模型角色的思考设置同时作为所有未指定角色的默认值。 */
+function withMainThinking(config) {
+  const main = roleThinking(config, "main");
+  return { ...config, thinking: main.thinking, reasoningEffort: main.thinking === "enabled" ? main.effort : "" };
+}
+
+/**
+ * 组装某个模型角色的调用配置（模型 + 思考设置）。
+ * 专用模型留空会复用主模型，但思考设置仍按该角色的配置走：需要"快而不思考"的角色照样能关掉思考。
+ */
+function configForRole(role, model = "") {
+  const key = ["fast", "quality", "mt"].includes(String(role || "")) ? String(role) : "main";
+  const settings = roleThinking(runtimeConfig, key);
+  return {
+    ...runtimeConfig,
+    model: model || runtimeConfig.model,
+    thinking: settings.thinking,
+    reasoningEffort: settings.thinking === "enabled" ? settings.effort : ""
+  };
+}
+
+/**
+ * DeepSeek 官方 API：thinking.type 控制思考开关，reasoning_effort 取 low/high/max。
+ * 关闭思考只发 thinking.type=disabled；开启时用强度值（上游默认就是高）。
+ */
+function thinkingParams(thinking, effort) {
+  if (thinking === "disabled") return { thinking: { type: "disabled" } };
+  return effort ? { reasoning_effort: effort } : {};
+}
+
+let runtimeConfig = withMainThinking(baseRuntimeConfig);
 
 export function getProviderConfig() {
   return {
@@ -45,8 +101,14 @@ export function updateProviderConfig(input = {}) {
     inputPricePerMTok: Object.hasOwn(input, "inputPricePerMTok") ? String(input.inputPricePerMTok ?? "").trim() : runtimeConfig.inputPricePerMTok,
     outputPricePerMTok: Object.hasOwn(input, "outputPricePerMTok") ? String(input.outputPricePerMTok ?? "").trim() : runtimeConfig.outputPricePerMTok
   };
+  for (const role of MODEL_THINKING_ROLES) {
+    nextConfig[`${role}Thinking`] = normalizeThinking(Object.hasOwn(input, `${role}Thinking`) ? input[`${role}Thinking`] : runtimeConfig[`${role}Thinking`]);
+    nextConfig[`${role}Effort`] = normalizeEffort(Object.hasOwn(input, `${role}Effort`) ? input[`${role}Effort`] : runtimeConfig[`${role}Effort`]);
+  }
+  // 换了服务商就重新试一次思考参数：上一个上游不支持不代表这一个也不支持。
+  thinkingUnsupported = false;
   if (input.persist !== false) persistence = saveProviderConfig(nextConfig);
-  runtimeConfig = nextConfig;
+  runtimeConfig = withMainThinking(nextConfig);
   return getProviderConfig();
 }
 
@@ -221,6 +283,13 @@ async function chat(messages, config = runtimeConfig, options = {}) {
   let maxTokens = normalizedOptions.maxTokens;
   let seed = Number.isInteger(normalizedOptions.seed) ? normalizedOptions.seed : undefined;
   let seedFallbackUsed = false;
+  // 思考设置：显式传参（例如探针固定 low）优先于模型角色配置。
+  let thinkingBody = thinkingUnsupported
+    ? {}
+    : thinkingParams(
+      String(normalizedOptions.thinking ?? config.thinking ?? "").trim(),
+      String(normalizedOptions.reasoningEffort ?? config.reasoningEffort ?? "").trim()
+    );
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const { response, text } = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
       method: "POST",
@@ -235,7 +304,7 @@ async function chat(messages, config = runtimeConfig, options = {}) {
         ...(seed === undefined ? {} : { seed }),
         ...(maxTokens ? { max_tokens: maxTokens } : {}),
         ...(normalizedOptions.responseFormat ? { response_format: normalizedOptions.responseFormat } : {}),
-        ...(normalizedOptions.reasoningEffort ? { reasoning_effort: normalizedOptions.reasoningEffort } : {})
+        ...thinkingBody
       })
     }, { timeoutMs, label: requestLabel, retries: 1 });
     if (!response.ok) {
@@ -247,6 +316,15 @@ async function chat(messages, config = runtimeConfig, options = {}) {
         seed = undefined;
         seedFallbackUsed = true;
         normalizedOptions.onSeedUnsupported?.(`${requestLabel} 上游不支持固定 seed`);
+        continue;
+      }
+      // 不是每个 OpenAI 兼容服务商都认 thinking / reasoning_effort：拒绝就退回默认思考模式，
+      // 并记住这家上游不支持，避免后续每次调用都先撞一次 400。
+      if (Object.keys(thinkingBody).length && response.status === 400
+        && /reasoning_effort|thinking/i.test(text || "") && /unknown|unsupported|extra_forbidden|not permitted|not allowed|invalid/i.test(text || "")) {
+        thinkingUnsupported = true;
+        thinkingBody = {};
+        normalizedOptions.onThinkingUnsupported?.(`${requestLabel} 上游不支持思考设置，已按默认思考模式重试`);
         continue;
       }
       throw new Error(`模型请求失败 (${response.status})：${(text || "").slice(0, 500)}`);
@@ -1282,10 +1360,10 @@ export async function classifyWithModel(text, { descriptor = "", location = "" }
   return { ...JSON.parse(match[0]), source: "model" };
 }
 
-export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "" } = {}) {
+export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "", modelRole = "main" } = {}) {
   const rhymeLike = contextPack?.rhymeLike === true;
   const batchVerse = contextPack?.batchVerse?.active === true;
-  const callConfig = model ? { ...runtimeConfig, model } : runtimeConfig;
+  const callConfig = configForRole(modelRole, model);
   // 温度：普通文本 0.6 给地道表达留空间，韵文/批排比 0.85 给节奏与韵脚再创作。
   const translationTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : (rhymeLike || batchVerse ? 0.85 : 0.6);
   const initial = await chat([{ role: "user", content: packPrompt(contextPack) }], callConfig, { timeoutMs: 75_000, requestLabel: "翻译", temperature: translationTemperature, seed, onSeedUnsupported, onUsage });
@@ -1344,18 +1422,18 @@ async function chooseTranslationCandidate(contextPack, candidates, config, onUsa
 export async function translateWithRoute(contextPack, { routePlan = null, reflect = true, onUsage = null } = {}) {
   const plan = routePlan || { route: "reflective", candidateCount: 1, model: runtimeConfig.model, modelRole: "main" };
   const selectedModel = String(plan.model || runtimeConfig.model);
-  const selectedConfig = { ...runtimeConfig, model: selectedModel };
+  const selectedConfig = configForRole(plan.modelRole, selectedModel);
 
   if (plan.route === "mt_post_edit") {
     const draftModel = runtimeConfig.mtModel || runtimeConfig.fastModel || runtimeConfig.model;
-    const draft = await chat([{ role: "user", content: packPrompt(contextPack) }], { ...runtimeConfig, model: draftModel }, {
+    const draft = await chat([{ role: "user", content: packPrompt(contextPack) }], configForRole("mt", draftModel), {
       temperature: 0.25, timeoutMs: 75_000, requestLabel: "机器初译", onUsage
     });
     const finalModel = runtimeConfig.qualityModel || runtimeConfig.model;
     const translation = await chat([
       { role: "system", content: "你是目标语言母语本地化编辑。把机器初译改成可发布译文；按结构化术语、翻译记忆、风格规则和事实锚点做最小必要后编辑。不得漏译、增译或改变数字、日期、平台、地区、URL、占位符和承诺强度。只输出最终译文。" },
       { role: "user", content: `${packPrompt(contextPack)}\n\n机器初译：\n${draft}` }
-    ], { ...runtimeConfig, model: finalModel }, {
+    ], configForRole("quality", finalModel), {
       temperature: 0.15, timeoutMs: 75_000, requestLabel: "LLM 后编辑", onUsage
     });
     return {
@@ -1384,7 +1462,7 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
     })));
     const candidates = uniqueCandidateTexts(generated);
     const selectionModel = runtimeConfig.qualityModel || selectedModel;
-    const selection = await chooseTranslationCandidate(contextPack, candidates, { ...runtimeConfig, model: selectionModel }, onUsage);
+    const selection = await chooseTranslationCandidate(contextPack, candidates, configForRole("quality", selectionModel), onUsage);
     const translation = candidates[selection.index] || candidates[0] || "";
     return {
       initial: candidates[0] || "",
@@ -1396,7 +1474,7 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
   }
 
   const forceReflection = plan.route === "fact_guarded" ? true : (plan.route === "direct" ? false : reflect);
-  const result = await translateWithReflection(contextPack, { reflect: forceReflection, onUsage, model: selectedModel });
+  const result = await translateWithReflection(contextPack, { reflect: forceReflection, onUsage, model: selectedModel, modelRole: plan.modelRole });
   return {
     ...result,
     candidates: [{ index: 0, translation: result.translation, recommended: true, reason: plan.label || "系统推荐" }],

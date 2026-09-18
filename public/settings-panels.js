@@ -14,16 +14,24 @@ const providerTabs = [
   { id: "pricing", title: "成本门禁", subtitle: "评测成本预算", icon: "coins" }
 ];
 
+/**
+ * 思考强度档位。DeepSeek 官方 API 的 reasoning_effort 取 low/high/max
+ * （none 等价于关闭思考，面板用开关表达），默认是 high。
+ */
+const thinkingLevels = [["low", "低"], ["high", "高（默认）"], ["max", "最高"]];
+/** 模型角色 → 思考配置键前缀。专用模型留空复用主模型，但思考设置仍按角色独立。 */
+const thinkingRoles = { model: "main", fastModel: "fast", qualityModel: "quality", mtModel: "mt" };
+
 const providerFields = {
   connection: [
     { name: "baseUrl", label: "Base URL", hint: "OpenAI 兼容接口地址，例如本地 Ollama 或云端网关。", placeholder: "http://localhost:11434/v1" },
     { name: "apiKey", label: "API Key", hint: "留空保持现有 Key；保存后使用 Windows 当前用户级 DPAPI 加密。", type: "password", placeholder: "留空保持不变", autocomplete: "off" }
   ],
   models: [
-    { name: "model", label: "主模型", hint: "默认翻译与 QA 使用的主模型。", placeholder: "qwen3:14b" },
-    { name: "fastModel", label: "快速模型", hint: "低风险短文本和轻量任务；留空则复用主模型。", placeholder: "留空则使用主模型" },
-    { name: "qualityModel", label: "高质量模型", hint: "高风险、创译和升级重试；留空则复用主模型。", placeholder: "留空则使用主模型" },
-    { name: "mtModel", label: "机器翻译底模", hint: "仅用于 MT + 后编辑路线；留空则使用快速模型或主模型。", placeholder: "留空则使用快速模型或主模型" }
+    { name: "model", label: "主模型", role: "main", hint: "默认翻译与 QA 使用的主模型。", placeholder: "qwen3:14b" },
+    { name: "fastModel", label: "快速模型", role: "fast", hint: "低风险短文本和轻量任务；留空则复用主模型。", placeholder: "留空则使用主模型" },
+    { name: "qualityModel", label: "高质量模型", role: "quality", hint: "高风险、创译和升级重试；留空则复用主模型。", placeholder: "留空则使用主模型" },
+    { name: "mtModel", label: "机器翻译底模", role: "mt", hint: "仅用于 MT + 后编辑路线；留空则使用快速模型或主模型。", placeholder: "留空则使用快速模型或主模型" }
   ],
   embedding: [
     { name: "embeddingModel", label: "Embedding 模型", hint: "留空禁用外部向量检索，回退本地 CJK 索引。", placeholder: "nomic-embed-text" },
@@ -79,7 +87,20 @@ function fieldMarkup(field, value, extra = "") {
     field.placeholder ? `placeholder="${escape(field.placeholder)}"` : "",
     extra
   ].filter(Boolean).join(" ");
-  return `<label class="sp-field"><span><strong>${escape(field.label)}</strong><small>${escape(field.hint)}</small></span><div class="sp-input">${field.suffix ? `<div class="sp-input-with-suffix"><input ${attributes} value="${escape(value ?? "")}" /><em>${escape(field.suffix)}</em></div>` : `<input ${attributes} value="${escape(value ?? "")}" />`}</div></label>`;
+  return `<label class="sp-field"><span><strong>${escape(field.label)}</strong><small>${escape(field.hint)}</small></span><div class="sp-input">${field.suffix ? `<div class="sp-input-with-suffix"><input ${attributes} value="${escape(value ?? "")}" /><em>${escape(field.suffix)}</em></div>` : `<input ${attributes} value="${escape(value ?? "")}" />`}${field.controls || ""}</div></label>`;
+}
+
+/**
+ * 模型角色后面的思考设置：一个开关 + 一个强度下拉。
+ * 关掉思考时下拉框置灰（但仍保留取值，重新打开就能用回原来的强度）。
+ */
+function thinkingMarkup(role, { thinking, effort }) {
+  const enabled = thinking !== "disabled";
+  const options = thinkingLevels.map(([value, label]) => `<option value="${escape(value)}"${value === effort ? " selected" : ""}>${escape(label)}</option>`).join("");
+  return `<div class="sp-thinking">
+    <label class="sp-switch"><input type="checkbox" name="${escape(role)}Thinking" value="enabled"${enabled ? " checked" : ""} /><span>思考</span></label>
+    <select name="${escape(role)}Effort" aria-label="思考强度"${enabled ? "" : " disabled"}>${options}</select>
+  </div>`;
 }
 
 export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
@@ -99,7 +120,20 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
       const secret = field.type === "password";
       values[field.name] = secret ? "" : String(readPath(source, field.name) ?? "");
     }
+    // 思考开关与强度也要进草稿：切分类重绘时不能丢，保存时整块提交。
+    for (const role of Object.values(thinkingRoles)) {
+      const thinking = String(readPath(source, `${role}Thinking`) ?? "").trim().toLowerCase();
+      const effort = String(readPath(source, `${role}Effort`) ?? "").trim().toLowerCase();
+      values[`${role}Thinking`] = thinking === "disabled" ? "disabled" : "enabled";
+      values[`${role}Effort`] = thinkingLevels.some(([value]) => value === effort) ? effort : "high";
+    }
     return values;
+  }
+
+  /** 草稿优先、保存值兜底：切分类回来还能看到自己刚改的内容。 */
+  function valueOf(name, fallback = "") {
+    const source = draft && Object.hasOwn(draft, name) ? draft[name] : readPath(provider, name);
+    return source === undefined || source === null ? fallback : String(source);
   }
 
   function render(status = "") {
@@ -109,9 +143,12 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
         const saved = field.name === "apiKey" || field.name === "embeddingApiKey" ? "" : readPath(provider, field.name);
         const value = draft && Object.hasOwn(draft, field.name) ? draft[field.name] : saved;
         const placeholder = field.name === "apiKey" ? (provider.apiKeyConfigured ? "已配置 · 留空保持不变" : "未配置 · 如需鉴权请填写") : field.name === "embeddingApiKey" ? (provider.embeddingApiKeyConfigured ? "已配置 · 留空保持不变" : "未配置 · 留空复用主 Key") : field.placeholder;
-        return fieldMarkup({ ...field, placeholder }, value);
+        const role = thinkingRoles[field.name];
+        const controls = role ? thinkingMarkup(role, { thinking: valueOf(`${role}Thinking`, "enabled"), effort: valueOf(`${role}Effort`, "high") }) : "";
+        return fieldMarkup({ ...field, placeholder, controls }, value);
       }).join("")}</div>
       ${tab.id === "connection" ? `<div class="sp-note"><strong>密钥安全</strong><p>API Key 使用 Windows 当前用户级 DPAPI 加密保存，不会以明文写入项目文件。</p></div>` : ""}
+      ${tab.id === "models" ? `<div class="sp-note"><strong>思考设置</strong><p>每个角色单独设置是否思考、思考多深（低 / 高 / 最高）。DeepSeek 官方 API：关闭思考时发送 thinking.type=disabled，开启时按强度发送 reasoning_effort（默认高）。专用模型留空仍会复用主模型，但思考设置按角色独立生效。</p></div>` : ""}
     </section>`).join("");
     dialog.innerHTML = panelShell({
       title: "模型服务设置",
@@ -159,6 +196,12 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
   dialog.addEventListener("input", (event) => {
     const input = event.target;
     if (!draft || !input?.name || !Object.hasOwn(draft, input.name)) return;
+    if (input.type === "checkbox") {
+      draft[input.name] = input.checked ? "enabled" : "disabled";
+      // 勾选状态会影响强度下拉是否可用，重绘一次；文本框不重绘，避免打断输入。
+      render();
+      return;
+    }
     draft[input.name] = input.value;
   });
   dialog.addEventListener("submit", (event) => { event.preventDefault(); submit(); });
