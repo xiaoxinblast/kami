@@ -18,7 +18,7 @@ import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, ex
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
-import { countMemories, saveUserProfile } from "./src/store.mjs";
+import { countMemories, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
@@ -886,18 +886,21 @@ async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, per
   const [startPercent, endPercent] = percentRange;
   const cancelled = () => typeof shouldCancel === "function" && shouldCancel() === true;
   const locales = [...new Set(candidates.map((candidate) => candidate.locale))];
+  // 上一轮已经判定过的候选带着 ai-cleaned 标记（见 persistImportCleaning）：不再重复调模型。
+  const cachedCount = candidates.filter((candidate) => candidate.contentTypeSource === "ai-cleaned").length;
   const groups = locales.flatMap((locale) => {
-    const indexes = candidates.map((candidate, index) => ({ candidate, index })).filter(({ candidate }) => candidate.locale === locale && !candidate.existing);
+    const indexes = candidates.map((candidate, index) => ({ candidate, index }))
+      .filter(({ candidate }) => candidate.locale === locale && !candidate.existing && candidate.contentTypeSource !== "ai-cleaned");
     const batches = [];
     for (let offset = 0; offset < indexes.length; offset += TERM_AI_BATCH_SIZE) {
       batches.push({ locale, indexes: indexes.slice(offset, offset + TERM_AI_BATCH_SIZE) });
     }
     return batches;
   });
-  const ai = { requested: true, used: false, reviewed: 0, total: candidates.length, missing: candidates.length, retries: 0, fallbackReason: "", batches: groups.length };
+  const ai = { requested: true, used: false, reviewed: 0, cached: cachedCount, total: candidates.length, missing: candidates.length - cachedCount, retries: 0, fallbackReason: "", batches: groups.length };
   if (!groups.length) return { candidates, ai };
   let completed = 0;
-  onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：0 / ${groups.length} 批`, percent: startPercent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
+  onProgress({ phase: "ai-cleaning", message: `AI 并发清洗：0 / ${groups.length} 批${cachedCount ? `（复用 ${cachedCount} 条已判定结果）` : ""}`, percent: startPercent, completed, total: groups.length, concurrency: TERM_AI_CONCURRENCY });
   const results = await runTaskPool(groups, async ({ locale, indexes }) => {
     // 中断检查放在每个分块开头：并发里已经发出的请求自然跑完，剩下的立刻放弃。
     if (cancelled()) throw cancellationError("AI 清洗已按用户要求中断");
@@ -919,10 +922,11 @@ async function cleanCandidatesWithModel(candidates, { onProgress = () => {}, per
     ...results.filter((result) => result.status === "fulfilled").flatMap((result) => result.value.failures || [])
   ];
   ai.reviewed = results.filter((result) => result.status === "fulfilled").reduce((sum, result) => sum + result.value.reviewed, 0);
-  ai.missing = candidates.length - ai.reviewed;
+  // 缺失只算这一轮真正送去判定的条目：复用缓存的不该被当成"模型没返回"。
+  ai.missing = Math.max(0, (candidates.length - cachedCount) - ai.reviewed);
   ai.retries = results.filter((result) => result.status === "fulfilled").reduce((sum, result) => sum + result.value.retries, 0);
   ai.used = ai.reviewed > 0;
-  const incomplete = ai.missing ? `模型仅返回 ${ai.reviewed}/${candidates.length} 条有效判断，缺失项保留安全规则并标记未覆盖` : "";
+  const incomplete = ai.missing ? `模型仅返回 ${ai.reviewed}/${candidates.length - cachedCount} 条有效判断，缺失项保留安全规则并标记未覆盖` : "";
   ai.fallbackReason = [...new Set([...failures, incomplete].filter(Boolean))].join("；");
   return { candidates, ai };
 }
@@ -995,6 +999,13 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
         }
         return { ...candidate, assetType: kind === "memory" ? "memory" : "term", styleEvidence };
       });
+    if (aiCleaning) {
+      // 清洗结论写回候选行（含本轮新产生的句内术语行）：续跑时只判定没有标记的条目，
+      // 不会把已经洗过的整批重新送模型。
+      reportImmediate({ phase: "saving-cleaning", message: `正在保存清洗结果：0 / ${routed.length} 条`, percent: 47, completed: 0, total: routed.length });
+      const persistedCleaning = await persistImportCleaning(batch, { projectId, filename, candidates: routed });
+      reportImmediate({ phase: "routing", message: `清洗结果已保存（${persistedCleaning} 条），开始分库`, percent: 49, completed: 0, total: routed.length });
+    }
     const result = await commitTermImport(
       { projectId, batchId: batch, filename, candidates: routed, styleEvidence },
       scaleReport(50, 92),
@@ -1920,6 +1931,7 @@ async function apiHandler(req, res, url) {
     const filename = String(preview.filename || "双语资产导入").slice(0, 120);
     // 持久化的候选不带 selected（库里没有这一列），续跑时要按"默认全选"还原，
     // 否则整批会被当成"未选择"直接跳过。
+    // contentTypeSource = "ai-cleaned" 表示这条上一轮已经判定过：AI 清洗会跳过它，省掉重复调用。
     const candidates = preview.candidates.map((candidate) => ({ ...candidate, selected: candidate.selected !== false }));
     const task = await createBackgroundTask({
       type: "asset_import",

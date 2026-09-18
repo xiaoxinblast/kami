@@ -52,6 +52,7 @@ import {
   saveDirectusCorpus,
   saveDirectusImportPreview,
   getDirectusImportPreview,
+  persistDirectusImportCleaning,
   saveDirectusStyleEvidence,
   saveDirectusStyleProfileEvaluation,
   updateDirectusStyleProfileRules,
@@ -1536,6 +1537,14 @@ export async function saveImportPreview(input, options) {
 
 export async function getImportPreview(batchId) {
   return usesDirectus() ? getDirectusImportPreview(batchId) : getJsonImportPreview(batchId);
+}
+
+/**
+ * 把 AI 清洗结论写回候选行，续跑时据此跳过已经判定过的条目。
+ * JSON 存储实现没有这一层队列，直接返回 0（续跑会按老路子重新判定）。
+ */
+export async function persistImportCleaning(batchId, payload) {
+  return usesDirectus() ? persistDirectusImportCleaning(batchId, payload) : 0;
 }
 
 export async function completeImport(batchId, decisions, summary) {

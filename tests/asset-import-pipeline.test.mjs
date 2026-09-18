@@ -4,6 +4,34 @@ import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
+test("续跑复用上一轮的 AI 清洗结果，只判定没标记过的条目", async () => {
+  const server = await read("../server.mjs");
+  // 清洗完先写回候选行，再入库：这样即使入库阶段被打断，判定结果也已经存住了。
+  const job = server.slice(server.indexOf("async function runAssetImportInBackground"), server.indexOf("async function previewTermImport"));
+  assert.match(job, /const persistedCleaning = await persistImportCleaning\(batch, \{ projectId, filename, candidates: routed \}\);/u);
+  assert.match(job, /phase: "saving-cleaning"/u);
+  // 已经有标记的候选不再送模型，并且不计入"模型没返回"的缺失统计
+  assert.match(server, /candidate\.contentTypeSource !== "ai-cleaned"/u);
+  assert.match(server, /const cachedCount = candidates\.filter\(\(candidate\) => candidate\.contentTypeSource === "ai-cleaned"\)\.length;/u);
+  assert.match(server, /ai\.missing = Math\.max\(0, \(candidates\.length - cachedCount\) - ai\.reviewed\);/u);
+  assert.match(server, /复用 \$\{cachedCount\} 条已判定结果/u);
+
+  // 写回实现：老候选按 id 更新，本轮新产生的句内术语作为新行进同一批次，统一打 ai-cleaned 标记
+  const directusStore = await read("../src/directus-store.mjs");
+  const persist = directusStore.slice(
+    directusStore.indexOf("export async function persistDirectusImportCleaning"),
+    directusStore.indexOf("export async function getDirectusImportPreview")
+  );
+  assert.match(persist, /classification_source: "ai-cleaned"/u);
+  assert.match(persist, /id: candidate\.candidateId/u);
+  assert.match(persist, /\{ \.\.\.candidate, contentTypeSource: "ai-cleaned" \}/u);
+  assert.match(persist, /createItemsInChunks\("\/items\/term_candidates"/u);
+  // 候选行 → 表字段的映射只有一份（写队列与写回共用）
+  assert.match(directusStore, /function importCandidateRecord\(candidate, \{ batchId, projectId = "", filename = "", aiUsed = false \} = \{\}\)/u);
+  const store = await read("../src/store.mjs");
+  assert.match(store, /export async function persistImportCleaning\(batchId, payload\)/u);
+});
+
 test("导入任务在开始就带上批次号，服务重启后「继续导入」才找得到候选", async () => {
   const server = await read("../server.mjs");
   const commitRoute = server.slice(

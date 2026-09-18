@@ -821,6 +821,44 @@ export async function saveDirectusCorpus(input) {
   };
 }
 
+/** 候选 → term_candidates 行：写审核队列与写回 AI 清洗结论共用同一套字段映射。 */
+function importCandidateRecord(candidate, { batchId, projectId = "", filename = "", aiUsed = false } = {}) {
+  return {
+    project_id: projectId,
+    source: candidate.source,
+    target: candidate.target,
+    note: candidate.note || "",
+    sheet_mode: candidate.sheetMode || "",
+    target_locale: candidate.locale,
+    asset_type: candidate.assetType || "term",
+    content_type: candidate.contentType || "general",
+    content_tags: candidate.contentTags || [],
+    domain: candidate.domain || "general",
+    enforcement: candidate.enforcement || "preferred",
+    classification_confidence: Number(candidate.contentTypeConfidence) || Number(candidate.score) || null,
+    classification_source: candidate.contentTypeSource || (aiUsed ? "ai" : "rules"),
+    candidate_key: candidate.candidateKey || "",
+    candidate_role: candidate.candidateRole || "full_pair",
+    parent_candidate_key: candidate.parentCandidateKey || "",
+    parent_row_number: Number(candidate.parentRowNumber) || null,
+    parent_candidate_keys: candidate.parentCandidateKeys || (candidate.parentCandidateKey ? [candidate.parentCandidateKey] : []),
+    parent_evidence: candidate.parentEvidence || [],
+    candidate_origin: candidate.candidateOrigin || candidate.extractionSource || "table-pair",
+    term_category: candidate.termCategory || "",
+    extraction_confidence: candidate.extractionConfidence == null ? null : Number(candidate.extractionConfidence),
+    source_span: candidate.sourceSpan || null,
+    target_span: candidate.targetSpan || null,
+    frequency: candidate.occurrences || 1,
+    score: candidate.score,
+    batch_id: batchId,
+    source_file: filename,
+    row_number: candidate.rowNumber,
+    decision: candidate.decision,
+    reason: (candidate.reasons || []).join("；"),
+    status: "pending"
+  };
+}
+
 export async function saveDirectusImportPreview(input, { onProgress } = {}) {
   const batch = await request("/items/term_import_batches", {
     method: "POST",
@@ -842,39 +880,11 @@ export async function saveDirectusImportPreview(input, { onProgress } = {}) {
       }
     }
   });
-  const records = input.candidates.map((candidate) => ({
-    project_id: input.projectId || "",
-    source: candidate.source,
-    target: candidate.target,
-    note: candidate.note || "",
-    sheet_mode: candidate.sheetMode || "",
-    target_locale: candidate.locale,
-    asset_type: candidate.assetType || "term",
-    content_type: candidate.contentType || "general",
-    content_tags: candidate.contentTags || [],
-    domain: candidate.domain || "general",
-    enforcement: candidate.enforcement || "preferred",
-    classification_confidence: Number(candidate.contentTypeConfidence) || Number(candidate.score) || null,
-    classification_source: candidate.contentTypeSource || (input.ai?.used ? "ai" : "rules"),
-    candidate_key: candidate.candidateKey || "",
-    candidate_role: candidate.candidateRole || "full_pair",
-    parent_candidate_key: candidate.parentCandidateKey || "",
-    parent_row_number: Number(candidate.parentRowNumber) || null,
-    parent_candidate_keys: candidate.parentCandidateKeys || (candidate.parentCandidateKey ? [candidate.parentCandidateKey] : []),
-    parent_evidence: candidate.parentEvidence || [],
-    candidate_origin: candidate.candidateOrigin || candidate.extractionSource || "table-pair",
-    term_category: candidate.termCategory || "",
-    extraction_confidence: candidate.extractionConfidence == null ? null : Number(candidate.extractionConfidence),
-    source_span: candidate.sourceSpan || null,
-    target_span: candidate.targetSpan || null,
-    frequency: candidate.occurrences || 1,
-    score: candidate.score,
-    batch_id: batch.id,
-    source_file: input.filename,
-    row_number: candidate.rowNumber,
-    decision: candidate.decision,
-    reason: (candidate.reasons || []).join("；"),
-    status: "pending"
+  const records = input.candidates.map((candidate) => importCandidateRecord(candidate, {
+    batchId: batch.id,
+    projectId: input.projectId || "",
+    filename: input.filename,
+    aiUsed: Boolean(input.ai?.used)
   }));
   let saved = [];
   try {
@@ -906,6 +916,34 @@ export async function saveDirectusImportPreview(input, { onProgress } = {}) {
     batchId: batch.id,
     candidates: input.candidates.map((candidate, index) => ({ ...candidate, candidateId: saved[index]?.id }))
   };
+}
+
+/**
+ * 把 AI 清洗结论写回候选行，供续跑时跳过已经判定过的条目、省掉重复的模型调用。
+ * 已存在的候选按 id 更新；句内术语这类这一轮才产生的候选作为新行写进同一个批次。
+ * 用 classification_source = "ai-cleaned" 作为"已判定"的标记（该列本来就只记来源，不参与业务判断）。
+ */
+export async function persistDirectusImportCleaning(batchId, { projectId = "", filename = "", candidates = [] } = {}) {
+  const existing = candidates.filter((candidate) => candidate.candidateId);
+  const created = candidates.filter((candidate) => !candidate.candidateId);
+  if (existing.length) {
+    await updateItemsInChunks("/items/term_candidates", existing.map((candidate) => ({
+      id: candidate.candidateId,
+      decision: candidate.decision || "review",
+      reason: (candidate.reasons || []).join("；"),
+      asset_type: candidate.assetType || "term",
+      content_type: candidate.contentType || "general",
+      domain: candidate.domain || "general",
+      classification_source: "ai-cleaned"
+    })));
+  }
+  if (created.length) {
+    await createItemsInChunks("/items/term_candidates", created.map((candidate) => importCandidateRecord(
+      { ...candidate, contentTypeSource: "ai-cleaned" },
+      { batchId, projectId, filename, aiUsed: true }
+    )));
+  }
+  return existing.length + created.length;
 }
 
 export async function getDirectusImportPreview(batchId) {
