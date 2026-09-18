@@ -147,7 +147,7 @@ function packPrompt(contextPack) {
     `风格正反例：${JSON.stringify(contextPack.styleProfile?.examples || [])}\n` +
     `翻译技能：${translationSkill ? `${translationSkill.name} · v${translationSkill.version} · ${translationSkill.instruction || "沿用当前稳定流程"}` : "默认稳定流程"}\n` +
     `技能增量规则：${JSON.stringify(translationSkill?.additionalRules || [])}\n` +
-    `译者长期偏好画像（跨语体全局习惯，版本 ${contextPack.userProfile?.version || "无"}）：${contextPack.userProfile ? JSON.stringify({ instruction: contextPack.userProfile.instruction, examples: contextPack.userProfile.examples }) : "无"}\n` +
+    `译者长期偏好画像 / 人工风格指南（跨语体全局，版本 ${contextPack.userProfile?.version || "无"}；人工导入的风格指南优先级最高，与上面任何风格规则冲突时以它为准）：${contextPack.userProfile ? JSON.stringify({ instruction: contextPack.userProfile.instruction, examples: contextPack.userProfile.examples }) : "无"}\n` +
     `历史译例（同语言、相似度与人工可信度排序）：${JSON.stringify(contextPack.translationReferences || [])}\n` +
     `历史 AIQA 反例与修订：${JSON.stringify(contextPack.qaGuidance || [])}\n` +
     batchVerseHint +

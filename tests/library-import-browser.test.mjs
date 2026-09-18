@@ -40,7 +40,7 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
       else if (path === "/api/qa-cases/pending") payload = [];
       else if (path === "/api/style-profiles") payload = {
         styleProfiles: [], evidencePools: [], learningRuns: [],
-        userProfiles: importedGuide ? [{ id: "guide-1", name: "风格指南 · 项目风格指南", locale: "zh-CN", instruction: "对白使用自然口语。", version: 1, evidenceCount: 0, status: "draft" }] : []
+        userProfiles: importedGuide ? [{ id: "guide-1", name: "风格指南 · 项目风格指南", locale: "zh-CN", instruction: "对白使用自然口语。", version: 1, evidenceCount: 0, status: "active" }] : []
       };
       else if (path === "/api/assets-import/preview") payload = {
         batchId: "batch-1", statistics: { entries: 2 },
@@ -72,8 +72,8 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     await page.locator("#styleGuideImportButton").click();
     await page.getByText("风格指南 · 项目风格指南", { exact: true }).waitFor();
     await page.getByText("人工上传，正文未被改写", { exact: false }).waitFor();
-    assert.match(await page.locator("#styleGuideImportNote").textContent(), /已进入待批准规范/u);
-    assert.equal(await page.locator(".style-state", { hasText: "待批准" }).count(), 1);
+    assert.match(await page.locator("#styleGuideImportNote").textContent(), /已启用：项目风格指南\.md · 9 字/u);
+    assert.equal(await page.locator(".style-state", { hasText: "已启用" }).count(), 1, "人工风格指南导入后直接是启用状态");
     if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-guide-upload.png`, animations: "disabled" });
     assert.deepEqual(errors, []);
   } finally {

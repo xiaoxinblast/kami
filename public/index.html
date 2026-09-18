@@ -291,14 +291,14 @@
           <article class="panel style-guidance-panel">
             <div class="panel-head"><div><span class="card-kicker">STYLE GUIDANCE LIBRARY</span><h2 id="styleGuidanceTitle">简体中文翻译风格指导</h2></div><div class="asset-count" id="styleGuidanceCount">0 条规则</div></div>
             <div class="library-import-bar style-guide-import-bar">
-              <label class="library-file-button"><input id="styleGuideFile" type="file" accept=".txt,.md,.docx" hidden /><span>选择风格指南</span><small>支持 TXT / Markdown / DOCX</small></label>
-              <button class="button secondary" id="styleGuideImportButton" type="button" disabled>导入为待批准规范</button>
-              <small class="library-import-note" id="styleGuideImportNote">上传后只进入当前项目；检查内容并启用后才会用于该项目翻译。</small>
+              <label class="library-file-button"><input id="styleGuideFile" type="file" accept=".txt,.md,.docx" hidden /><span class="library-file-cta">选择风格指南文件</span><small id="styleGuideFileName">支持 TXT / Markdown / DOCX，最大 5MB</small></label>
+              <button class="button primary" id="styleGuideImportButton" type="button" disabled>导入并立即启用</button>
+              <small class="library-import-note" id="styleGuideImportNote">人工风格指南按你的原话生效，优先级高于自动蒸馏出的规则，只作用于当前项目。</small>
             </div>
             <div class="style-explainer">
               <div><span>01</span><strong>收集同类双语句段</strong><small>表格导入的完整译例、人工采纳译文和 AIQA 复盘分别记账；短术语不会冒充风格。</small></div>
               <div><span>02</span><strong>按语体 × 领域精炼</strong><small>同一分类累计 8 条日中风格证据后生成草稿。</small></div>
-              <div><span>03</span><strong>人工启用后才生效</strong><small>待启用只是候选规则；只有已启用版本才会进入后续翻译提示。</small></div>
+              <div><span>03</span><strong>人工指南优先，其余需启用</strong><small>人工导入的风格指南导入即生效并优先于其他风格规则；从语料蒸馏出的草稿仍是候选，人工启用后才进入翻译提示。</small></div>
             </div>
             <div class="style-filter-row"><label><span>状态</span><select id="styleStatus"><option value="">全部</option><option value="active">已启用</option><option value="inactive">已关闭</option><option value="draft">待启用</option></select></label><button class="button secondary" id="refreshStyles">刷新风格</button></div>
             <section class="style-library-section active-style-section">

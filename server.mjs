@@ -18,7 +18,7 @@ import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, ex
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
-import { countMemories } from "./src/store.mjs";
+import { countMemories, saveUserProfile } from "./src/store.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { extractXliffPairs } from "./src/xliff-document.mjs";
 import { runTaskPool } from "./src/task-pool.mjs";
@@ -3176,13 +3176,15 @@ async function apiHandler(req, res, url) {
     const projectId = String(body.projectId || "").trim();
     if (projectId && !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     const guide = await extractStyleGuideFile({ filename: body.filename, base64: body.base64 });
+    // 人工上传的风格指南是用户自己定的规则，导入即生效：存成 active 才有意义
+    // （draft 只会躺在"待批准"里，getUserProfile 不返回它，翻译根本用不到）。
     const profile = await saveUserProfile({
       locale,
       name: `风格指南 · ${guide.name}`,
       instruction: guide.text,
       examples: [],
       evidenceCount: 0,
-      status: "draft",
+      status: "active",
       generatedBy: "style-guide-import",
       projectId
     });

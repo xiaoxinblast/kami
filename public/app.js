@@ -2696,21 +2696,35 @@ async function importStyleGuideFile(file, locale = state.styleLocale) {
   return result;
 }
 
+/** 上传控件既要看出"能点"，也要看出"选中了哪个文件"。 */
+function renderStyleGuidePicker() {
+  const file = state.styleGuideFile;
+  $("#styleGuideFileName").textContent = file
+    ? `${file.name} · ${formatBytes(file.size)}`
+    : "支持 TXT / Markdown / DOCX，最大 5MB";
+  $("#styleGuideFile").closest(".library-file-button")?.classList.toggle("has-file", Boolean(file));
+}
+
 async function importStyleGuide() {
   const file = state.styleGuideFile;
   if (!file) return;
   const button = $("#styleGuideImportButton");
+  const note = $("#styleGuideImportNote");
   button.disabled = true;
-  $("#styleGuideImportNote").textContent = "正在读取并创建待批准规范……";
+  note.className = "library-import-note";
+  note.textContent = "正在读取并启用风格指南……";
   try {
     const result = await importStyleGuideFile(file);
     state.styleGuideFile = null;
     $("#styleGuideFile").value = "";
-    $("#styleGuideImportNote").textContent = `${result.filename} · ${result.characters} 字 · 已进入待批准规范`;
-    toast("风格指南已导入，请检查后批准启用");
+    renderStyleGuidePicker();
+    note.classList.add("is-ok");
+    note.textContent = `已启用：${result.filename} · ${result.characters} 字 · 作为当前项目的风格规则立即生效`;
+    toast("风格指南已导入并启用，优先于自动蒸馏的规则");
   } catch (error) {
     button.disabled = false;
-    $("#styleGuideImportNote").textContent = error.message;
+    note.classList.add("is-error");
+    note.textContent = error.message;
     toast(error.message);
   }
 }
@@ -4744,9 +4758,12 @@ function bindEvents() {
   $("#styleGuideFile").addEventListener("change", (event) => {
     state.styleGuideFile = event.target.files[0] || null;
     $("#styleGuideImportButton").disabled = !state.styleGuideFile;
-    $("#styleGuideImportNote").textContent = state.styleGuideFile
-      ? `${state.styleGuideFile.name} · 等待导入`
-      : "上传后先检查内容，批准并启用后才会用于翻译。";
+    renderStyleGuidePicker();
+    const note = $("#styleGuideImportNote");
+    note.className = "library-import-note";
+    note.textContent = state.styleGuideFile
+      ? "已选择文件，点右侧按钮导入并立即启用。"
+      : "人工风格指南按你的原话生效，优先级高于自动蒸馏出的规则，只作用于当前项目。";
   });
   $("#styleGuideImportButton").addEventListener("click", () => importStyleGuide());
   $("#retryLearning").addEventListener("click", () => loadLearning(state.learningLocale));
