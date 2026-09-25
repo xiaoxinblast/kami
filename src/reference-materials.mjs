@@ -286,6 +286,79 @@ function csvPages(buffer) {
 }
 
 /**
+ * PDF 页面里画的图片对象（XObject）转成 PNG。
+ *
+ * pdfjs 给的是解码后的位图：kind 1 是 1bpp 灰度（位打包）、2 是 RGB、3 是 RGBA。
+ * 认不出的形态返回 null，由调用方跳过——宁可不读，也不要拼出一张花屏图给模型。
+ */
+async function pngFromPdfImageObject(image) {
+  const width = Number(image?.width) || 0;
+  const height = Number(image?.height) || 0;
+  const data = image?.data;
+  if (!width || !height || !data) return null;
+  const { createCanvas } = await import("@napi-rs/canvas");
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext("2d");
+  const target = context.createImageData(width, height);
+  const pixels = target.data;
+  if (image.kind === 3) {
+    pixels.set(data.subarray(0, width * height * 4));
+  } else if (image.kind === 2) {
+    for (let index = 0; index < width * height; index += 1) {
+      pixels[index * 4] = data[index * 3];
+      pixels[index * 4 + 1] = data[index * 3 + 1];
+      pixels[index * 4 + 2] = data[index * 3 + 2];
+      pixels[index * 4 + 3] = 255;
+    }
+  } else if (image.kind === 1) {
+    const rowBytes = Math.ceil(width / 8);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const bit = (data[y * rowBytes + (x >> 3)] >> (7 - (x & 7))) & 1;
+        const value = bit ? 0 : 255;
+        const offset = (y * width + x) * 4;
+        pixels[offset] = value;
+        pixels[offset + 1] = value;
+        pixels[offset + 2] = value;
+        pixels[offset + 3] = 255;
+      }
+    }
+  } else {
+    return null;
+  }
+  context.putImageData(target, 0, 0);
+  return canvas.toBuffer("image/png");
+}
+
+/** 这一页画了哪些图片。扫描页整页渲染，有文字层的页面就按图片对象逐张取。 */
+async function pdfPageImages(page) {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const ops = await page.getOperatorList();
+  const inline = [];
+  const names = [];
+  for (const [index, fn] of ops.fnArray.entries()) {
+    const argument = ops.argsArray[index]?.[0];
+    if (fn === pdfjs.OPS.paintInlineImageXObject && argument?.data) inline.push(argument);
+    else if (fn === pdfjs.OPS.paintImageXObject && typeof argument === "string") names.push(argument);
+  }
+  const images = [];
+  for (const [index, image] of inline.entries()) {
+    const buffer = await pngFromPdfImageObject(image);
+    if (buffer) images.push({ key: `inline:${page.pageNumber}:${index}`, name: `inline-${index}`, mediaType: "image/png", buffer });
+  }
+  for (const name of [...new Set(names)]) {
+    // 图片对象已经跟着 getOperatorList 解码完，回调会立刻返回；万一没就绪也不能卡住导入。
+    const object = await Promise.race([
+      new Promise((resolve) => page.objs.get(name, resolve)),
+      new Promise((resolve) => setTimeout(() => resolve(null), 5_000))
+    ]);
+    const buffer = await pngFromPdfImageObject(object);
+    if (buffer) images.push({ key: `pdf:${page.pageNumber}:${name}`, name, mediaType: "image/png", buffer });
+  }
+  return images;
+}
+
+/**
  * PDF：先取文字层；抽不到文字的页面渲染成图片，交给调用方用模型识图。
  * `onScannedPage` 缺省时这类页面会被标记为需要识图但不阻塞其余页面。
  */
@@ -303,7 +376,15 @@ async function pdfPages(buffer, { onScannedPage = null, budget = visionBudget() 
       text = "";
     }
     if ([...text].length >= SCANNED_PAGE_MIN_CHARS) {
-      pages.push({ page: pageNumber, text, origin: "text" });
+      // 有文字层不等于没有图：正文旁边的截图、示意图只在图片里，也要读。
+      let imageText = "";
+      try {
+        const images = await pdfPageImages(page);
+        imageText = await transcribeImages({ images, page: pageNumber, label: `第 ${pageNumber} 页里的图片`, onScannedPage, budget });
+      } catch {
+        imageText = "";
+      }
+      pages.push({ page: pageNumber, text: joinPageText(text, imageText), origin: "text" });
       continue;
     }
     // 没有识图能力或已经超出限额时，标记成待识图，但不能让整份资料导入失败。
