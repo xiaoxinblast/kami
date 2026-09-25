@@ -1208,6 +1208,9 @@ dialog::backdrop { background: rgba(14,28,22,.45); }
 .reference-main { display: grid; gap: 3px; min-width: 0; }
 .reference-main strong { font-size: 14px; }
 .reference-main small { color: var(--muted); font-size: 12px; }
+/* 资料描述：翻译时模型先看它决定读不读这份文件，所以要显眼但不抢标题。 */
+.reference-description { margin: 2px 0 0; color: #4f5f57; font-size: 12px; line-height: 1.55; }
+.reference-description.is-empty { color: #9aa49d; }
 .reference-error { color: #8a352f; }
 .reference-metrics { display: grid; gap: 4px; justify-items: end; color: var(--muted); font-size: 12px; }
 .reference-detail-actions { display: flex; gap: 8px; margin-top: 10px; }

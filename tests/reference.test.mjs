@@ -131,14 +131,16 @@ test("工具运行器给出带边界声明的片段，并受调用次数预算�
  */
 test("AI 能按名称直接读整份参考资料，并按预算分段", async () => {
   const chunks = [
-    { id: "c1", documentId: "d1", documentName: "SCENARIO_ORDER", documentStatus: "ready", libraryEnabled: true, ordinal: 0, heading: "", page: "1", origin: "text", text: "第一篇" },
-    { id: "c2", documentId: "d1", documentName: "SCENARIO_ORDER", documentStatus: "ready", libraryEnabled: true, ordinal: 1, heading: "", page: "1", origin: "text", text: "第二篇" }
+    { id: "c1", documentId: "d1", documentName: "SCENARIO_ORDER", documentDescription: "CorelTrain 的剧情顺序表，列出章节与场景编号。", documentStatus: "ready", libraryEnabled: true, ordinal: 0, heading: "", page: "1", origin: "text", text: "第一篇" },
+    { id: "c2", documentId: "d1", documentName: "SCENARIO_ORDER", documentDescription: "CorelTrain 的剧情顺序表，列出章节与场景编号。", documentStatus: "ready", libraryEnabled: true, ordinal: 1, heading: "", page: "1", origin: "text", text: "第二篇" }
   ];
   const index = createReferenceIndex({ loader: async () => chunks });
   const runner = createReferenceToolRunner({ index, budget: { maxCalls: 6, maxCharsTotal: 7 } });
 
   const list = await runner.execute({ name: LIST_REFERENCE_FILES_TOOL, arguments: "{}", projectId: "p1" });
   assert.match(list.text, /SCENARIO_ORDER（2 段 \/ 6 字）/u);
+  // 描述要一起给模型：先看"文件名 + 描述"判断读不读，避免每次都把正文拉进来。
+  assert.match(list.text, /CorelTrain 的剧情顺序表/u);
 
   // 名称支持部分匹配、大小写不敏感。
   const first = await runner.execute({ name: READ_REFERENCE_FILE_TOOL, arguments: JSON.stringify({ document: "scenario", limit: 4 }), projectId: "p1" });

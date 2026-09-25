@@ -3094,10 +3094,12 @@ function renderReferenceList() {
     const scope = [item.contentType ? `语体 ${escapeHtml(contentTypeLabel(item.contentType))}` : "", item.domain ? `领域 ${escapeHtml(item.domain)}` : ""].filter(Boolean).join(" · ") || "全项目通用";
     return `<article class="reference-row" data-reference-id="${escapeHtml(item.id)}">
       <div class="reference-main"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.sourceFile || "")} ${item.sourceFormat ? `· ${escapeHtml(item.sourceFormat)}` : ""} · ${scope}</small>
+        ${item.ingestReport?.description ? `<p class="reference-description">${escapeHtml(item.ingestReport.description)}</p>` : '<p class="reference-description is-empty">还没有描述：翻译时模型只能按文件名猜内容，建议点「让 AI 扫描」生成一两句说明。</p>'}
         ${item.error ? `<small class="reference-error">${escapeHtml(item.error)}</small>` : ""}</div>
       <div class="reference-metrics"><span class="badge ${item.status === "ready" ? "success" : item.status === "failed" ? "error" : "warning"}">${escapeHtml(statusLabel)}</span><small>${item.characters} 字 · ${item.chunkCount} 片段</small></div>
       <div class="task-actions">
         <button class="button secondary small" data-reference-action="detail" data-id="${escapeHtml(item.id)}">查看片段</button>
+        <button class="button ghost small" data-reference-action="describe" data-id="${escapeHtml(item.id)}" title="让 AI 读一遍这份资料，写一两句说明，翻译时可以据此决定要不要读它">${item.ingestReport?.description ? "重新扫描" : "让 AI 扫描"}</button>
         <button class="button ghost small" data-reference-action="reindex" data-id="${escapeHtml(item.id)}">重新索引</button>
         <button class="button ghost small" data-reference-action="toggle" data-id="${escapeHtml(item.id)}" data-status="${item.status === "disabled" ? "ready" : "disabled"}">${item.status === "disabled" ? "启用" : "停用"}</button>
         <button class="button ghost small" data-reference-action="delete" data-id="${escapeHtml(item.id)}">删除</button>
@@ -3168,6 +3170,22 @@ async function openReferenceDetail(id) {
 async function referenceAction(action, id, button) {
   try {
     if (action === "detail") return await openReferenceDetail(id);
+    if (action === "describe") {
+      // 让模型读一遍正文，写一两句"这份资料是干嘛的"，翻译时据此决定要不要读全文。
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = "扫描中…";
+      try {
+        const result = await api(`/api/references/${encodeURIComponent(id)}/describe`, { method: "POST" });
+        toast(`资料描述已更新：${result.description}`);
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = original;
+        throw error;
+      }
+      await loadReferences();
+      return;
+    }
     if (action === "reindex") {
       button.disabled = true;
       button.textContent = "重建中…";

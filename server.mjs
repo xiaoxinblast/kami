@@ -23,6 +23,7 @@ import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-su
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
 import { countMemories, deleteBatchRun, deleteStyleProfile, deleteTranslationSkill, deleteUserProfile, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
+import { describeReferenceWithModel } from "./src/provider.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { deleteBatchOriginal, readBatchOriginal, saveBatchOriginal } from "./src/batch-originals.mjs";
@@ -5058,6 +5059,28 @@ async function evaluateQaBatch(batchId, projectId = "") {
     await updateReferenceDocument(id, { status: "ready", chunkCount: refreshed.length, error: "" });
     referenceIndex.invalidate(document.projectId);
     return json(res, 200, { ok: true, chunkCount: refreshed.length });
+  }
+  if (req.method === "POST" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/describe")) {
+    // 让模型先扫一遍这份资料、写一两句描述；翻译时模型据此决定要不要读全文。
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/describe".length));
+    const document = await getReferenceDocument(id);
+    if (!document) return json(res, 404, { error: "资料不存在" });
+    const { items } = await listReferenceChunks({ documentId: id, limit: 200 });
+    const text = items
+      .slice()
+      .sort((left, right) => (Number(left.ordinal) || 0) - (Number(right.ordinal) || 0))
+      .map((chunk) => String(chunk.text || "").trim())
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 6_000);
+    if (!text) return json(res, 409, { error: "这份资料没有可读正文（可能导入失败或被停用），无法生成描述" });
+    const description = await describeReferenceWithModel({ name: document.name, kind: document.kind, text });
+    const updated = await updateReferenceDocument(id, {
+      ingestReport: { ...(document.ingestReport || {}), description, describedAt: new Date().toISOString() }
+    });
+    referenceIndex.invalidate(document.projectId);
+    logInfo("参考资料描述已生成", { id, name: document.name, description });
+    return json(res, 200, { id, description, document: updated });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/status")) {
     const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/status".length));

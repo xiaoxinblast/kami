@@ -36,6 +36,8 @@ export function createProjectReferenceIndex() {
           documentId: chunk.documentId,
           documentName: document?.name || "",
           documentStatus: document?.status || "ready",
+          // 资料描述（AI 扫描生成的"这份文件是干嘛的"）：模型先看它决定读不读全文。
+          documentDescription: document?.ingestReport?.description || "",
           libraryId: document?.libraryId || "",
           libraryEnabled: document?.libraryId ? libraryEnabled.get(document.libraryId) !== false : true,
           ordinal: chunk.ordinal,

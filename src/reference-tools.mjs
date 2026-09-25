@@ -172,7 +172,7 @@ export function createReferenceToolRunner({ index, listChunks, budget = {}, onAc
         if (!documents.length) return { text: "当前项目没有可用参考资料。", refs: [] };
         onActivity?.({ tool: name, hits: documents.length, elapsedMs: Date.now() - startedAt });
         return {
-          text: `当前项目的参考资料（可直接用 read_reference_file 按名称读正文）：\n${documents.map((item) => `· ${item.name}（${item.chunks} 段 / ${item.characters} 字）`).join("\n")}`,
+          text: `当前项目的参考资料（可直接用 read_reference_file 按名称读正文；先看描述判断要不要读）：\n${documents.map((item) => `· ${item.name}（${item.chunks} 段 / ${item.characters} 字）${item.description ? `：${item.description}` : "：还没有描述，需要时再读正文"} `).join("\n")}`,
           refs: []
         };
       }

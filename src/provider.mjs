@@ -1714,6 +1714,27 @@ export async function classifyWithModel(text, { descriptor = "", location = "" }
   return { ...JSON.parse(match[0]), source: "model" };
 }
 
+/**
+ * 让模型用一两句话描述一份参考资料是干什么的、包含什么。
+ *
+ * 用途：资料多起来以后，模型每次都从头检索既慢又费 token。先扫一遍生成描述，
+ * 翻译时先看"文件名 + 描述"就能判断该读哪几份，再决定是否读全文。
+ */
+export async function describeReferenceWithModel({ name = "", kind = "", text = "", onUsage = null } = {}) {
+  const excerpt = String(text || "").trim().slice(0, 6_000);
+  if (!excerpt) throw new Error("这份资料没有可读正文，无法生成描述");
+  const content = await chat([
+    {
+      role: "system",
+      content: "你是本地化资料管理员。用一两句简体中文（总长不超过 60 字）说明这份资料是做什么用的、大致包含哪些内容，供翻译时判断要不要读它。只输出描述本身：不要前缀、不要引号、不要分点、不要解释。"
+    },
+    { role: "user", content: `资料名：${name || "（未命名）"}\n资料类型：${kind || "其他"}\n正文节选：\n${excerpt}` }
+  ], configForRole("main"), { temperature: 0.1, timeoutMs: 60_000, maxTokens: 200, requestLabel: "资料描述", onUsage });
+  const description = String(content || "").trim().split(/\r?\n/u)[0].replace(/^["“]|["”]$/gu, "").trim().slice(0, 120);
+  if (!description) throw new Error("模型没有返回资料描述");
+  return description;
+}
+
 /** 语境分析：通读一整片条目，产出用途区间、跨条目关联与格式注意点。 */
 export async function analyzeDocumentContextWithModel({ filename = "", format = "", locale = "zh-CN", declaredPurpose = "", entries = [], part = null, onUsage = null } = {}) {
   const messages = contextBriefMessages({ filename, format, locale, declaredPurpose, entries, part });

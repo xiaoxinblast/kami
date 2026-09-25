@@ -85,7 +85,13 @@ export function createReferenceIndex({ loader, ttlMs = DEFAULT_TTL_MS, now = () 
         if (!entry?.documentId) continue;
         if (entry.documentStatus === "disabled" || entry.documentStatus === "failed") continue;
         if (entry.libraryEnabled === false) continue;
-        const document = byId.get(entry.documentId) || { id: entry.documentId, name: entry.documentName || "未命名资料", chunks: 0, characters: 0 };
+        const document = byId.get(entry.documentId) || {
+          id: entry.documentId,
+          name: entry.documentName || "未命名资料",
+          description: String(entry.documentDescription || "").trim(),
+          chunks: 0,
+          characters: 0
+        };
         document.chunks += 1;
         document.characters += [...String(entry.text || "")].length;
         byId.set(entry.documentId, document);
