@@ -146,7 +146,9 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     // 不做缩进：这份检查点里有输入快照（实测 77 MB 数据，缩进后 200 MB），
     // 每完成一对样本都要重写一次——缩进只是让写盘和临时字符串都翻三倍。
-    await writeFile(temporary, `${JSON.stringify(job)}
+    // _persistChain 是运行期的 Promise，序列化只会变成 {} 再被读回来（见 chainPersist 的防御）。
+    const { _persistChain, ...persisted } = job;
+    await writeFile(temporary, `${JSON.stringify(persisted)}
 `, "utf8");
     await renameWithRetry(temporary, path);
   }
@@ -167,7 +169,13 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
   }
 
   function chainPersist(job) {
-    job._persistChain = (job._persistChain || Promise.resolve()).then(() => persist(job)).catch(() => undefined);
+    // 从检查点恢复的任务会带着序列化过的 _persistChain（一个 {}），直接 .then 会抛
+    // "(job._persistChain || Promise.resolve(...)).then is not a function"——实测在
+    // "续跑被拒绝 → fail() → markFailed() → chainPersist()" 这条路上必崩。
+    const previous = job._persistChain;
+    job._persistChain = (previous && typeof previous.then === "function" ? previous : Promise.resolve())
+      .then(() => persist(job))
+      .catch(() => undefined);
     return job._persistChain;
   }
 
@@ -179,6 +187,8 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       try {
         const job = JSON.parse(await readFile(join(jobsDirectory, file), "utf8"));
         if (!job?.jobId || job.kind !== kind) continue;
+        // 老检查点里可能残留序列化过的 _persistChain（{}），恢复时就地清掉。
+        job._persistChain = Promise.resolve();
         if ([QUEUED, RUNNING].includes(job.status)) {
           job.status = INTERRUPTED;
           job.error = "服务重启中断了本次评测，可续跑剩余样本";

@@ -20,7 +20,7 @@ export const REFERENCE_KINDS = Object.freeze({
   other: "其他"
 });
 
-export const REFERENCE_FORMATS = Object.freeze([".txt", ".md", ".docx", ".xlsx", ".csv", ".pdf"]);
+export const REFERENCE_FORMATS = Object.freeze([".txt", ".md", ".docx", ".xlsx", ".csv", ".pdf", ".pptx"]);
 
 /** 与双语资产导入保持一致的单文件上限。 */
 export const MAX_REFERENCE_FILE_BYTES = 20 * 1024 * 1024;
@@ -117,6 +117,28 @@ function plainCellText(value) {
   return "";
 }
 
+/**
+ * PPTX：每张幻灯片算一页，取 <a:t> 里的文字（形状、表格、备注文本框都在这套标签里）。
+ * 图片型幻灯片抽不到文字，会在导入报告里体现为"没有可读文字"。
+ */
+async function pptxPages(buffer) {
+  const archive = await JSZip.loadAsync(buffer);
+  const slides = Object.keys(archive.files)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/u.test(name))
+    .sort((left, right) => Number(left.match(/(\d+)/u)[1]) - Number(right.match(/(\d+)/u)[1]));
+  if (!slides.length) throw Object.assign(new Error("PPTX 中找不到幻灯片"), { statusCode: 422 });
+  const pages = [];
+  for (const [index, name] of slides.entries()) {
+    const xml = await archive.file(name).async("string");
+    const text = normalizeText(decodeXml(xml
+      .replace(/<a:br\b[^>]*\/>/gu, "\n")
+      .replace(/<\/a:p>/gu, "\n")
+      .replace(/<[^>]+>/gu, "")));
+    if (text) pages.push({ page: index + 1, text, origin: "text" });
+  }
+  return pages;
+}
+
 function csvPages(buffer) {
   const document = parseCsvDocument(buffer.toString("utf8"));
   const text = normalizeText(csvValues(document).map((row) => (Array.isArray(row) ? row.join("\t") : String(row ?? ""))).join("\n"));
@@ -186,6 +208,7 @@ export async function extractReferenceFile({ filename, base64, onScannedPage = n
   let pages;
   if (format === "docx") pages = await docxPages(buffer);
   else if (format === "xlsx") pages = await spreadsheetPages(buffer);
+  else if (format === "pptx") pages = await pptxPages(buffer);
   else if (format === "csv") pages = await csvPages(buffer);
   else if (format === "pdf") pages = await pdfPages(buffer, { onScannedPage });
   else pages = [{ page: null, text: normalizeText(buffer.toString("utf8")), origin: "text" }];

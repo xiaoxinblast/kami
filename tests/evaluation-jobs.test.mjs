@@ -249,6 +249,50 @@ test("表达型 Skill 的重复采样结论相反时标记 unstable 并禁止晋
  * 重启时把每个历史任务都读进内存，再加上正在跑的评测，很容易顶爆 Node 默认的 ~4 GB 堆。
  * 所以：已完成的评测只在内存里留摘要（快照仍在磁盘上，供审计与复现），并且检查点不再缩进。
  */
+/**
+ * 实测事故：从检查点恢复的任务带着序列化过的 _persistChain（一个 {}），
+ * `fail() → markFailed() → chainPersist()` 直接抛
+ * "(job._persistChain || Promise.resolve(...)).then is not a function"。
+ */
+test("从检查点恢复后终止任务，不会踩到序列化过的 _persistChain", async () => {
+  const scope = { locale: "th-TH", contentType: "general", domain: "game", project: "persist-chain" };
+  const jobsDirectory = join(dataDir, "learning", "jobs-persist-chain");
+  await mkdir(jobsDirectory, { recursive: true });
+  await writeFile(join(jobsDirectory, "restored-1.json"), JSON.stringify({
+    jobId: "restored-1",
+    kind: "skill-evaluation",
+    scope,
+    championId: "champion-x",
+    challengerId: "challenger-x",
+    requestedCaseIds: ["case-1"],
+    caseTrajectories: {},
+    caseSamples: {},
+    caseFailures: {},
+    status: "interrupted",
+    result: null,
+    error: "",
+    createdAt: "2026-09-25T00:00:00.000Z",
+    updatedAt: "2026-09-25T00:00:00.000Z",
+    finishedAt: "",
+    _persistChain: {}          // 序列化后的 Promise 长这样
+  }));
+  const runner = jobsModule.createEvaluationJobRunner({
+    benchmark: async () => ({ caseId: "unused" }),
+    jobsDirectory,
+    concurrency: 1,
+    deps: makeDeps()
+  });
+  await runner.initialize();
+  assert.equal(runner.get("restored-1").status, "interrupted");
+
+  const failed = await runner.fail("restored-1", "无法续跑：候选状态必须是 challenger 或 draft");
+  assert.equal(failed.status, "failed");
+  const onDisk = JSON.parse(await readFile(join(jobsDirectory, "restored-1.json"), "utf8"));
+  assert.equal(onDisk.status, "failed", "终止状态要落盘");
+  assert.match(onDisk.error, /无法续跑/u);
+  assert.equal(Object.hasOwn(onDisk, "_persistChain"), false, "运行期的 Promise 不该写进检查点");
+});
+
 test("已完成任务的输入快照留在磁盘、不进内存，检查点也不缩进", async () => {
   const scope = { locale: "zh-CN", contentType: "general", domain: "game", project: "default" };
   const jobsDirectory = join(dataDir, "learning", "jobs-completed-payload");

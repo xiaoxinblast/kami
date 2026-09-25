@@ -44,6 +44,22 @@ test("DOCX 之外的不支持格式直接报错，TXT 正常解析", async () =>
  * 根因是 ExcelJS 的 cell.text 对"合并区域里空 master"的单元格会 null.toString()。
  * 这类表格恰恰是参考资料最常见的形态，所以必须能读过去。
  */
+test("PPTX 按幻灯片抽文字，每页一段", async () => {
+  const JSZip = (await import("jszip")).default;
+  const archive = new JSZip();
+  const slide = (text) => `<?xml version="1.0"?><p:sld xmlns:a="x"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+  archive.file("ppt/slides/slide1.xml", slide("第一张：角色一览"));
+  archive.file("ppt/slides/slide2.xml", slide("第二张：剧情顺序"));
+  const buffer = await archive.generateAsync({ type: "nodebuffer" });
+
+  const parsed = await extractReferenceFile({ filename: "scenario.pptx", base64: buffer.toString("base64") });
+  assert.equal(parsed.format, "pptx");
+  assert.equal(parsed.pages.length, 2);
+  assert.equal(parsed.pages[0].page, 1);
+  assert.match(parsed.pages[0].text, /第一张：角色一览/u);
+  assert.match(parsed.pages[1].text, /第二张：剧情顺序/u);
+});
+
 test("XLSX 里合并区域的空单元格不会让参考资料导入崩掉", async () => {
   const ExcelJS = (await import("exceljs")).default;
   const workbook = new ExcelJS.Workbook();
