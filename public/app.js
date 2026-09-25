@@ -5848,7 +5848,7 @@ function renderLearningChampionCard(champion) {
   const autoProposeNote = autoPropose
     ? (autoPropose.lastError
       ? `<span class="learning-auto-note error">自动候选生成上次失败：${escapeHtml(autoPropose.lastError)}（新的人工终稿到达后会重试）</span>`
-      : `<span class="learning-auto-note">自动候选生成已启用 · ${escapeHtml(String(autoPropose.lastAcceptedCount ?? ""))} 条人工终稿时触发${autoPropose.lastProposedAt ? ` · ${escapeHtml(formatLearningDate(autoPropose.lastProposedAt))}` : ""}</span>`)
+      : `<span class="learning-auto-note">自动候选生成已启用 · ${escapeHtml(String(autoPropose.lastAcceptedCount ?? ""))} 条人工终稿时触发${autoPropose.lastProposedAt ? ` · 上次生成候选 ${escapeHtml(formatLearningDate(autoPropose.lastProposedAt))}${autoPropose.lastSource === "manual" ? "（手动）" : ""}` : ""}</span>`)
     : "";
   return `<article class="learning-skill-card champion">
     <div class="learning-skill-head"><div><span class="learning-skill-version">${escapeHtml(learningVersion(champion))}</span><h3>${escapeHtml(learningSkillTitle(champion))}</h3>${learningScopeTag(champion)}<small>${evidenceCount} 条轨迹支撑${champion.activatedAt || champion.activated_at ? ` · ${escapeHtml(formatLearningDate(champion.activatedAt || champion.activated_at))} 启用` : ""}</small></div><span class="learning-status ${statusClass}">${statusLabel}</span></div>

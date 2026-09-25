@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -100,4 +100,26 @@ test("没有可用轨迹时抛出与手动入口一致的 409", async () => {
   const template = engine.createDefaultTranslationSkill({ scope });
   const champion = await store.saveTranslationSkill({ ...scope, ...template, id: "champion-empty-trajectory" });
   await assert.rejects(() => proposal.proposeChallengerSkill({ scope, champion, trajectories: [] }), (error) => error.statusCode === 409 && /没有可复盘的完成轨迹/.test(error.message));
+});
+
+/**
+ * 手动生成成功后要顺手刷新自动提议的记账：否则卡片上会一直挂着"上次自动提议失败"的旧报错，
+ * 而候选其实已经生成出来了（实测踩到过）。
+ */
+test("手动生成成功会清掉自动提议的失败记录，并标明来源是手动", async () => {
+  const [server, app] = await Promise.all([
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8")
+  ]);
+  const route = server.slice(server.indexOf('url.pathname === "/api/learning/skills/generate"'), server.indexOf('url.pathname.startsWith("/api/learning/skills/")'));
+  assert.match(route, /lastError: "",/u, "手动成功要清掉 lastError");
+  assert.match(route, /lastSource: "manual"/u, "要标明这次是手动生成");
+  assert.match(route, /await updateTranslationSkill\(champion\.id, \{/u);
+  assert.match(route, /candidateId: String\(skill\.id \|\| ""\)/u);
+  // 自动链路也要能区分来源，失败时保留上次来源。
+  const autoProposal = await readFile(new URL("../src/auto-proposal.mjs", import.meta.url), "utf8");
+  assert.match(autoProposal, /lastSource: "auto"/u);
+  assert.match(autoProposal, /lastSource: String\(previous\.lastSource \|\| ""\)/u);
+  // 卡片上要把"手动"标出来。
+  assert.match(app, /上次生成候选 \$\{escapeHtml\(formatLearningDate\(autoPropose\.lastProposedAt\)\)\}\$\{autoPropose\.lastSource === "manual" \? "（手动）" : ""\}/u);
 });

@@ -73,7 +73,8 @@ export function createAutoProposer({ deps, threshold = AUTO_PROPOSE_THRESHOLD, g
         lastAcceptedCount: acceptedCount,
         lastProposedAt: now(),
         lastError: "",
-        candidateId: String(candidate?.id || "")
+        candidateId: String(candidate?.id || ""),
+        lastSource: "auto"
       });
       return { proposed: true, candidateId: candidate?.id || "", reason: decision.reason };
     } catch (error) {
@@ -82,7 +83,8 @@ export function createAutoProposer({ deps, threshold = AUTO_PROPOSE_THRESHOLD, g
         lastAcceptedCount: Number(previous.lastAcceptedCount) || 0,
         lastProposedAt: String(previous.lastProposedAt || ""),
         lastError: String(error.message || error),
-        candidateId: String(previous.candidateId || "")
+        candidateId: String(previous.candidateId || ""),
+        lastSource: String(previous.lastSource || "")
       });
       return { proposed: false, reason: String(error.message || error) };
     }

@@ -3249,6 +3249,24 @@ async function apiHandler(req, res, url) {
     const trajectories = await listLearningTrajectories({ ...scope, limit: 100 });
     // 手动与自动提议共用同一实现，保证轨迹筛选、补丁合并与证据隔离完全一致。
     const skill = await proposeChallengerSkill({ scope, champion, trajectories, promptVersion: TRANSLATION_PROMPT_VERSION });
+    // 手动成功也要刷新自动提议的记账：否则卡片上会一直挂着"上次自动提议失败"的旧报错，
+    // 而候选其实已经生成出来了。（失败只由自动链路记录，这里只负责清掉它。）
+    const acceptedCount = trajectories.filter((item) => item.status === "completed"
+      && item.humanDecision?.accepted === true
+      && String(item.finalTranslation || "").trim()).length;
+    await updateTranslationSkill(champion.id, {
+      metadata: {
+        ...(champion.metadata || {}),
+        autoPropose: {
+          ...(champion.metadata?.autoPropose || {}),
+          lastAcceptedCount: acceptedCount,
+          lastProposedAt: new Date().toISOString(),
+          lastError: "",
+          candidateId: String(skill.id || ""),
+          lastSource: "manual"
+        }
+      }
+    }).catch((error) => console.error("刷新自动提议记账失败（候选已生成，不影响结果）", error));
     return json(res, 201, { skill, candidate: skill });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/evaluate")) {

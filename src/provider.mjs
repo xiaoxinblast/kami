@@ -78,6 +78,50 @@ function thinkingParams(thinking, effort) {
 
 let runtimeConfig = withMainThinking(baseRuntimeConfig);
 
+/**
+ * 从模型回复里取第一个**完整**的 JSON 对象。
+ *
+ * 旧写法 `content.match(/\{[\s\S]*\}/)` 是贪婪匹配：模型先给一段示例对象、
+ * 再给正式结果时会从第一个 `{` 一路吃到最后一个 `}`，拼出非法 JSON；
+ * 输出被 max_tokens 截断时又因为缺少收尾 `}` 直接匹配不到，只能报"未返回 JSON 对象"，
+ * 完全看不出是被截断还是模型根本没给 JSON。这里改成按括号配对的扫描（跳过字符串内的括号），
+ * 并在拿不到完整对象时让调用方带上原始片段与原因。
+ */
+export function extractJsonObject(text) {
+  const raw = String(text || "").replace(/```(?:json)?/giu, "");
+  const start = raw.indexOf("{");
+  if (start < 0) return "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === "\"") inString = false;
+      continue;
+    }
+    if (character === "\"") { inString = true; continue; }
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return raw.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+/** 解析失败时给界面/日志看的诊断：开头片段 + 是否像被截断。 */
+export function describeJsonFailure(content, label = "模型返回") {
+  const text = String(content || "");
+  const snippet = text.replace(/\s+/gu, " ").slice(0, 160);
+  if (!text.trim()) return `${label}为空`;
+  if (!text.includes("{")) return `${label}没有 JSON 对象（${text.length} 字）：${snippet}`;
+  if (!text.trimEnd().endsWith("}")) return `${label}的 JSON 没有收尾（${text.length} 字，疑似被 max_tokens 截断）：${snippet}`;
+  return `${label}不是合法 JSON（${text.length} 字）：${snippet}`;
+}
+
 export function getProviderConfig() {
   return {
     ...runtimeConfig,
@@ -529,9 +573,10 @@ async function chat(messages, config = runtimeConfig, options = {}) {
       const tail = candidates[candidates.length - 1];
       if (tail) content = tail.trim();
     }
-    // 推理预算耗尽导致输出被截断为空：加大预算重试一次，避免把“思考超长”误判为“无问题”
+    // 推理预算耗尽导致输出被截断：加大预算重试一次，避免把"思考超长"误判成"没有结论"。
+    // JSON 模式下的截断输出必然是残缺的（拿不到收尾括号），即使有内容也要重试。
     const truncated = payload.choices?.[0]?.finish_reason === "length";
-    if (!content && truncated && attempt < 2) {
+    if (truncated && attempt < 2 && (!content || normalizedOptions.responseFormat)) {
       maxTokens = maxTokens ? Math.min(8000, Math.ceil(maxTokens * 2)) : 4000;
       continue;
     }
@@ -785,10 +830,10 @@ export async function distillBatchStyleLearningWithModel({ batchId, filename, lo
   let formatError = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const match = content.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error("未返回 JSON 对象");
-      const parsed = JSON.parse(match[0]);
-      if (!parsed.summary || !Array.isArray(parsed.rules) || !Array.isArray(parsed.examples)) throw new Error("缺少 summary、rules 或 examples");
+      const extracted = extractJsonObject(content);
+      if (!extracted) throw new Error(describeJsonFailure(content));
+      const parsed = JSON.parse(extracted);
+      if (!parsed.summary || !Array.isArray(parsed.rules) || !Array.isArray(parsed.examples)) throw new Error(`缺少 summary、rules 或 examples：${describeJsonFailure(content)}`);
       payload = parsed;
       break;
     } catch (error) {
@@ -798,7 +843,7 @@ export async function distillBatchStyleLearningWithModel({ batchId, filename, lo
         ...messages,
         { role: "assistant", content: content.slice(0, 4_000) },
         { role: "user", content: "上一个回答不是可解析的严格 JSON。请重新输出一个更紧凑的 JSON 对象：最多 6 条 rules、3 条 examples；所有字符串使用合法 JSON 转义；不要 Markdown、代码围栏、注释或尾随逗号。" }
-      ], runtimeConfig, { temperature: 0, timeoutMs: 75_000, maxTokens: 2200, requestLabel: "本批风格浓缩格式重试", responseFormat: { type: "json_object" } });
+      ], runtimeConfig, { temperature: 0, timeoutMs: 75_000, maxTokens: 3_200, requestLabel: "本批风格浓缩格式重试", responseFormat: { type: "json_object" } });
     }
   }
   if (!payload) throw new Error(`本批风格浓缩模型返回格式无效：${formatError || "未知格式错误"}`);
@@ -894,16 +939,23 @@ export async function proposeTranslationSkillWithModel({ locale, contentType, do
     },
     { role: "user", content: JSON.stringify({ locale, contentType, domain, project, champion, trajectories: compact }) }
   ];
-  let content = await chat(messages, runtimeConfig, { temperature: 0.1, timeoutMs: 90_000, maxTokens: 2200, requestLabel: "翻译技能复盘", responseFormat: { type: "json_object" } });
+  // 思考 + JSON 都要花输出预算：2200 对推理模型偏紧，一旦截断就拿不到收尾括号。
+  // 思考 + JSON 都要花输出预算：2200 对推理模型偏紧，实测会退化成"把提示词里的示例原样抄回来"。
+  let content = await chat(messages, runtimeConfig, { temperature: 0.1, timeoutMs: 90_000, maxTokens: 4_000, requestLabel: "翻译技能复盘", responseFormat: { type: "json_object" } });
   let payload;
   let formatError = "";
+  const validIds = new Set(compact.map((item) => item.id));
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const match = content.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error("未返回 JSON 对象");
-      const parsed = JSON.parse(match[0]);
-      if (!parsed.strategyPatch || typeof parsed.strategyPatch !== "object") throw new Error("缺少 strategyPatch");
-      payload = parsed;
+      const extracted = extractJsonObject(content);
+      if (!extracted) throw new Error(describeJsonFailure(content));
+      const parsed = JSON.parse(extracted);
+      if (!parsed.strategyPatch || typeof parsed.strategyPatch !== "object") throw new Error(`缺少 strategyPatch：${describeJsonFailure(content)}`);
+      const cited = (Array.isArray(parsed.evidenceIds) ? parsed.evidenceIds : []).map(String).filter((id) => validIds.has(id));
+      // 输出预算紧张时模型会把提示词里的示例 JSON 原样抄回来（name="候选技能名"、evidenceIds=[]）。
+      // 没有引用任何一条真实轨迹的补丁等于凭空提案，不能入库：按格式失败走同一套重试。
+      if (!cited.length) throw new Error("补丁没有引用任何一条真实轨迹（疑似把提示词里的示例抄了回来）");
+      payload = { ...parsed, evidenceIds: cited };
       break;
     } catch (error) {
       formatError = error.message;
@@ -912,16 +964,15 @@ export async function proposeTranslationSkillWithModel({ locale, contentType, do
         ...messages,
         { role: "assistant", content: content.slice(0, 4_000) },
         { role: "user", content: "上一个回答不是可解析的严格 JSON。请只重新输出一个紧凑 JSON 对象，必须包含 name、reason、strategyPatch、evidenceIds；不要 Markdown、代码围栏、思考过程、注释或尾随逗号。" }
-      ], runtimeConfig, { temperature: 0, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "翻译技能复盘格式重试", responseFormat: { type: "json_object" } });
+      ], runtimeConfig, { temperature: 0, timeoutMs: 75_000, maxTokens: 3_000, requestLabel: "翻译技能复盘格式重试", responseFormat: { type: "json_object" } });
     }
   }
   if (!payload) throw new Error(`翻译技能复盘模型返回格式无效：${formatError || "未知格式错误"}`);
-  const validIds = new Set(compact.map((item) => item.id));
   return {
     name: String(payload.name || `${LOCALE_NAMES[locale] || locale} ${contentType} 候选技能`).slice(0, 120),
     reason: String(payload.reason || "根据近期翻译轨迹提出的增量改进").slice(0, 2_000),
     strategyPatch: payload.strategyPatch,
-    evidenceIds: [...new Set((Array.isArray(payload.evidenceIds) ? payload.evidenceIds : []).filter((id) => validIds.has(id)))].slice(0, 100)
+    evidenceIds: [...new Set(payload.evidenceIds)].slice(0, 100)
   };
 }
 

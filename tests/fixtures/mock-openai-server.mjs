@@ -30,6 +30,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const prompt = body.messages?.map((message) => message.content).join("\n") || "";
+  // 候选技能提案必须引用真实轨迹 id（生产代码会拒绝"只抄提示词示例"的补丁），
+  // 所以这里从请求里读真实 id 再回填，而不是写死一个占位数组。
+  const citedTrajectoryIds = (() => {
+    try {
+      const payload = JSON.parse(body.messages?.[1]?.content || "{}");
+      return (payload.trajectories || []).map((item) => String(item?.id || "")).filter(Boolean).slice(0, 2);
+    } catch { return []; }
+  })();
   const content = prompt.includes("Excel 表格结构分析器")
     ? JSON.stringify({ sheets: [{ sheet: "Delivery", headerRow: 1, confidence: 0.98, reason: "表头和列内容分布明确", columns: [
       { column: 1, label: "位置", role: "context", confidence: 0.99, reason: "投放位置" },
@@ -75,8 +83,8 @@ const server = http.createServer(async (req, res) => {
         },
         qa: { enabled: true, minimumScore: -5, maximumRevisionAttempts: 99, blockOnHardError: "no" },
         extraSection: { anything: 1 }
-      }, evidenceIds: [] })
-      : JSON.stringify({ name: "候选技能", reason: "高频术语漏用，建议收紧术语提示", strategyPatch: { prompting: { additionalInstruction: "优先核对强制术语", additionalRules: ["输出前逐项核对强制术语"] }, retrieval: { translationMemory: { limit: 8 } }, qa: { minimumScore: 90, maximumRevisionAttempts: 2 } }, evidenceIds: [] }))
+      }, evidenceIds: citedTrajectoryIds })
+      : JSON.stringify({ name: "候选技能", reason: "高频术语漏用，建议收紧术语提示", strategyPatch: { prompting: { additionalInstruction: "优先核对强制术语", additionalRules: ["输出前逐项核对强制术语"] }, retrieval: { translationMemory: { limit: 8 } }, qa: { minimumScore: 90, maximumRevisionAttempts: 2 } }, evidenceIds: citedTrajectoryIds }))
     : prompt.includes("双语本地化审校")
       ? "PASS"
       : "高級パスが新登場しました。";

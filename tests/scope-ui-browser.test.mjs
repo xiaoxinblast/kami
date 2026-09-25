@@ -119,11 +119,13 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     await page.locator("#sourceText").fill("行こう。");
     await page.locator("#primaryAction").click();
     await page.waitForFunction(() => document.querySelector("#targetOutput")?.textContent?.includes("走吧"));
-    // 预检与翻译结果都会写这一行：等它稳定到带"本次参考"再断言，避免读到中间态。
-    await page.waitForFunction(() => /本次参考：/.test(document.querySelector("#classificationPreview")?.textContent || ""), null, { timeout: 60_000 });
+    // 预检与翻译结果都会写这一行，两次内容不同：等**翻译结果那一版**出现再断言，
+    // 否则会读到预检留下的中间态（并行全量时更明显）。
+    const expectedReference = /本次参考：项目规范「通用规范」 v1 · 译例 5 条（同作用域 2 \/ 通用 3）/u;
+    await page.waitForFunction(() => /本次参考：项目规范「通用规范」 v1 · 译例 5 条（同作用域 2 \/ 通用 3）/.test(document.querySelector("#classificationPreview")?.textContent || ""), null, { timeout: 60_000 });
     const previewText = await page.locator("#classificationPreview").textContent();
     assert.match(previewText, /语体/u);
-    assert.match(previewText, /本次参考：项目规范「通用规范」 v1 · 译例 5 条（同作用域 2 \/ 通用 3）/u, `结果要写清用的是哪一版项目规范：${previewText}`);
+    assert.match(previewText, expectedReference, `结果要写清用的是哪一版项目规范：${previewText}`);
     const qaPanel = await page.locator("#qaList").textContent();
     assert.match(qaPanel, /本段用途与质量档/u, "结果要写清本段用途与质量档");
     assert.match(qaPanel, /标准档/u);
