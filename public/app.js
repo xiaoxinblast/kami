@@ -3092,11 +3092,12 @@ function renderReferenceList() {
   container.innerHTML = items.map((item) => {
     const statusLabel = { indexing: "索引中", ready: "可用", failed: "失败", disabled: "已停用" }[item.status] || item.status;
     const scope = [item.contentType ? `语体 ${escapeHtml(contentTypeLabel(item.contentType))}` : "", item.domain ? `领域 ${escapeHtml(item.domain)}` : ""].filter(Boolean).join(" · ") || "全项目通用";
+    const visionCount = Number(item.ingestReport?.visionPages || 0) + Number(item.ingestReport?.visionImages || 0);
     return `<article class="reference-row" data-reference-id="${escapeHtml(item.id)}">
       <div class="reference-main"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.sourceFile || "")} ${item.sourceFormat ? `· ${escapeHtml(item.sourceFormat)}` : ""} · ${scope}</small>
         ${item.ingestReport?.description ? `<p class="reference-description">${escapeHtml(item.ingestReport.description)}</p>` : '<p class="reference-description is-empty">还没有描述：翻译时模型只能按文件名猜内容，建议点「让 AI 扫描」生成一两句说明。</p>'}
         ${item.error ? `<small class="reference-error">${escapeHtml(item.error)}</small>` : ""}</div>
-      <div class="reference-metrics"><span class="badge ${item.status === "ready" ? "success" : item.status === "failed" ? "error" : "warning"}">${escapeHtml(statusLabel)}</span><small>${item.characters} 字 · ${item.chunkCount} 片段</small></div>
+      <div class="reference-metrics"><span class="badge ${item.status === "ready" ? "success" : item.status === "failed" ? "error" : "warning"}">${escapeHtml(statusLabel)}</span><small>${item.characters} 字 · ${item.chunkCount} 片段${visionCount ? ` · ${visionCount} 张图识图` : ""}</small></div>
       <div class="task-actions">
         <button class="button secondary small" data-reference-action="detail" data-id="${escapeHtml(item.id)}">查看片段</button>
         <button class="button ghost small" data-reference-action="describe" data-id="${escapeHtml(item.id)}" title="让 AI 读一遍这份资料，写一两句说明，翻译时可以据此决定要不要读它">${item.ingestReport?.description ? "重新扫描" : "让 AI 扫描"}</button>
@@ -3155,6 +3156,9 @@ async function openReferenceDetail(id) {
     `${payload.document?.sourceFile || ""}${payload.document?.sourceFormat ? `（${payload.document.sourceFormat}）` : ""}`,
     `共 ${payload.total} 个片段`,
     report.visionPages ? `其中 ${report.visionPages} 页由模型识图` : "",
+    report.visionImages ? `${report.visionImages} 张内嵌图片已识图` : "",
+    report.skippedImages ? `${report.skippedImages} 张图太小或不是位图，未识图` : "",
+    report.cappedImages ? `${report.cappedImages} 张图超过单份 40 张的限额，未识图` : "",
     report.riskChunks ? `${report.riskChunks} 个片段被判定含注入特征，默认不参与检索` : ""
   ].filter(Boolean).join(" · ");
   $("#referenceDetailActions").innerHTML = `<button class="button ghost small" data-reference-action="reindex" data-id="${escapeHtml(id)}">重新索引</button>`;

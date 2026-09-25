@@ -24,7 +24,8 @@ const thinkingRoles = { model: "main", fastModel: "fast", qualityModel: "quality
 
 const providerFields = {
   connection: [
-    { name: "baseUrl", label: "Base URL", hint: "OpenAI 兼容接口地址，例如本地 Ollama 或云端网关。", placeholder: "http://localhost:11434/v1" },
+    { name: "protocol", label: "接口协议", type: "select", hint: "决定请求打到哪个端点、用哪套参数：OpenAI 兼容 /chat/completions、OpenAI Responses /responses、Anthropic Messages /messages。Anthropic 不支持 embedding，向量检索会继续用本地索引。", options: [["openai", "OpenAI 兼容 · /chat/completions"], ["responses", "OpenAI Responses · /responses"], ["anthropic", "Anthropic Messages · /messages"]] },
+    { name: "baseUrl", label: "Base URL", hint: "接口根地址，例如本地 Ollama、云端网关；端点按上面的协议自动拼接。", placeholder: "http://localhost:11434/v1" },
     { name: "apiKey", label: "API Key", hint: "留空保持现有 Key；保存后使用 Windows 当前用户级 DPAPI 加密。", type: "password", placeholder: "留空保持不变", autocomplete: "off" }
   ],
   models: [
@@ -87,7 +88,12 @@ function fieldMarkup(field, value, extra = "") {
     field.placeholder ? `placeholder="${escape(field.placeholder)}"` : "",
     extra
   ].filter(Boolean).join(" ");
-  return `<label class="sp-field"><span><strong>${escape(field.label)}</strong><small>${escape(field.hint)}</small></span><div class="sp-input">${field.suffix ? `<div class="sp-input-with-suffix"><input ${attributes} value="${escape(value ?? "")}" /><em>${escape(field.suffix)}</em></div>` : `<input ${attributes} value="${escape(value ?? "")}" />`}${field.controls || ""}</div></label>`;
+  const control = field.options
+    ? `<select name="${escape(field.name)}">${field.options.map(([optionValue, label]) => `<option value="${escape(optionValue)}"${String(value ?? "") === optionValue ? " selected" : ""}>${escape(label)}</option>`).join("")}</select>`
+    : field.suffix
+      ? `<div class="sp-input-with-suffix"><input ${attributes} value="${escape(value ?? "")}" /><em>${escape(field.suffix)}</em></div>`
+      : `<input ${attributes} value="${escape(value ?? "")}" />`;
+  return `<label class="sp-field"><span><strong>${escape(field.label)}</strong><small>${escape(field.hint)}</small></span><div class="sp-input">${control}${field.controls || ""}</div></label>`;
 }
 
 /**
@@ -126,7 +132,9 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
     const values = {};
     for (const field of Object.values(providerFields).flat()) {
       const secret = field.type === "password";
-      values[field.name] = secret ? "" : String(readPath(source, field.name) ?? "");
+      const raw = secret ? "" : String(readPath(source, field.name) ?? "");
+      // 下拉框：已保存值缺失时落到第一项（旧配置没有 protocol，按 OpenAI 兼容处理）。
+      values[field.name] = !raw && field.options ? field.options[0][0] : raw;
     }
     // 思考开关与强度也要进草稿：切分类重绘时不能丢，保存时整块提交。
     for (const role of Object.values(thinkingRoles)) {
@@ -156,12 +164,13 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
         return fieldMarkup({ ...field, placeholder, controls }, value);
       }).join("")}</div>
       ${tab.id === "connection" ? probeMarkup() : ""}
+      ${tab.id === "connection" ? `<div class="sp-note"><strong>协议差异</strong><p>OpenAI 兼容最完整（thinking / reasoning_effort / response_format / seed 都会发送）；Responses 只用 reasoning.effort 与 text.format（没有 seed）；Anthropic 走 /messages，思考设置与 JSON 模式不发送（提示词本身已要求 JSON），并且 Anthropic 不提供 embedding 接口——向量检索继续用本地 CJK 索引，或把 Embedding 单独配到 OpenAI 兼容端点。</p></div>` : ""}
       ${tab.id === "connection" ? `<div class="sp-note"><strong>密钥安全</strong><p>API Key 使用 Windows 当前用户级 DPAPI 加密保存，不会以明文写入项目文件。</p></div>` : ""}
       ${tab.id === "models" ? `<div class="sp-note"><strong>思考设置</strong><p>每个角色单独设置是否思考、思考多深（低 / 高 / 最高）。DeepSeek 官方 API：关闭思考时发送 thinking.type=disabled，开启时按强度发送 reasoning_effort（默认高）。专用模型留空仍会复用主模型，但思考设置按角色独立生效。</p></div>` : ""}
     </section>`).join("");
     dialog.innerHTML = panelShell({
       title: "模型服务设置",
-      eyebrow: "OPENAI-COMPATIBLE",
+      eyebrow: "MODEL PROVIDER",
       description: "连接模型服务、分配模型角色，并配置 Embedding 与成本门禁。",
       tabs: providerTabs,
       active,
@@ -207,6 +216,7 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
       const outcome = await api("/api/provider/probe", {
         method: "POST",
         body: JSON.stringify({
+          protocol: valueOf("protocol", "openai"),
           baseUrl: valueOf("baseUrl"),
           model: valueOf("model"),
           apiKey: draft && Object.hasOwn(draft, "apiKey") ? draft.apiKey : ""

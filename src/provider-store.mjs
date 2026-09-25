@@ -35,6 +35,18 @@ function atomicWrite(path, content) {
 /** 每个模型角色的思考开关与思考强度；键名固定，方便面板按角色读写。 */
 export const MODEL_THINKING_ROLES = ["main", "fast", "quality", "mt"];
 
+/**
+ * 出口协议：工作台要能挂不同形态的模型服务。
+ * openai = OpenAI 兼容 /chat/completions；responses = OpenAI Responses /responses；
+ * anthropic = Anthropic Messages /messages。旧配置没有这个字段，一律按 openai 处理。
+ */
+export const MODEL_PROTOCOLS = ["openai", "responses", "anthropic"];
+
+export function normalizeProviderProtocol(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return MODEL_PROTOCOLS.includes(text) ? text : "openai";
+}
+
 function modelThinkingFields(config) {
   const fields = {};
   for (const role of MODEL_THINKING_ROLES) {
@@ -64,6 +76,7 @@ export function saveProviderConfig(config, directory = DEFAULT_PROVIDER_DIRECTOR
   else if (existsSync(target.embeddingSecret)) rmSync(target.embeddingSecret);
   atomicWrite(target.config, JSON.stringify({
     baseUrl, model, fastModel, qualityModel, mtModel, embeddingModel, embeddingBaseUrl,
+    protocol: normalizeProviderProtocol(config.protocol),
     ...thinking,
     inputPricePerMTok, outputPricePerMTok,
     apiKeyConfigured: Boolean(apiKey), embeddingApiKeyConfigured: Boolean(embeddingApiKey),
@@ -94,6 +107,7 @@ export function loadProviderConfig(directory = DEFAULT_PROVIDER_DIRECTORY) {
         fastModel: metadata.fastModel || "",
         qualityModel: metadata.qualityModel || "",
         mtModel: metadata.mtModel || "",
+        protocol: normalizeProviderProtocol(metadata.protocol),
         ...modelThinkingFields(metadata),
         embeddingModel: metadata.embeddingModel || "",
         embeddingBaseUrl: metadata.embeddingBaseUrl || "",

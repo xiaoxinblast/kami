@@ -194,7 +194,8 @@ test("上游返回 tool_calls 时执行工具并回灌，第二轮给出最终�
   process.env.LLM_BASE_URL = `http://127.0.0.1:${port}/v1`;
   process.env.LLM_MODEL = "mock-model";
   const provider = await import("../src/provider.mjs");
-  provider.updateProviderConfig({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "mock-model", apiKey: "test" });
+  // persist: false —— 单测不能写真实的 provider.json（会覆盖掉本机模型配置与 DPAPI 密钥）。
+  provider.updateProviderConfig({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "mock-model", apiKey: "test", persist: false });
   const index = createReferenceIndex({ loader: async () => [item("a", "林晚是主角，习惯自称“我”。")] });
   const runner = createReferenceToolRunner({ index, budget: { maxCalls: 2 } });
   let usageCalls = 0;

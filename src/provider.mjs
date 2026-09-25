@@ -1,4 +1,4 @@
-import { MODEL_THINKING_ROLES, loadProviderConfig, saveProviderConfig } from "./provider-store.mjs";
+import { MODEL_THINKING_ROLES, loadProviderConfig, normalizeProviderProtocol, saveProviderConfig } from "./provider-store.mjs";
 import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-qa.mjs";
 import { contextBriefMessages, parseContextBriefPart } from "./context-brief.mjs";
@@ -24,7 +24,8 @@ const baseRuntimeConfig = {
   embeddingBaseUrl: process.env.LLM_EMBEDDING_BASE_URL || loadedProvider.config.embeddingBaseUrl || "",
   embeddingApiKey: process.env.LLM_EMBEDDING_API_KEY || loadedProvider.config.embeddingApiKey || "",
   inputPricePerMTok: process.env.LLM_INPUT_PRICE_PER_MTOK ?? loadedProvider.config.inputPricePerMTok ?? "",
-  outputPricePerMTok: process.env.LLM_OUTPUT_PRICE_PER_MTOK ?? loadedProvider.config.outputPricePerMTok ?? ""
+  outputPricePerMTok: process.env.LLM_OUTPUT_PRICE_PER_MTOK ?? loadedProvider.config.outputPricePerMTok ?? "",
+  protocol: normalizeProviderProtocol(process.env.LLM_PROTOCOL || loadedProvider.config.protocol)
 };
 for (const role of MODEL_THINKING_ROLES) {
   baseRuntimeConfig[`${role}Thinking`] = loadedProvider.config[`${role}Thinking`] || "";
@@ -146,6 +147,7 @@ export function updateProviderConfig(input = {}) {
     embeddingModel: Object.hasOwn(input, "embeddingModel") ? String(input.embeddingModel || "").trim() : runtimeConfig.embeddingModel,
     embeddingBaseUrl: Object.hasOwn(input, "embeddingBaseUrl") ? String(input.embeddingBaseUrl || "").replace(/\/$/, "") : runtimeConfig.embeddingBaseUrl,
     embeddingApiKey: input.clearEmbeddingApiKey === true ? "" : (submittedEmbeddingApiKey || runtimeConfig.embeddingApiKey),
+    protocol: normalizeProviderProtocol(Object.hasOwn(input, "protocol") ? input.protocol : runtimeConfig.protocol),
     inputPricePerMTok: Object.hasOwn(input, "inputPricePerMTok") ? String(input.inputPricePerMTok ?? "").trim() : runtimeConfig.inputPricePerMTok,
     outputPricePerMTok: Object.hasOwn(input, "outputPricePerMTok") ? String(input.outputPricePerMTok ?? "").trim() : runtimeConfig.outputPricePerMTok
   };
@@ -493,38 +495,320 @@ export async function fetchWithTimeout(url, init = {}, { timeoutMs = 30_000, lab
   throw new Error(timeoutMessage);
 }
 
+/**
+ * 出口协议：同一个工作台要能挂三种形态的模型服务。
+ *
+ * - openai：OpenAI 兼容的 /chat/completions（本地 Ollama、DeepSeek、各类网关）
+ * - responses：OpenAI Responses API（/responses，input 数组 + output 数组）
+ * - anthropic：Anthropic Messages（/messages，content 块 + tool_use / tool_result）
+ *
+ * 内部消息一律保持 OpenAI chat 的形态（system/user/assistant/tool + tool_calls +
+ * image_url 内容块），发请求前按协议渲染、收到响应后归一化成同一份
+ * { content, toolCalls }。上层（翻译、QA、参考资料识图）不用关心用的是哪一家。
+ */
+const ANTHROPIC_VERSION = "2023-06-01";
+/** Anthropic 的 max_tokens 是必填项：调用方没指定时用它兜底。 */
+const ANTHROPIC_DEFAULT_MAX_TOKENS = 4_096;
+
+function protocolEndpoint(protocol, baseUrl) {
+  if (protocol === "responses") return `${baseUrl}/responses`;
+  if (protocol === "anthropic") return `${baseUrl}/messages`;
+  return `${baseUrl}/chat/completions`;
+}
+
+/**
+ * Anthropic 官方文档现在以 `Authorization: Bearer` 为准，`x-api-key` 仍然支持；
+ * 第三方网关两种都见过，所以两个都带（值相同，不会互相冲突）。
+ */
+function protocolHeaders(protocol, apiKey) {
+  if (protocol !== "anthropic") {
+    return { "content-type": "application/json", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) };
+  }
+  return {
+    "content-type": "application/json",
+    "anthropic-version": ANTHROPIC_VERSION,
+    ...(apiKey ? { "x-api-key": apiKey, authorization: `Bearer ${apiKey}` } : {})
+  };
+}
+
+/** 消息内容统一按"内容块数组"处理：纯文本也能当成长度为 1 的块数组。 */
+function contentBlocks(content) {
+  if (Array.isArray(content)) return content;
+  const text = String(content ?? "");
+  return text ? [{ type: "text", text }] : [];
+}
+
+function blocksText(content) {
+  return contentBlocks(content)
+    .map((block) => (block?.type === "image_url" ? "" : String(block?.text ?? "")))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+/** data URL → { mediaType, data }；Anthropic 的图片块要把 MIME 与数据分开传。 */
+function splitImageDataUrl(url) {
+  const match = /^data:([^;,]+);base64,(.+)$/su.exec(String(url || ""));
+  return match ? { mediaType: match[1], data: match[2] } : null;
+}
+
+function parseArgumentsJson(text) {
+  try {
+    const parsed = JSON.parse(String(text || "{}"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Anthropic 不接受连续同角色消息，把相邻的同角色内容块合并成一条。 */
+function pushAnthropicMessage(list, role, blocks) {
+  if (!blocks.length) return;
+  const last = list[list.length - 1];
+  if (last && last.role === role) last.content.push(...blocks);
+  else list.push({ role, content: blocks });
+}
+
+function responsesInput(messages) {
+  const instructions = [];
+  const input = [];
+  for (const message of messages) {
+    const role = String(message?.role || "user");
+    if (role === "system" || role === "developer") {
+      const text = String(message?.content ?? "").trim();
+      if (text) instructions.push(text);
+      continue;
+    }
+    if (role === "tool") {
+      input.push({ type: "function_call_output", call_id: String(message?.tool_call_id || ""), output: String(message?.content ?? "") });
+      continue;
+    }
+    if (role === "assistant") {
+      // 工具调用要用 function_call 输入项回灌，否则模型看不到自己上一轮请求过什么。
+      for (const call of Array.isArray(message?.tool_calls) ? message.tool_calls : []) {
+        input.push({
+          type: "function_call",
+          call_id: String(call?.id || call?.function?.name || ""),
+          name: String(call?.function?.name || ""),
+          arguments: String(call?.function?.arguments ?? "{}")
+        });
+      }
+      const text = blocksText(message?.content);
+      if (text) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text }] });
+      continue;
+    }
+    input.push({
+      type: "message",
+      role: "user",
+      content: contentBlocks(message?.content).map((block) => (block?.type === "image_url"
+        ? {
+          type: "input_image",
+          image_url: String(block?.image_url?.url || ""),
+          ...(block?.image_url?.detail ? { detail: block.image_url.detail } : {})
+        }
+        : { type: "input_text", text: String(block?.text ?? "") }))
+    });
+  }
+  return { instructions: instructions.join("\n\n"), input };
+}
+
+function anthropicConversation(messages) {
+  const system = [];
+  const list = [];
+  for (const message of messages) {
+    const role = String(message?.role || "user");
+    if (role === "system" || role === "developer") {
+      const text = String(message?.content ?? "").trim();
+      if (text) system.push(text);
+      continue;
+    }
+    if (role === "tool") {
+      pushAnthropicMessage(list, "user", [{ type: "tool_result", tool_use_id: String(message?.tool_call_id || ""), content: String(message?.content ?? "") }]);
+      continue;
+    }
+    if (role === "assistant") {
+      const blocks = [];
+      const text = blocksText(message?.content);
+      if (text) blocks.push({ type: "text", text });
+      for (const call of Array.isArray(message?.tool_calls) ? message.tool_calls : []) {
+        blocks.push({
+          type: "tool_use",
+          id: String(call?.id || call?.function?.name || ""),
+          name: String(call?.function?.name || ""),
+          input: parseArgumentsJson(call?.function?.arguments)
+        });
+      }
+      pushAnthropicMessage(list, "assistant", blocks);
+      continue;
+    }
+    pushAnthropicMessage(list, "user", contentBlocks(message?.content).map((block) => {
+      if (block?.type !== "image_url") return { type: "text", text: String(block?.text ?? "") };
+      const image = splitImageDataUrl(block?.image_url?.url);
+      // 只支持 base64 data URL：Anthropic 的 url 图片源要服务端自己去取，工作台不代下。
+      return image
+        ? { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } }
+        : { type: "text", text: `（这张图片无法内联，已跳过：${String(block?.image_url?.url || "").slice(0, 60)}）` };
+    }));
+  }
+  return { system: system.join("\n\n"), messages: list };
+}
+
+function protocolTools(protocol, tools) {
+  if (protocol === "responses") {
+    return tools.map((tool) => ({
+      type: "function",
+      name: String(tool?.function?.name || tool?.name || ""),
+      description: String(tool?.function?.description || tool?.description || ""),
+      parameters: tool?.function?.parameters || tool?.parameters || { type: "object", properties: {} }
+    }));
+  }
+  if (protocol === "anthropic") {
+    return tools.map((tool) => ({
+      name: String(tool?.function?.name || tool?.name || ""),
+      description: String(tool?.function?.description || tool?.description || ""),
+      input_schema: tool?.function?.parameters || tool?.parameters || { type: "object", properties: {} }
+    }));
+  }
+  return tools;
+}
+
+/**
+ * 思考参数各家形态不同：OpenAI 兼容走 thinking.type / reasoning_effort，
+ * Responses 走 reasoning.effort，Anthropic 的 extended thinking 要额外给预算，这里不发。
+ */
+function thinkingParamsFor(protocol, thinking, effort) {
+  if (protocol === "anthropic") return {};
+  if (protocol === "responses") return thinking === "disabled" || !effort ? {} : { reasoning: { effort } };
+  return thinkingParams(thinking, effort);
+}
+
+function chatRequestBody(protocol, { messages, model, temperature, seed, maxTokens, responseFormat, tools, thinkingBody }) {
+  if (protocol === "responses") {
+    const { instructions, input } = responsesInput(messages);
+    return {
+      model,
+      input,
+      ...(instructions ? { instructions } : {}),
+      temperature,
+      ...(maxTokens ? { max_output_tokens: maxTokens } : {}),
+      ...(responseFormat ? { text: { format: { type: "json_object" } } } : {}),
+      ...(tools.length ? { tools: protocolTools("responses", tools), tool_choice: "auto" } : {}),
+      ...thinkingBody
+    };
+  }
+  if (protocol === "anthropic") {
+    const { system, messages: conversation } = anthropicConversation(messages);
+    return {
+      model,
+      max_tokens: maxTokens || ANTHROPIC_DEFAULT_MAX_TOKENS,
+      messages: conversation,
+      ...(system ? { system } : {}),
+      temperature,
+      ...(tools.length ? { tools: protocolTools("anthropic", tools), tool_choice: { type: "auto" } } : {}),
+      ...thinkingBody
+    };
+  }
+  return {
+    model,
+    messages,
+    temperature,
+    ...(seed === undefined ? {} : { seed }),
+    ...(maxTokens ? { max_tokens: maxTokens } : {}),
+    ...(responseFormat ? { response_format: responseFormat } : {}),
+    ...(tools.length ? { tools, tool_choice: "auto" } : {}),
+    ...thinkingBody
+  };
+}
+
+/** 把三家响应归一化成 { content, toolCalls, finishReason, usage }。 */
+function normalizeChatResponse(protocol, payload) {
+  if (protocol === "responses") {
+    const texts = [];
+    const toolCalls = [];
+    for (const item of Array.isArray(payload?.output) ? payload.output : []) {
+      if (item?.type === "function_call") {
+        toolCalls.push({ id: item.call_id || item.id || item.name, type: "function", function: { name: item.name, arguments: item.arguments } });
+        continue;
+      }
+      for (const block of Array.isArray(item?.content) ? item.content : []) {
+        if (block?.type === "output_text") texts.push(String(block.text || ""));
+        else if (block?.type === "refusal") texts.push(String(block.refusal || ""));
+      }
+    }
+    const truncated = payload?.status === "incomplete" || payload?.incomplete_details?.reason === "max_output_tokens";
+    return {
+      content: texts.join("").trim(),
+      toolCalls,
+      finishReason: truncated ? "length" : "stop",
+      usage: payload?.usage ? { promptTokens: Number(payload.usage.input_tokens) || 0, completionTokens: Number(payload.usage.output_tokens) || 0 } : null
+    };
+  }
+  if (protocol === "anthropic") {
+    const blocks = Array.isArray(payload?.content) ? payload.content : [];
+    return {
+      content: blocks.filter((block) => block?.type === "text").map((block) => String(block.text || "")).join("").trim(),
+      toolCalls: blocks.filter((block) => block?.type === "tool_use").map((block) => ({
+        id: block.id,
+        type: "function",
+        function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) }
+      })),
+      finishReason: payload?.stop_reason === "max_tokens" ? "length" : "stop",
+      usage: payload?.usage ? { promptTokens: Number(payload.usage.input_tokens) || 0, completionTokens: Number(payload.usage.output_tokens) || 0 } : null
+    };
+  }
+  const message = payload?.choices?.[0]?.message || {};
+  let content = String(message.content || "").trim();
+  // 推理模型在“结论为空”的简单场景可能把最终 JSON 留在推理轨迹里：取轨迹尾部最后一个 JSON 片段
+  if (!content && typeof message.reasoning_content === "string") {
+    const candidates = [...(message.reasoning_content.match(/\[[\s\S]*\]/g) || []), ...(message.reasoning_content.match(/\{[\s\S]*\}/g) || [])];
+    const tail = candidates[candidates.length - 1];
+    if (tail) content = tail.trim();
+  }
+  return {
+    content,
+    toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls.filter((call) => call?.function?.name) : [],
+    finishReason: payload?.choices?.[0]?.finish_reason || "stop",
+    usage: payload?.usage
+      ? { promptTokens: Number(payload.usage.prompt_tokens) || 0, completionTokens: Number(payload.usage.completion_tokens) || 0 }
+      : (Number.isFinite(payload?.prompt_eval_count) || Number.isFinite(payload?.eval_count))
+        ? { promptTokens: Number(payload?.prompt_eval_count) || 0, completionTokens: Number(payload?.eval_count) || 0 }
+        : null
+  };
+}
+
 async function chat(messages, config = runtimeConfig, options = {}) {
   const normalizedOptions = typeof options === "number" ? { temperature: options } : options;
+  const protocol = normalizeProviderProtocol(config.protocol);
   const temperature = normalizedOptions.temperature ?? 0.25;
   const timeoutMs = normalizedOptions.timeoutMs ?? 60_000;
   const requestLabel = normalizedOptions.requestLabel || "模型";
   let maxTokens = normalizedOptions.maxTokens;
-  let seed = Number.isInteger(normalizedOptions.seed) ? normalizedOptions.seed : undefined;
+  // seed 只有 OpenAI 兼容端点认；Responses 与 Anthropic 都没有这个参数，发了就是 400。
+  let seed = protocol === "openai" && Number.isInteger(normalizedOptions.seed) ? normalizedOptions.seed : undefined;
   let seedFallbackUsed = false;
+  const tools = Array.isArray(normalizedOptions.tools) ? normalizedOptions.tools : [];
   // 思考设置：显式传参（例如探针固定 low）优先于模型角色配置。
   let thinkingBody = thinkingUnsupported
     ? {}
-    : thinkingParams(
+    : thinkingParamsFor(
+      protocol,
       String(normalizedOptions.thinking ?? config.thinking ?? "").trim(),
       String(normalizedOptions.reasoningEffort ?? config.reasoningEffort ?? "").trim()
     );
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const { response, text } = await fetchWithTimeout(`${config.baseUrl}/chat/completions`, {
+    const { response, text } = await fetchWithTimeout(protocolEndpoint(protocol, config.baseUrl), {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {})
-      },
-      body: JSON.stringify({
-        model: config.model,
+      headers: protocolHeaders(protocol, config.apiKey),
+      body: JSON.stringify(chatRequestBody(protocol, {
         messages,
+        model: config.model,
         temperature,
-        ...(seed === undefined ? {} : { seed }),
-        ...(maxTokens ? { max_tokens: maxTokens } : {}),
-        ...(normalizedOptions.responseFormat ? { response_format: normalizedOptions.responseFormat } : {}),
-        ...(!toolsUnsupported && normalizedOptions.tools?.length ? { tools: normalizedOptions.tools, tool_choice: "auto" } : {}),
-        ...thinkingBody
-      })
+        seed,
+        maxTokens,
+        responseFormat: normalizedOptions.responseFormat,
+        tools: toolsUnsupported ? [] : tools,
+        thinkingBody
+      }))
     }, { timeoutMs, label: requestLabel, retries: 1 });
     if (!response.ok) {
       // Several OpenAI-compatible gateways do not expose `seed`. Keep the
@@ -537,10 +821,10 @@ async function chat(messages, config = runtimeConfig, options = {}) {
         normalizedOptions.onSeedUnsupported?.(`${requestLabel} 上游不支持固定 seed`);
         continue;
       }
-      // 不是每个 OpenAI 兼容服务商都认 thinking / reasoning_effort：拒绝就退回默认思考模式，
+      // 不是每个上游都认 thinking / reasoning_effort / reasoning：拒绝就退回默认思考模式，
       // 并记住这家上游不支持，避免后续每次调用都先撞一次 400。
       if (Object.keys(thinkingBody).length && response.status === 400
-        && /reasoning_effort|thinking/i.test(text || "") && /unknown|unsupported|extra_forbidden|not permitted|not allowed|invalid/i.test(text || "")) {
+        && /reasoning|thinking/i.test(text || "") && /unknown|unsupported|extra_forbidden|not permitted|not allowed|invalid/i.test(text || "")) {
         thinkingUnsupported = true;
         thinkingBody = {};
         normalizedOptions.onThinkingUnsupported?.(`${requestLabel} 上游不支持思考设置，已按默认思考模式重试`);
@@ -548,7 +832,7 @@ async function chat(messages, config = runtimeConfig, options = {}) {
       }
       // 不是每个 OpenAI 兼容端点都认 tools：拒绝就退回无工具模式（参考资料改为不查），
       // 但翻译本身必须继续，不能因为一个可选能力把整批任务打断。
-      if (!toolsUnsupported && normalizedOptions.tools?.length && response.status === 400
+      if (!toolsUnsupported && tools.length && response.status === 400
         && /tool/i.test(text || "") && /unknown|unsupported|extra_forbidden|not permitted|not allowed|invalid/i.test(text || "")) {
         toolsUnsupported = true;
         normalizedOptions.onToolsUnsupported?.(`${requestLabel} 上游不支持工具调用，已按无工具模式重试`);
@@ -557,34 +841,16 @@ async function chat(messages, config = runtimeConfig, options = {}) {
       throw new Error(`模型请求失败 (${response.status})：${(text || "").slice(0, 500)}`);
     }
     const payload = JSON.parse(text || "{}");
-    if (typeof normalizedOptions.onUsage === "function") {
-      const usage = payload.usage
-        ? { promptTokens: Number(payload.usage.prompt_tokens) || 0, completionTokens: Number(payload.usage.completion_tokens) || 0 }
-        : (Number.isFinite(payload.prompt_eval_count) || Number.isFinite(payload.eval_count))
-          ? { promptTokens: Number(payload.prompt_eval_count) || 0, completionTokens: Number(payload.eval_count) || 0 }
-          : null;
-      if (usage) normalizedOptions.onUsage(usage);
-    }
-    const message = payload.choices?.[0]?.message || {};
-    let content = String(message.content || "").trim();
-    // 推理模型在“结论为空”的简单场景可能把最终 JSON 留在推理轨迹里：取轨迹尾部最后一个 JSON 片段
-    if (!content && typeof message.reasoning_content === "string") {
-      const candidates = [...(message.reasoning_content.match(/\[[\s\S]*\]/g) || []), ...(message.reasoning_content.match(/\{[\s\S]*\}/g) || [])];
-      const tail = candidates[candidates.length - 1];
-      if (tail) content = tail.trim();
-    }
+    const normalized = normalizeChatResponse(protocol, payload);
+    if (typeof normalizedOptions.onUsage === "function" && normalized.usage) normalizedOptions.onUsage(normalized.usage);
     // 推理预算耗尽导致输出被截断：加大预算重试一次，避免把"思考超长"误判成"没有结论"。
     // JSON 模式下的截断输出必然是残缺的（拿不到收尾括号），即使有内容也要重试。
-    const truncated = payload.choices?.[0]?.finish_reason === "length";
-    if (truncated && attempt < 2 && (!content || normalizedOptions.responseFormat)) {
+    if (normalized.finishReason === "length" && attempt < 2 && (!normalized.content || normalizedOptions.responseFormat)) {
       maxTokens = maxTokens ? Math.min(8000, Math.ceil(maxTokens * 2)) : 4000;
       continue;
     }
-    if (normalizedOptions.returnMessage === true) {
-      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.filter((call) => call?.function?.name) : [];
-      return { content, toolCalls };
-    }
-    return content;
+    if (normalizedOptions.returnMessage === true) return { content: normalized.content, toolCalls: normalized.toolCalls };
+    return normalized.content;
   }
   if (normalizedOptions.returnMessage === true) return { content: "", toolCalls: [] };
   return "";
@@ -1391,7 +1657,7 @@ export async function probeModelAvailability({ timeoutMs = 20_000, onUsage = nul
  * 扫描页识图：把 PDF 渲染出的页面图片交给模型逐字转录。
  * 只做转录，不做翻译——参考资料要保持原文，检索与引用都以原文为准。
  */
-export async function extractTextFromImageWithModel({ base64, onUsage = null, detail = "low", timeoutMs = 120_000 } = {}) {
+export async function extractTextFromImageWithModel({ base64, mediaType = "image/png", onUsage = null, detail = "low", timeoutMs = 120_000 } = {}) {
   const content = String(base64 || "").trim();
   if (!content) return "";
   return await chat([
@@ -1400,7 +1666,7 @@ export async function extractTextFromImageWithModel({ base64, onUsage = null, de
       role: "user",
       content: [
         { type: "text", text: "转录这一页的全部文字。" },
-        { type: "image_url", image_url: { url: `data:image/png;base64,${content}`, detail } }
+        { type: "image_url", image_url: { url: `data:${mediaType};base64,${content}`, detail } }
       ]
     }
   ], configForRole("main"), { temperature: 0, timeoutMs, requestLabel: "资料识图", onUsage });

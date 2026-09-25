@@ -328,9 +328,9 @@
               <label><span>搜索</span><input id="referenceSearch" type="search" placeholder="按名称或文件名" /></label>
               <button class="button secondary" id="refreshReferences" type="button">刷新</button>
               <label class="button primary" for="referenceFileInput">上传参考资料</label>
-            <input id="referenceFileInput" type="file" accept=".txt,.md,.docx,.xlsx,.csv,.pdf,.pptx" multiple hidden />
+            <input id="referenceFileInput" type="file" accept=".txt,.md,.docx,.xlsx,.csv,.pdf,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp" multiple hidden />
             </div>
-            <p class="panel-caption" id="referenceUploadNote">支持 .txt / .md / .docx / .xlsx / .csv / .pdf / .pptx，单文件不超过 20MB。扫描版 PDF 会渲染成图片交给模型识图；进度在任务中心与这里都能看到。</p>
+            <p class="panel-caption" id="referenceUploadNote">支持 .txt / .md / .docx / .xlsx / .csv / .pdf / .pptx / .png / .jpg / .webp，单文件不超过 20MB。PDF 扫描页、文档内嵌图片（PPT 截图、DOCX 插图、XLSX 贴图）与单独上传的图片都会交给模型识图转录，单份资料最多 40 张；进度在任务中心与这里都能看到。</p>
             <div class="reference-list" id="referenceList"><div class="empty-list">正在读取参考资料……</div></div>
           </article>
           <article class="panel" id="referenceDetailPanel" hidden>

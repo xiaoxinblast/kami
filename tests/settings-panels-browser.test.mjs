@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { CONTENT_TYPES, CONTENT_TAGS, LOCALES } from "../src/config.mjs";
 import { createDefaultProjectSettings } from "../src/project-config.mjs";
@@ -30,6 +30,7 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
   const probeBodies = [];
   const probeOutcomes = [
     { ok: false, baseUrl: "http://127.0.0.1:11435/v1", model: "typed-model", latencyMs: 12, error: "模型请求失败 (401)：Unauthorized" },
+    { ok: true, protocol: "anthropic", baseUrl: "http://127.0.0.1:11435/v1", model: "typed-model", latencyMs: 100 },
     { ok: true, baseUrl: "http://127.0.0.1:11435/v1", model: "typed-model", latencyMs: 123 }
   ];
   const providerConfig = { baseUrl: "http://localhost:11434/v1", model: "qwen3:14b", fastModel: "", qualityModel: "", mtModel: "", embeddingModel: "", embeddingBaseUrl: "", inputPricePerMTok: "", outputPricePerMTok: "", apiKeyConfigured: false, embeddingApiKeyConfigured: false };
@@ -81,17 +82,33 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
     await page.locator("#openProvider").click();
     await page.waitForSelector("#providerDialog[open]");
     await page.locator('#providerDialog input[name="baseUrl"]').fill("http://127.0.0.1:11435/v1");
+    // 接口协议：默认 OpenAI 兼容，三种协议都能选；面板里就要能看出"现在用的是哪一套"
+    const protocolSelect = page.locator('#providerDialog select[name="protocol"]');
+    assert.equal(await protocolSelect.inputValue(), "openai", "旧配置没有 protocol 时按 OpenAI 兼容显示");
+    assert.deepEqual(
+      await protocolSelect.locator("option").allTextContents(),
+      ["OpenAI 兼容 · /chat/completions", "OpenAI Responses · /responses", "Anthropic Messages · /messages"]
+    );
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/provider-protocol-select.png`, animations: "disabled" });
+    }
 
     // 连接与鉴权：测试连接先报失败，再报成功；两次都只探针、不保存
     await page.locator('#providerDialog button[data-provider-probe]').click();
     await page.waitForFunction(() => /连接失败/.test(document.querySelector('[data-probe-result]')?.textContent || ""));
     assert.match(await page.locator('#providerDialog [data-probe-result]').textContent(), /401/u, "失败原因要原样给出来");
+    // 切到 Anthropic 再点测试连接：探针要按面板里刚选、还没保存的协议发。
+    await protocolSelect.selectOption("anthropic");
     await page.locator('#providerDialog button[data-provider-probe]').click();
     await page.waitForFunction(() => /连接正常/.test(document.querySelector('[data-probe-result]')?.textContent || ""));
-    assert.match(await page.locator('#providerDialog [data-probe-result]').textContent(), /123 ms/u);
+    await protocolSelect.selectOption("openai");
+    await page.locator('#providerDialog button[data-provider-probe]').click();
+    await page.waitForFunction(() => /123 ms/.test(document.querySelector('[data-probe-result]')?.textContent || ""));
     assert.deepEqual(probeBodies, [
-      { baseUrl: "http://127.0.0.1:11435/v1", model: "qwen3:14b", apiKey: "" },
-      { baseUrl: "http://127.0.0.1:11435/v1", model: "qwen3:14b", apiKey: "" }
+      { protocol: "openai", baseUrl: "http://127.0.0.1:11435/v1", model: "qwen3:14b", apiKey: "" },
+      { protocol: "anthropic", baseUrl: "http://127.0.0.1:11435/v1", model: "qwen3:14b", apiKey: "" },
+      { protocol: "openai", baseUrl: "http://127.0.0.1:11435/v1", model: "qwen3:14b", apiKey: "" }
     ], "探针要带上面板里填的地址/模型，密钥留空表示沿用已保存的");
     assert.equal(providerBodies.length, 0, "测试连接不能顺手保存配置");
 
@@ -124,6 +141,7 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
 
     // 保存 → 值落库，且继续切分类仍然保留
     await page.locator('#providerDialog input[name="baseUrl"]').fill("http://127.0.0.1:11435/v1");
+    await page.locator('#providerDialog select[name="protocol"]').selectOption("anthropic");
     await page.locator('#providerDialog button[data-tab="models"]').click();
     await page.locator('#providerDialog input[name="mainThinking"]').check();
     await page.locator('#providerDialog select[name="mainEffort"]').selectOption("max");
@@ -132,9 +150,11 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
     assert.equal(await page.locator("#providerDialog").evaluate((node) => node.open), true, "保存后不应自动关闭面板");
     assert.equal(providerBodies.at(-1).mainThinking, "enabled", "保存要带上思考开关");
     assert.equal(providerBodies.at(-1).mainEffort, "max", "保存要带上思考强度");
+    assert.equal(providerBodies.at(-1).protocol, "anthropic", "保存要带上接口协议");
     await page.locator('#providerDialog button[data-tab="pricing"]').click();
     await page.locator('#providerDialog button[data-tab="connection"]').click();
     assert.equal(await page.locator('#providerDialog input[name="baseUrl"]').inputValue(), "http://127.0.0.1:11435/v1");
+    assert.equal(await page.locator('#providerDialog select[name="protocol"]').inputValue(), "anthropic", "切分类回来协议仍是刚选的");
     await page.locator("#providerDialog button[data-close-panel]").first().click();
 
     // 参数设置：改值 → 切分类 → 切回；关窗未保存则丢弃

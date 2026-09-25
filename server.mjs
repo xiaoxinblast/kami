@@ -24,6 +24,7 @@ import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemori
 import { embedSource } from "./src/embedding.mjs";
 import { countMemories, deleteBatchRun, deleteStyleProfile, deleteTranslationSkill, deleteUserProfile, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { describeReferenceWithModel } from "./src/provider.mjs";
+import { normalizeProviderProtocol } from "./src/provider-store.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { deleteBatchOriginal, readBatchOriginal, saveBatchOriginal } from "./src/batch-originals.mjs";
@@ -342,10 +343,10 @@ async function ingestReferenceDocument({ projectId, libraryId, name, kind, conte
     const parsed = await extractReferenceFile({
       filename,
       base64,
-      onScannedPage: async ({ page, render }) => {
-        onProgress?.({ phase: "vision", message: `第 ${page} 页没有文字层，正在用模型识图`, percent: 20 });
-        const png = await render();
-        return await extractTextFromImageWithModel({ base64: png });
+      onScannedPage: async ({ label, render, mediaType = "image/png" }) => {
+        onProgress?.({ phase: "vision", message: `${label || "这一页"}：没有文字层，正在用模型识图`, percent: 20 });
+        const image = await render();
+        return await extractTextFromImageWithModel({ base64: image, mediaType });
       }
     });
     const chunks = chunkReferencePages(parsed.pages);
@@ -375,6 +376,9 @@ async function ingestReferenceDocument({ projectId, libraryId, name, kind, conte
         format: parsed.format,
         pages: parsed.pages.length,
         visionPages: parsed.pages.filter((page) => page.origin === "vision").length,
+        visionImages: parsed.visionImages,
+        skippedImages: parsed.skippedImages,
+        cappedImages: parsed.cappedImages,
         riskChunks: prepared.filter((chunk) => chunk.risk).length
       }
     });
@@ -2775,15 +2779,17 @@ async function apiHandler(req, res, url) {
     const model = String(body.model ?? "").trim() || saved.model;
     const submittedApiKey = String(body.apiKey ?? "").trim();
     if (!baseUrl || !model) return json(res, 400, { ok: false, error: "Base URL 与主模型都要填写后才能测试连接" });
+    // 协议也按面板里刚选的那份试：改了协议还没保存就点测试连接，测的应该是新协议。
+    const protocol = normalizeProviderProtocol(Object.hasOwn(body, "protocol") ? body.protocol : saved.protocol);
     // apiKey 留空表示"用已保存的那把"：不能塞 undefined 覆盖掉运行配置里的密钥。
-    const override = { baseUrl, model, ...(submittedApiKey ? { apiKey: submittedApiKey } : {}) };
+    const override = { baseUrl, model, protocol, ...(submittedApiKey ? { apiKey: submittedApiKey } : {}) };
     const startedAt = Date.now();
     try {
       await probeModelAvailability({ config: override, timeoutMs: 20_000 });
-      return json(res, 200, { ok: true, baseUrl, model, latencyMs: Date.now() - startedAt });
+      return json(res, 200, { ok: true, baseUrl, model, protocol, latencyMs: Date.now() - startedAt });
     } catch (error) {
       // 连不上是预期结果之一，不抛 5xx：界面要拿到原因原样展示。
-      return json(res, 200, { ok: false, baseUrl, model, latencyMs: Date.now() - startedAt, error: String(error?.message || error) });
+      return json(res, 200, { ok: false, baseUrl, model, protocol, latencyMs: Date.now() - startedAt, error: String(error?.message || error) });
     }
   }
   if (req.method === "POST" && url.pathname === "/api/embedding/rebuild") {

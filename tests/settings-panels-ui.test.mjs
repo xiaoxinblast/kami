@@ -133,3 +133,31 @@ test("思考开关只占内容宽度，不被强度下拉挤到换行", async ()
   assert.match(styles, /\.sp-switch \{ flex: 0 0 auto;[^}]*white-space: nowrap;/u);
   assert.doesNotMatch(styles, /\.sp-switch \{ flex: 1;/u);
 });
+
+/**
+ * 接口协议：工作台要能挂 OpenAI 兼容 / OpenAI Responses / Anthropic 三种服务，
+ * 页面上的下拉、探针与服务端白名单必须对得上，否则用户选了 Anthropic 却还在打 chat/completions。
+ */
+test("连接与鉴权页能选接口协议，探针按选中的协议发", async () => {
+  const [panels, script, provider, store] = await Promise.all([
+    readFile(new URL("../public/settings-panels.js", import.meta.url), "utf8"),
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../src/provider.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../src/provider-store.mjs", import.meta.url), "utf8")
+  ]);
+  assert.match(panels, /name: "protocol", label: "接口协议", type: "select"/u);
+  for (const value of ["openai", "responses", "anthropic"]) assert.match(panels, new RegExp(`\\["${value}",`, "u"));
+  assert.match(panels, /protocol: valueOf\("protocol", "openai"\),/u);
+  // 旧配置没有 protocol 字段时，下拉要落到第一项，不能渲染成空白选项。
+  assert.match(panels, /values\[field\.name\] = !raw && field\.options \? field\.options\[0\]\[0\] : raw;/u);
+  // 服务端：白名单归一化 + 探针按面板里选的协议覆盖。
+  assert.match(store, /export const MODEL_PROTOCOLS = \["openai", "responses", "anthropic"\];/u);
+  assert.match(script, /const protocol = normalizeProviderProtocol\(Object\.hasOwn\(body, "protocol"\) \? body\.protocol : saved\.protocol\);/u);
+  assert.match(script, /const override = \{ baseUrl, model, protocol,/u);
+  // 出口：三家端点与响应归一化。
+  assert.match(provider, /if \(protocol === "responses"\) return `\$\{baseUrl\}\/responses`;/u);
+  assert.match(provider, /if \(protocol === "anthropic"\) return `\$\{baseUrl\}\/messages`;/u);
+  assert.match(provider, /"anthropic-version": ANTHROPIC_VERSION/u);
+  assert.match(provider, /\{ type: "function_call_output", call_id: String\(message\?\.tool_call_id \|\| ""\), output:/u);
+  assert.match(provider, /\{ type: "tool_result", tool_use_id: String\(message\?\.tool_call_id \|\| ""\), content:/u);
+});
