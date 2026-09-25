@@ -59,6 +59,38 @@ h3 { margin: 0; font-size: 13px; }
 .text-action { border: 0; padding: 8px 9px; color: #59665f; background: transparent; text-decoration: none; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .text-action:hover { color: var(--forest); }
 .command-divider { width: 1px; height: 24px; margin: 0 3px; background: var(--line); }
+/* 通知中心：铃铛 + 未读角标 + 面板。面板用绝对定位挂在铃铛下面，点外面或 Esc 关闭。 */
+.notification-center { position: relative; display: inline-flex; align-items: center; }
+.notification-bell { position: relative; display: grid; place-items: center; width: 30px; height: 30px; margin-left: 2px; border: 1px solid var(--line); border-radius: 50%; color: #59665f; background: #fff; cursor: pointer; }
+.notification-bell:hover { color: var(--forest); border-color: var(--line-dark); }
+.notification-bell svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.notification-bell.has-unread svg { animation: notification-nudge .9s ease 1; }
+@keyframes notification-nudge { 0%,100% { transform: none; } 25% { transform: rotate(-12deg); } 70% { transform: rotate(9deg); } }
+.notification-badge { position: absolute; top: -4px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: #c0473c; color: #fff; font-size: 10px; font-weight: 850; line-height: 16px; text-align: center; }
+.notification-panel { position: absolute; top: calc(100% + 8px); right: 0; z-index: 60; width: min(392px, calc(100vw - 28px)); max-height: 420px; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: 0 20px 44px rgba(18,62,49,.18); }
+.notification-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; padding: 2px 4px 9px; border-bottom: 1px solid #eef1ea; }
+.notification-head div { display: grid; gap: 2px; }
+.notification-head strong { color: var(--forest); font-size: 13px; }
+.notification-head small { color: var(--muted); font-size: 11px; }
+.notification-head .text-action { padding: 4px 6px; font-size: 11px; }
+.notification-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 9px; align-items: start; width: 100%; padding: 9px 8px; border: 0; border-radius: 10px; background: transparent; text-align: left; cursor: pointer; }
+.notification-item:hover { background: #f4f8f2; }
+.notification-item strong { display: block; color: #2c3a33; font-size: 12.5px; }
+.notification-item small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.notification-item .notification-time { color: #98a29c; font-size: 10px; white-space: nowrap; }
+.notification-dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: #cdd6c9; }
+.notification-item.done .notification-dot { background: var(--lime-deep); }
+.notification-item.attention .notification-dot { background: var(--amber); }
+.notification-item.error .notification-dot { background: #c0473c; }
+.notification-item.running .notification-dot { background: #8aa2b5; }
+/* 已读：整条退到背景里（浅字 + 灰点），未读才保留彩色圆点和深色标题。
+   放在彩色圆点规则之后，才能覆盖掉 .done/.attention 的颜色。 */
+.notification-item.is-read strong { color: #7c8981; font-weight: 700; }
+.notification-item.is-read small { color: #a6aea9; }
+.notification-item.is-read .notification-time { color: #bcc3be; }
+.notification-item.is-read .notification-dot { background: #dfe4dc; }
+.notification-item.is-unread { background: #f7faf4; }
+.notification-item.is-unread strong { color: #22302a; font-weight: 800; }
 .button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 9px; padding: 9px 14px; color: inherit; text-decoration: none; font-size: 14px; font-weight: 800; transition: .15s ease; white-space: nowrap; }
 .button:hover { transform: translateY(-1px); }
 .button:disabled { cursor: not-allowed; opacity: .42; transform: none; }

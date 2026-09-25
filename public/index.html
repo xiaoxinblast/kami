@@ -53,6 +53,19 @@
               </div>
               <a class="text-action" id="openAdmin" href="http://127.0.0.1:18055/admin/content/terms_zh_cn" target="_blank" rel="noreferrer">Directus 后台</a>
               <button class="text-action" id="openProvider">模型设置</button><button class="text-action" id="openSettings" type="button">参数设置</button>
+              <div class="notification-center">
+                <button class="notification-bell" id="notificationBell" type="button" aria-label="通知中心" aria-expanded="false" title="通知中心">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2a5 5 0 0 0-5 5v3L5.3 14.4a1 1 0 0 0 .9 1.5h11.6a1 1 0 0 0 .9-1.5L17 11.2v-3a5 5 0 0 0-5-5z" /><path d="M9.6 18.2a2.4 2.4 0 0 0 4.8 0" /></svg>
+                  <span class="notification-badge" id="notificationBadge" hidden>0</span>
+                </button>
+                <div class="notification-panel" id="notificationPanel" hidden>
+                  <div class="notification-head">
+                    <div><strong>通知中心</strong><small id="notificationMeta">正在读取…</small></div>
+                    <button class="text-action" type="button" id="notificationMarkRead">全部已读</button>
+                  </div>
+                  <div class="notification-list" id="notificationList"></div>
+                </div>
+              </div>
             </div>
             <span class="command-divider"></span>
             <button class="button ghost" id="cancelBatchAction" hidden>中断批次</button>

@@ -31,6 +31,8 @@ const state = {
   learningData: null,
   learningLoading: false,
   learningSelectedSkillId: "",
+  // 正在跑的评测任务：状态放在这里，页面重绘后按钮不会退回"运行评测"。
+  learningEvaluationJobs: [],
   conflictReport: null,
   referenceDocuments: [],
   referenceLibraries: [],
@@ -38,6 +40,9 @@ const state = {
   referenceSearch: "",
   referenceDetail: null,
   tasks: [],
+  // 通知中心：由任务列表 + 待处理 QA 案例推导，未读只记一个时间点。
+  notifications: [],
+  notificationHighlight: null,
   styleData: null,
   memories: [],
   memoryTotal: 0,
@@ -2580,6 +2585,119 @@ async function loadTasks() {
   if (state.activeProjectId) query.set("projectId", state.activeProjectId);
   state.tasks = await api(`/api/tasks?${query}`);
   renderTasks();
+}
+
+/**
+ * 通知中心：把任务中心那两份现成数据（任务列表 + 待处理 QA 案例）翻译成
+ * "完成了 / 需要处理 / 进行中"的条目。不额外维护一张通知表：任务被删掉，
+ * 对应通知自然消失；已读与否只记一个时间点。
+ */
+const NOTIFICATION_POLL_MS = 20000;
+const NOTIFICATION_LIMIT = 20;
+let notificationTimer = 0;
+
+function notificationSeenAt() {
+  try { return localStorage.getItem("kami-notification-seen") || ""; } catch { return ""; }
+}
+
+function setNotificationSeenAt(value) {
+  try { localStorage.setItem("kami-notification-seen", value); } catch { /* 隐私模式写不进去：角标照常算，只是不记住 */ }
+}
+
+/** 通知里的一行细节：进度、失败、待处理各取需要的部分。 */
+function notificationTaskDetail(task) {
+  const counts = [];
+  if (Number(task.failedSegments)) counts.push(`${Number(task.failedSegments)} 段失败`);
+  if (Number(task.qaPending)) counts.push(`${Number(task.qaPending)} 条待处理`);
+  const segments = Number(task.totalSegments) ? `${Number(task.completedSegments) || 0} / ${Number(task.totalSegments)} 段` : "";
+  // 后台任务自带更具体的进度文案（"正在入库：120 / 900"），有就用它，别把同一件事写两遍。
+  const head = String(task.progress?.message || "").trim() || segments;
+  return [head, ...counts, head ? "" : String(task.taskType || "")].filter(Boolean).join(" · ");
+}
+
+function buildNotifications(tasks = [], pendingQaCases = []) {
+  const items = [];
+  for (const task of tasks) {
+    const at = task.updatedAt || task.createdAt || "";
+    const label = task.filename || task.title || "任务";
+    const detail = notificationTaskDetail(task);
+    if (task.status === "completed") items.push({ id: `task:${task.id}:completed`, kind: "done", at, view: "tasks", title: `已完成：${label}`, detail });
+    else if (task.status === "needs_attention") items.push({ id: `task:${task.id}:attention`, kind: "attention", at, view: "tasks", title: `需要处理：${label}`, detail });
+    else if (task.status === "review") items.push({ id: `task:${task.id}:review`, kind: "attention", at, view: "tasks", title: `待复核：${label}`, detail });
+    else if (["in_progress", "paused"].includes(task.status)) items.push({ id: `task:${task.id}:running`, kind: "running", at, view: "tasks", title: `${task.status === "paused" ? "已暂停" : "进行中"}：${label}`, detail });
+  }
+  const pendingCount = pendingQaCases.length;
+  if (pendingCount) {
+    const latest = pendingQaCases.map((item) => item.updatedAt || item.createdAt || "").sort().at(-1) || "";
+    items.push({
+      id: `qa-pending:${pendingCount}`, kind: "attention", at: latest, view: "autoqa",
+      title: `${pendingCount} 个 QA 案例等着处理`,
+      detail: "在译文质检里逐条采纳或丢弃，处理完才会进入学习与回归集。"
+    });
+  }
+  return items
+    .sort((left, right) => String(right.at).localeCompare(String(left.at)))
+    .slice(0, NOTIFICATION_LIMIT);
+}
+
+function unreadNotifications() {
+  const seenAt = notificationSeenAt();
+  return (state.notifications || []).filter((item) => item.at && item.at > seenAt);
+}
+
+function renderNotificationCenter() {
+  const badge = $("#notificationBadge");
+  const bell = $("#notificationBell");
+  const list = $("#notificationList");
+  if (!badge || !list) return;
+  const unread = unreadNotifications();
+  badge.hidden = unread.length === 0;
+  badge.textContent = unread.length > 99 ? "99+" : String(unread.length);
+  bell?.classList.toggle("has-unread", unread.length > 0);
+  $("#notificationMeta").textContent = unread.length ? `${unread.length} 条未读 · 共 ${state.notifications.length} 条` : `共 ${state.notifications.length} 条 · 没有未读`;
+  // 读过的条目要"退到背景里"：文字变浅、圆点从彩色变灰，只剩时间戳和条目本身。
+  const seenAt = notificationSeenAt();
+  const highlight = state.notificationHighlight;
+  list.innerHTML = state.notifications.length
+    ? state.notifications.map((item) => {
+      const isUnread = highlight ? highlight.has(item.id) : Boolean(item.at) && item.at > seenAt;
+      return `<button class="notification-item ${escapeHtml(item.kind)} ${isUnread ? "is-unread" : "is-read"}" type="button" data-notification-view="${escapeHtml(item.view || "")}" title="${escapeHtml(item.detail || "")}"><span class="notification-dot" aria-hidden="true"></span><div><strong>${escapeHtml(item.title)}</strong>${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}</div><span class="notification-time">${escapeHtml(item.at ? formatTaskTime(item.at) : "")}</span></button>`;
+    }).join("")
+    : '<div class="empty-list"><div><strong>暂无通知</strong><span>任务完成、失败或需要处理时会出现在这里。</span></div></div>';
+}
+
+function setNotificationPanel(open) {
+  const panel = $("#notificationPanel");
+  const bell = $("#notificationBell");
+  if (!panel || !bell) return;
+  panel.hidden = !open;
+  bell.setAttribute("aria-expanded", String(open));
+  if (open) {
+    // 打开就算读过（角标立刻清），但这一次打开里保留"这几条是新到的"高亮：
+    // 否则刚点开就全变浅色，根本看不出哪几条是新来的。关掉面板即结束本次高亮。
+    state.notificationHighlight = new Set(unreadNotifications().map((item) => item.id));
+    if (state.notificationHighlight.size) setNotificationSeenAt(new Date().toISOString());
+  } else {
+    state.notificationHighlight = null;
+  }
+  renderNotificationCenter();
+}
+
+async function loadNotifications() {
+  if (!state.activeProjectId) return;
+  const params = new URLSearchParams({ limit: "60", projectId: state.activeProjectId });
+  const qaParams = new URLSearchParams({ locale: state.autoQaLocale || "zh-CN", projectId: state.activeProjectId });
+  const [tasks, pendingQaCases] = await Promise.all([
+    api(`/api/tasks?${params}`).catch(() => []),
+    api(`/api/qa-cases/pending?${qaParams}`).catch(() => [])
+  ]);
+  state.notifications = buildNotifications(Array.isArray(tasks) ? tasks : [], Array.isArray(pendingQaCases) ? pendingQaCases : []);
+  renderNotificationCenter();
+}
+
+function startNotificationPolling() {
+  notificationTimer ||= window.setInterval(() => { loadNotifications().catch(() => {}); }, NOTIFICATION_POLL_MS);
+  loadNotifications().catch(() => {});
 }
 
 function renderTasks() {
@@ -6074,6 +6192,9 @@ function renderLearningCandidates(candidates, evaluations, champions, validTraje
     const rules = learningRules(skill);
     const evidenceCount = Number(skill.evidenceCount ?? skill.evidence_count ?? skill.trajectoryCount ?? skill.trajectory_count) || learningArray(skill.evidence || skill.evidenceIds || skill.evidence_ids).length;
     const canActivate = Boolean(evaluation && baselineCurrent && evaluationPassed(evaluation, skill));
+    // 正在跑的评测属于页面状态：只要任务还没结束，按钮就一直写"评测中 N/M"，
+    // 中间任何一次重绘（切视图、换范围、点卡片）都不会把它退回"运行评测"。
+    const activeJob = activeEvaluationJobFor(id);
     // 候选刚生成时还没有任何评测：evaluation 为 null，这里不能直接读它的字段
     // （曾经因此抛 "Cannot read properties of null (reading 'decision')"，整个学习中心变成读取失败）。
     const reviewStatus = String(evaluationResult.status || evaluation?.decision || "").toLowerCase();
@@ -6081,21 +6202,23 @@ function renderLearningCandidates(candidates, evaluations, champions, validTraje
     const unstable = evaluation && reviewStatus === "unstable";
     const footerText = !baselineCurrent
       ? "该候选基于旧的生效版本生成，不能再晋升；请拒绝它，并从当前生效版本重新生成候选。"
-      : !evaluation
-        ? "尚未与当前生效版本进行隔离评测。"
-        : canActivate
-          ? "已在当前生效版本基线上通过完整门槛，可由人工批准启用。"
-          : unstable
-            ? (evaluationResult.conclusion || "重复评测结论互相矛盾，系统已暂停形成优劣结论。")
-          : insufficient
-            ? (evaluationResult.conclusion || "评测证据不足或执行未完成，当前没有形成优劣结论。")
-            : "评测门槛未通过，不能进入生产。";
+      : activeJob
+        ? `${evaluationProgressText(activeJob)} 评测在后台队列里跑，完成后会自动刷新这里的结论。`
+        : !evaluation
+          ? "尚未与当前生效版本进行隔离评测。"
+          : canActivate
+            ? "已在当前生效版本基线上通过完整门槛，可由人工批准启用。"
+            : unstable
+              ? (evaluationResult.conclusion || "重复评测结论互相矛盾，系统已暂停形成优劣结论。")
+              : insufficient
+                ? (evaluationResult.conclusion || "评测证据不足或执行未完成，当前没有形成优劣结论。")
+                : "评测门槛未通过，不能进入生产。";
     return `<article class="learning-skill-card candidate ${selected ? "selected" : ""}" data-learning-select="${escapeHtml(id)}" tabindex="0">
       <div class="learning-skill-head"><div><span class="learning-skill-version">${escapeHtml(learningVersion(skill))}</span><h3>${escapeHtml(learningSkillTitle(skill))}</h3>${learningScopeTag(skill)}<small>${evidenceCount} 条来源证据${skill.createdAt || skill.created_at ? ` · ${escapeHtml(formatLearningDate(skill.createdAt || skill.created_at))}` : ""}</small></div><span class="learning-status ${statusClass}">${statusLabel}</span></div>
       <div class="learning-change-reason"><span>为什么提出这次变更</span><p>${escapeHtml(reason)}</p></div>
       ${sanitizationNote}
       ${rules.length ? `<details class="learning-change-details"><summary>查看 ${rules.length} 项候选执行配置</summary>${rules.map((rule) => `<p>${escapeHtml(rule)}</p>`).join("")}</details>` : ""}
-      <div class="learning-card-footer"><small>${escapeHtml(footerText)}</small><div class="learning-actions"><button class="button secondary small" type="button" data-learning-action="evaluate" data-skill-id="${escapeHtml(id)}" ${baselineCurrent ? "" : "disabled"}>${evaluation ? "重新评测" : "运行评测"}</button><button class="button primary small" type="button" data-learning-action="activate" data-skill-id="${escapeHtml(id)}" ${canActivate ? "" : "disabled"}>批准启用</button><button class="button ghost small danger" type="button" data-learning-action="reject" data-skill-id="${escapeHtml(id)}">拒绝</button></div></div>
+      <div class="learning-card-footer"><small>${escapeHtml(footerText)}</small><div class="learning-actions"><button class="button secondary small" type="button" data-learning-action="evaluate" data-skill-id="${escapeHtml(id)}" data-baseline-current="${baselineCurrent ? "1" : "0"}" data-has-evaluation="${evaluation ? "1" : "0"}" ${baselineCurrent && !activeJob ? "" : "disabled"}>${escapeHtml(activeJob ? evaluationProgressText(activeJob) : evaluation ? "重新评测" : "运行评测")}</button><button class="button primary small" type="button" data-learning-action="activate" data-skill-id="${escapeHtml(id)}" ${canActivate ? "" : "disabled"}>批准启用</button><button class="button ghost small danger" type="button" data-learning-action="reject" data-skill-id="${escapeHtml(id)}">拒绝</button></div></div>
     </article>`;
   }).join("");
 }
@@ -6740,10 +6863,16 @@ async function loadLearning(locale = state.learningLocale) {
   try {
     const scope = learningActionBody();
     const params = new URLSearchParams({ locale, contentType: scope.contentType, domain: scope.domain, project: scope.project });
-    state.learningData = await api(`/api/learning?${params}`);
+    // 评测任务清单和页面数据一起取：正在跑的候选一进页面就显示"评测中"，
+    // 而不是等用户再点一次"运行评测"才知道后台还在跑。
+    [state.learningData] = await Promise.all([
+      api(`/api/learning?${params}`),
+      loadLearningEvaluationJobs()
+    ]);
     state.learningLoading = false;
     state.conflictReport = null;
     renderLearning();
+    startLearningEvaluationWatch();
     // 规则冲突、固定质量资产、微调任务都是按「一个范围」结算的：全部视图下不拿
     // "跨范围"口径去问它们，免得给出看着像结论的混合数字。
     if (learningAllScopes()) renderLearningScopeBoundNotice();
@@ -6813,7 +6942,7 @@ function learningActionBody() {
 
 async function runLearningAction(skillId, action, button) {
   if (!skillId) return toast("技能缺少可操作的版本 ID");
-  if (action === "evaluate") return runSkillEvaluation(skillId, button);
+  if (action === "evaluate") return runSkillEvaluation(skillId);
   const prompts = { activate: "确认批准这个候选并替换当前生效版本？原版本仍可回滚。", reject: "确认拒绝这个候选版本？它会保留在审计记录中。", rollback: "确认回滚到上一已验证版本？当前版本不会被删除。" };
   if (prompts[action] && !confirm(prompts[action])) return;
   const original = button?.textContent;
@@ -6828,8 +6957,102 @@ async function runLearningAction(skillId, action, button) {
   }
 }
 
-async function runSkillEvaluation(skillId, button) {
-  const original = button?.textContent;
+/** 评测任务只在这几种状态下才算"还在跑"。 */
+const LEARNING_EVALUATION_ACTIVE_STATUSES = new Set(["queued", "running", "interrupted"]);
+
+function isActiveEvaluationJob(job) {
+  return Boolean(job) && LEARNING_EVALUATION_ACTIVE_STATUSES.has(String(job.status || ""));
+}
+
+function activeEvaluationJobs() {
+  return (state.learningEvaluationJobs || []).filter(isActiveEvaluationJob);
+}
+
+/** 某个候选正在跑的评测任务。历史行为只把这个状态写进按钮文字，重绘一次就丢。 */
+function activeEvaluationJobFor(skillId) {
+  const id = String(skillId || "");
+  return activeEvaluationJobs().find((job) => String(job.challengerId || job.challenger_id || "") === id) || null;
+}
+
+function evaluationProgressText(job) {
+  const requested = Number(job?.progress?.requested) || 0;
+  const completed = Number(job?.progress?.completed) || 0;
+  const failed = Number(job?.progress?.failed) || 0;
+  return `评测中 ${completed}/${requested}${failed ? `（${failed} 失败）` : ""}……`;
+}
+
+/**
+ * 评测任务清单（含已经跑完的）。全部视图下不能带作用域参数——服务端会拒绝通配值，
+ * 这时直接取全部任务，按 challengerId 匹配即可。
+ */
+async function loadLearningEvaluationJobs() {
+  const params = learningAllScopes() ? new URLSearchParams() : new URLSearchParams(learningActionBody());
+  try {
+    const payload = await api(`/api/learning/evaluation-jobs${params.size ? `?${params}` : ""}`);
+    state.learningEvaluationJobs = learningArray(payload.jobs);
+  } catch {
+    state.learningEvaluationJobs = [];
+  }
+  return state.learningEvaluationJobs;
+}
+
+let learningEvaluationTimer = 0;
+const LEARNING_EVALUATION_POLL_MS = 4000;
+
+/** 只更新进度文字，不整页重绘：用户可能正在看别的卡片。 */
+function syncLearningEvaluationProgress() {
+  for (const button of $$('[data-learning-action="evaluate"]')) {
+    const job = activeEvaluationJobFor(button.dataset.skillId);
+    button.disabled = button.dataset.baselineCurrent !== "1" || Boolean(job);
+    button.textContent = job
+      ? evaluationProgressText(job)
+      : button.dataset.hasEvaluation === "1" ? "重新评测" : "运行评测";
+  }
+}
+
+function stopLearningEvaluationWatch() {
+  if (learningEvaluationTimer) window.clearInterval(learningEvaluationTimer);
+  learningEvaluationTimer = 0;
+}
+
+function startLearningEvaluationWatch() {
+  if (!activeEvaluationJobs().length) { stopLearningEvaluationWatch(); return; }
+  learningEvaluationTimer ||= window.setInterval(() => { tickLearningEvaluationJobs(); }, LEARNING_EVALUATION_POLL_MS);
+}
+
+/**
+ * 跟踪在跑的评测：每个任务单独取一次状态，中途的网络抖动只跳过这一轮，
+ * 不再把"评测中"退回"运行评测"（那正是用户看到的假象）。
+ */
+async function tickLearningEvaluationJobs() {
+  const active = activeEvaluationJobs();
+  if (!active.length) { stopLearningEvaluationWatch(); return; }
+  let finished = null;
+  for (const job of active) {
+    const jobId = encodeURIComponent(job.jobId);
+    let fresh = null;
+    try { ({ job: fresh } = await api(`/api/learning/evaluation-jobs/${jobId}`)); }
+    catch { continue; }
+    if (fresh.status === "interrupted") {
+      try { ({ job: fresh } = await api(`/api/learning/evaluation-jobs/${jobId}/resume`, { method: "POST" })); }
+      catch (error) { toast(`评测任务无法续跑：${error.message}`); continue; }
+    }
+    state.learningEvaluationJobs = (state.learningEvaluationJobs || []).map((item) => item.jobId === fresh.jobId ? fresh : item);
+    if (["completed", "failed"].includes(fresh.status)) finished = fresh;
+  }
+  syncLearningEvaluationProgress();
+  if (!finished) return;
+  stopLearningEvaluationWatch();
+  if (finished.status === "completed") {
+    const report = finished.result?.report;
+    toast(report?.promotable ? "候选评测完成并通过晋升门槛，可批准启用" : `候选评测完成：${report?.conclusion || "未通过晋升门槛"}`);
+  } else {
+    toast(`评测任务失败：${finished.error || "未知错误"}`);
+  }
+  await loadLearning(state.learningLocale);
+}
+
+async function runSkillEvaluation(skillId) {
   try {
     const created = await api(`/api/learning/skills/${encodeURIComponent(skillId)}/evaluate`, { method: "POST", body: JSON.stringify(learningActionBody()) });
     if (!created.jobId) {
@@ -6839,50 +7062,12 @@ async function runSkillEvaluation(skillId, button) {
       return;
     }
     if (created.alreadyRunning) toast("该候选已有进行中的评测任务，已接续跟踪");
-    await watchEvaluationJob(created.jobId, button, original);
-    await loadLearning(state.learningLocale);
+    state.learningEvaluationJobs = [...(state.learningEvaluationJobs || []).filter((job) => job.jobId !== created.jobId), created.job];
+    renderLearning();
+    startLearningEvaluationWatch();
   } catch (error) {
     toast(error.message);
-    if (button) { button.disabled = false; button.textContent = original; }
   }
-}
-
-async function watchEvaluationJob(jobId, button, original) {
-  const deadline = Date.now() + 2 * 60 * 60 * 1000;
-  while (Date.now() < deadline) {
-    let job;
-    try {
-      ({ job } = await api(`/api/learning/evaluation-jobs/${encodeURIComponent(jobId)}`));
-    } catch (error) {
-      toast(error.message);
-      if (button) { button.disabled = false; button.textContent = original; }
-      return;
-    }
-    const { requested, completed, failed } = job.progress;
-    if (button) {
-      button.disabled = true;
-      button.textContent = `评测中 ${completed}/${requested}${failed ? `（${failed} 失败）` : ""}……`;
-    }
-    if (job.status === "interrupted") {
-      try {
-        ({ job } = await api(`/api/learning/evaluation-jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST" }));
-      } catch (error) {
-        toast(`评测任务无法续跑：${error.message}`);
-        return;
-      }
-    }
-    if (["completed", "failed"].includes(job.status)) {
-      if (job.status === "completed") {
-        const report = job.result?.report;
-        toast(report?.promotable ? "候选评测完成并通过晋升门槛，可批准启用" : `候选评测完成：${report?.conclusion || "未通过晋升门槛"}`);
-      } else {
-        toast(`评测任务失败：${job.error || "未知错误"}`);
-      }
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-  }
-  toast("评测任务长时间未结束，请稍后在学习中心查看");
 }
 
 /** 全部视图下的可选范围：项目里有轨迹的「语体 × 领域」，按条数排序。 */
@@ -7050,6 +7235,23 @@ function bindEvents() {
   $("#importAiCleaning")?.addEventListener("change", (event) => { state.assetImportAiCleaning = event.target.checked; });
   $("#importStyleEvidence")?.addEventListener("change", (event) => { state.assetImportStyleEvidence = event.target.checked; });
   $("#memoryStyleEvidence")?.addEventListener("change", (event) => { state.memoryStyleEvidence = event.target.checked; });
+  // 通知中心：铃铛开合、点外面或 Esc 关闭、点条目跳到对应页面。
+  $("#notificationBell")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setNotificationPanel($("#notificationPanel").hidden);
+  });
+  $("#notificationMarkRead")?.addEventListener("click", (event) => { event.stopPropagation(); setNotificationSeenAt(new Date().toISOString()); renderNotificationCenter(); });
+  $("#notificationPanel")?.addEventListener("click", (event) => event.stopPropagation());
+  $("#notificationList")?.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-notification-view]");
+    if (!item) return;
+    setNotificationPanel(false);
+    if (item.dataset.notificationView) switchView(item.dataset.notificationView);
+  });
+  document.addEventListener("click", () => { if (!$("#notificationPanel")?.hidden) setNotificationPanel(false); });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("#notificationPanel")?.hidden) setNotificationPanel(false);
+  });
   $("#assetPreflightDialog").addEventListener("close", () => { resolveAssetPreflight(); refreshActions(); });
   $("#assetPreflightClose").addEventListener("click", () => closeAssetPreflightDialog());
   $("#importPreflightResumeOpen")?.addEventListener("click", () => reopenAssetPreflight());
@@ -7514,6 +7716,7 @@ async function initialize() {
     updateAutoQaLocale(state.autoQaLocale);
     refreshActions();
     await restoreBatchProgress();
+    startNotificationPolling();
   } catch (error) {
     $("#serverStatus").textContent = "连接失败";
     $("#providerLabel").textContent = error.message;
