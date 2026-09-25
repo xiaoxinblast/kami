@@ -73,6 +73,7 @@ import {
   saveDirectusLearningTrajectory,
   listDirectusLearningTrajectories,
   countDirectusLearningTrajectoriesByScope,
+  countDirectusLearningTrajectoriesByFile,
   getDirectusLearningTrajectory,
   updateDirectusLearningTrajectory,
   saveDirectusTranslationSkill,
@@ -1349,6 +1350,28 @@ async function getJsonLearningTrajectory(id) {
   return items.find((item) => item.id === String(id)) || null;
 }
 
+/**
+ * 记忆库文件层用：每个来源文件各有多少条学习轨迹、其中多少条已经有人工终稿。
+ * 这里不做 status 过滤——文件层要回答的是"这个文件有没有被学习过"，
+ * 而不是"够不够格拿去蒸馏"。人工终稿的来源只有一种：人工接受或外部审校回填，
+ * 两者都会把 human_decision.accepted 置为 true。
+ */
+async function countJsonLearningTrajectoriesByFile({ locale, project = "" } = {}) {
+  const items = await readJson(learningPath("trajectories.json"), []);
+  const counts = new Map();
+  for (const item of items) {
+    if (locale && item.locale !== locale) continue;
+    if (project && (item.project || "default") !== project) continue;
+    const sourceFile = String(item.assetRefs?.sourceFile || item.assetRefs?.source_file || "").trim();
+    if (!sourceFile) continue;
+    const entry = counts.get(sourceFile) || { sourceFile, count: 0, humanReviewed: 0 };
+    entry.count += 1;
+    if (item.humanDecision?.accepted === true) entry.humanReviewed += 1;
+    counts.set(sourceFile, entry);
+  }
+  return [...counts.values()];
+}
+
 async function updateJsonLearningTrajectory(id, patch) {
   return saveJsonLearningTrajectory({ ...patch, id: String(id), _mustExist: true });
 }
@@ -2048,6 +2071,11 @@ export async function listLearningTrajectories(filters) {
 
 export async function countLearningTrajectoriesByScope(filters) {
   return usesDirectus() ? countDirectusLearningTrajectoriesByScope(filters) : countJsonLearningTrajectoriesByScope(filters);
+}
+
+/** 记忆库文件层：每个来源文件的学习轨迹条数与其中的人工终稿条数。 */
+export async function countLearningTrajectoriesByFile(filters) {
+  return usesDirectus() ? countDirectusLearningTrajectoriesByFile(filters) : countJsonLearningTrajectoriesByFile(filters);
 }
 
 export async function getLearningTrajectory(id) {

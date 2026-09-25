@@ -265,6 +265,19 @@ select { min-width: 150px; }
 .import-purpose-option:has(input:checked) > span { color: var(--forest); }
 .import-purpose-option:has(input:checked) > small { color: #6c7d74; }
 .import-purpose-option:has(input:focus-visible) { outline: 2px solid var(--lime-deep); outline-offset: 2px; }
+/* 只靠一层浅阴影看不出"选的是哪一边"：给选中项加一圈内描边、左侧色条和「已选」标记。
+   用 inset 阴影而不是 border，切换时不会把选项挤出 1px。 */
+.import-purpose-option:has(input:checked) { box-shadow: inset 0 0 0 1.5px var(--forest), 0 4px 12px rgba(18,62,49,.08); }
+.import-purpose-option:has(input:checked)::before { content: ""; position: absolute; inset: 7px auto 7px 0; width: 3px; border-radius: 0 3px 3px 0; background: var(--forest); }
+.import-purpose-option:has(input:checked)::after { content: "已选"; position: absolute; top: 7px; right: 9px; padding: 1px 6px; border-radius: 999px; color: #fff; background: var(--forest); font-size: 10px; font-weight: 800; }
+.import-purpose-option:has(input:checked) > span { padding-right: 40px; }
+.preflight-purpose { margin: 12px 0 13px; background: #fbfdf9; }
+/* 预检关掉后的续入口：页面上常驻一条提示，不必靠"顶部按钮换了文案"去猜。 */
+.import-resume { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 11px 13px; border: 1px solid #d9e3d6; border-left: 3px solid var(--forest); border-radius: 10px; background: #f6faf4; }
+.import-resume > div:first-child { display: grid; gap: 2px; }
+.import-resume strong { color: var(--forest); font-size: 13px; }
+.import-resume small { color: #5b6861; font-size: 11px; }
+.import-resume-actions { display: flex; gap: 8px; }
 
 /* 勾选项：自绘方框，避免不同浏览器/缩放下原生复选框尺寸不一致。 */
 .import-toggle { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 9px; align-items: start; cursor: pointer; }
@@ -1190,7 +1203,7 @@ dialog::backdrop { background: rgba(14,28,22,.45); }
 .library-breadcrumb small { color: var(--muted); font-size: 11px; }
 .library-table-wrap { margin: 14px 0 6px; border: 1px solid var(--line); border-radius: 14px; overflow: auto; }
 .library-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.library-table th { position: sticky; top: 0; z-index: 1; padding: 11px 12px; color: #6c776f; background: #f5f6f1; text-align: left; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+.library-table th { position: sticky; top: 0; z-index: 1; padding: 11px 12px; color: #6c776f; background: #f5f6f1; text-align: left; font-size: 11px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; }
 .library-table td { padding: 12px; border-top: 1px solid #eceee9; vertical-align: middle; }
 .library-table tr:first-child td { border-top: 0; }
 .library-table td small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
@@ -1214,6 +1227,21 @@ dialog::backdrop { background: rgba(14,28,22,.45); }
 .library-toggle input:checked + span::after { transform: translateX(15px); }
 .library-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .library-actions .button { white-space: nowrap; }
+/* 优先顺序：数字旁边就要能直接调，不然"优先"这一列只能看不能改。 */
+.library-priority { display: inline-flex; align-items: center; gap: 4px; }
+.library-priority strong { font-variant-numeric: tabular-nums; }
+.priority-step { width: 22px; height: 22px; padding: 0; border: 1px solid #dfe4dc; border-radius: 6px; color: #4c5a51; background: #fff; font-size: 11px; line-height: 1; cursor: pointer; }
+.priority-step:hover:not(:disabled) { border-color: var(--forest); color: var(--forest); }
+.priority-step:disabled { opacity: .38; cursor: default; }
+/* 文件层的状态：翻译进度与人工审校各一个徽标，颜色按"完成 / 进行中 / 未知"分。 */
+.file-state { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 800; white-space: nowrap; background: #eef1ea; color: #48584c; }
+.file-state.is-done { color: #2f6b45; background: #e6f1e6; }
+.file-state.is-running { color: #7b5217; background: #fff0d5; }
+.file-state.is-failed { color: #b23a32; background: #fae9e7; }
+.file-state.is-pending { color: #3f5b7a; background: #e8eff7; }
+.file-state.is-unknown { color: #6b7568; background: #eef1ea; }
+/* 面板标题右侧：新增库入口和计数排在一起。 */
+.panel-head-actions { display: flex; align-items: center; gap: 8px; }
 /* ghost + danger 会撞车：.ghost 把背景清空、.danger 又把文字写成白色，
    结果删除按钮变成"白字白底"。这里按行内危险操作该有的样子定死配色。 */
 .button.ghost.danger { color: #b23a32; background: transparent; border-color: transparent; box-shadow: none; }

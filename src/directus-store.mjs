@@ -2176,6 +2176,41 @@ export async function getDirectusLearningTrajectory(id) {
   }
 }
 
+/**
+ * 记忆库文件层用：每个来源文件各有多少条学习轨迹、其中多少条已经有人工终稿。
+ *
+ * 来源文件存在 asset_refs 里（JSON 字段没法 groupBy，也没有独立的列），所以只能扫一遍
+ * 明细；limit 给 2000 与学习中心的范围聚合保持一致。批次的 asset_refs 缺失时退回批次
+ * 文件名（批次可能已被删，所以只作为兜底）。status 这里故意不过滤：文件层要回答的是
+ * "这个文件有没有被学习过"，而不是"够不够格拿去蒸馏"。
+ */
+export async function countDirectusLearningTrajectoriesByFile({ locale, project = "" } = {}) {
+  const params = new URLSearchParams({ limit: "2000", fields: "asset_refs,batch_id,human_decision" });
+  params.set("filter[target_locale][_eq]", assertLocale(locale));
+  if (project) params.set("filter[project][_eq]", String(project));
+  const rows = await request(`/items/learning_trajectories?${params}`).catch(() => []);
+  const batchIds = [...new Set((rows || []).map((row) => String(row.batch_id || "")).filter(Boolean))];
+  const fileNameByBatch = new Map();
+  for (let index = 0; index < batchIds.length; index += 50) {
+    const chunk = batchIds.slice(index, index + 50);
+    const batchParams = new URLSearchParams({ limit: "-1", fields: "id,filename" });
+    batchParams.set("filter[id][_in]", chunk.join(","));
+    const batchRows = await request(`/items/batch_runs?${batchParams}`).catch(() => []);
+    for (const row of batchRows || []) fileNameByBatch.set(String(row.id || ""), String(row.filename || ""));
+  }
+  const counts = new Map();
+  for (const row of rows || []) {
+    const assetRefs = directusJson(row.asset_refs, []);
+    const sourceFile = String(assetRefs?.sourceFile || assetRefs?.source_file || fileNameByBatch.get(String(row.batch_id || "")) || "").trim();
+    if (!sourceFile) continue;
+    const entry = counts.get(sourceFile) || { sourceFile, count: 0, humanReviewed: 0 };
+    entry.count += 1;
+    if (directusJson(row.human_decision, {})?.accepted === true) entry.humanReviewed += 1;
+    counts.set(sourceFile, entry);
+  }
+  return [...counts.values()];
+}
+
 export async function updateDirectusLearningTrajectory(id, patch) {
   const existing = await getDirectusLearningTrajectory(id);
   if (!existing) return null;

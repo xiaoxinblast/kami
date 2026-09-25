@@ -105,3 +105,70 @@ test("预检逐个文件进行，并在界面上显示清单、进度与失败�
   assert.match(server, /async function readJsonBody\(req, \{ limitBytes = MAX_BODY_BYTES \} = \{\}\)/u);
   assert.match(server, /请求内容超过 \$\{megabytes\}MB 限制，请减少文件数量或改用更小的文件/u);
 });
+
+test("预检弹窗里能直接改去向，关掉后还能重新打开", async () => {
+  const [html, script, styles] = await Promise.all([
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8")
+  ]);
+  // 弹窗里直接给类型单选与目标库下拉，不再只有一行只读文字。
+  assert.match(html, /id="assetPreflightPurposeRow"/u);
+  assert.match(html, /name="assetPreflightPurpose" value="term"/u);
+  assert.match(html, /name="assetPreflightPurpose" value="tm"/u);
+  assert.match(html, /id="assetPreflightTermLibrary"/u);
+  assert.match(html, /id="assetPreflightTmLibrary"/u);
+  assert.match(script, /function renderAssetPreflightDestination\(\)/u);
+  assert.match(script, /function fillLibrarySelect\(select, libraries, preferredId, preferMaster = false\)/u);
+  assert.match(script, /state\.importTermLibraryId = fillLibrarySelect\(\$\("#assetPreflightTermLibrary"\), state\.assetLibraries, state\.importTermLibraryId\)/u);
+  // 人工 TM 是整批进 TM：页面与弹窗里的"术语写入库"都要收起。
+  assert.match(script, /const termRow = \$\("#importTermLibraryRow"\);\s*\n\s*if \(termRow\) termRow\.hidden = purpose !== "term";/u);
+  assert.match(script, /const termRow = \$\("#assetPreflightTermLibraryRow"\);\s*\n\s*if \(termRow\) termRow\.hidden = purpose !== "term";/u);
+  // 选中态要一眼看得出选的是哪一边：内描边 + 左侧色条 + 「已选」标记。
+  assert.match(styles, /\.import-purpose-option:has\(input:checked\)::after \{ content: "已选"/u);
+  // 关掉预检后页面里留一条提示，能再打开或重跑；关窗要走 refreshActions 才会更新。
+  assert.match(html, /id="importPreflightResume"/u);
+  assert.match(html, /id="importPreflightResumeOpen"/u);
+  assert.match(script, /function renderImportResume\(\)/u);
+  assert.match(script, /function closeAssetPreflightDialog\(\) \{[\s\S]{0,200}?refreshActions\(\);/u);
+  assert.match(script, /\$\("#assetPreflightDialog"\)\.addEventListener\("close", \(\) => \{ resolveAssetPreflight\(\); refreshActions\(\); \}\)/u);
+});
+
+test("术语库、记忆库与导入页都能直接新增库，优先级也能在列表里调", async () => {
+  const [html, script, settings] = await Promise.all([
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/project-settings.js", import.meta.url), "utf8")
+  ]);
+  assert.match(html, /id="assetAddLibrary"/u);
+  assert.match(html, /id="memoryAddLibrary"/u);
+  assert.match(html, /id="importAddLibrary"/u);
+  assert.match(script, /function openProjectLibraries\(\{ addKind = "" \} = \{\}\)/u);
+  assert.match(script, /\$\("#assetAddLibrary"\)\?\.addEventListener\("click", \(\) => openProjectLibraries\(\{ addKind: "term_base" \}\)\)/u);
+  assert.match(script, /\$\("#memoryAddLibrary"\)\?\.addEventListener\("click", \(\) => openProjectLibraries\(\{ addKind: "translation_memory" \}\)\)/u);
+  // 面板侧：带 addKind 打开时直接摆好新库草稿并聚焦名称，不另建一套库 CRUD。
+  assert.match(settings, /open\(project, libraries, \{ initialTab = "libraries", addKind = "" \} = \{\}\)/u);
+  assert.match(settings, /function addLibrary\(kind\)/u);
+  assert.match(settings, /if \(\["term_base", "translation_memory"\]\.includes\(addKind\)\) \{/u);
+  // 列表里的 ↑ ↓ 与面板同一套口径：换位后同类库重排成连续的 1、2、3…
+  assert.match(script, /async function moveLibraryPriority\(kind, libraryId, direction\)/u);
+  assert.match(script, /data-library-action="priority"/u);
+});
+
+test("工作 TM 的文件层显示翻译进度与人工审校回填", async () => {
+  const [html, script, styles, server] = await Promise.all([
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../server.mjs", import.meta.url), "utf8")
+  ]);
+  assert.match(html, /<th>翻译进度<\/th><th>学习轨迹 \/ 人工审校<\/th>/u);
+  assert.match(script, /function libraryFileProgressMarkup\(file\)/u);
+  assert.match(script, /function libraryFileLearningMarkup\(file\)/u);
+  assert.match(script, /双语资产导入只回填已有机器稿；跑过一次批次翻译后才有轨迹/u);
+  assert.match(styles, /\.file-state\.is-done/u);
+  // 服务端把"同名批次的进度"和"按来源文件分桶的轨迹"挂到文件行上。
+  assert.match(server, /const \[runs, trajectoryCounts\] = await Promise\.all\(\[/u);
+  assert.match(server, /countLearningTrajectoriesByFile\(\{ locale, project: projectId \}\)/u);
+  assert.match(server, /learning: \{ count: Number\(learning\?\.count\) \|\| 0, humanReviewed: Number\(learning\?\.humanReviewed\) \|\| 0 \}/u);
+});

@@ -20,6 +20,7 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   let importedGuide = false;
+  let commitBody = null;
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     const errors = [];
@@ -35,6 +36,14 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
       else if (path === "/api/health") payload = { ok: true, version: "0.7.0" };
       else if (path === "/api/projects") payload = { projects: [{ id: "project-1", name: "测试项目", settings: createDefaultProjectSettings() }] };
       else if (path === "/api/assets") payload = { locale: "zh-CN", revision: 0, terms: [] };
+      else if (path === "/api/projects/project-1/libraries") payload = {
+        projectId: "project-1",
+        libraries: [
+          { id: "term-1", name: "术语库", kind: "term_base", role: "reference", enabled: true, priority: 1 },
+          { id: "term-2", name: "角色术语", kind: "term_base", role: "reference", enabled: true, priority: 2 },
+          { id: "tm-master", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1 }
+        ]
+      };
       else if (path === "/api/memories") payload = { memories: [] };
       else if (path === "/api/feedback/pending" || path === "/api/feedback") payload = [];
       else if (path === "/api/qa-cases/pending") payload = [];
@@ -47,6 +56,10 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
         files: [{ filename: "terms.xlsx", type: "xlsx", entries: 2, defaultPurpose: "tm", anomalies: [] }],
         candidates: [{ sourceFile: "terms.xlsx", source: "用語", target: "术语", locale: "zh-CN", selected: true }]
       };
+      else if (path === "/api/assets-import/commit") {
+        commitBody = JSON.parse(request.postData() || "{}");
+        payload = { taskId: "", batchId: "batch-1", accepted: 1 };
+      }
       else if (path === "/api/style-guides/import") {
         importedGuide = true;
         payload = { filename: "项目风格指南.md", characters: 9, profile: { id: "guide-1" } };
@@ -61,11 +74,38 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     assert.equal(await page.locator("#assetPreflightAiRow").isHidden(), false);
     assert.equal(await page.locator("#assetPreflightAiCleaning").isChecked(), false);
     assert.match(await page.locator("#assetPreflightSummary").textContent(), /按表直接导入/u);
+    // 弹窗里就能改去向：切到人工 TM 后术语库那一栏要收起，目标库跟着换成主 TM。
+    assert.equal(await page.locator("#assetPreflightTermLibraryRow").isHidden(), false);
+    assert.equal(await page.locator("#assetPreflightTermLibrary").inputValue(), "term-1");
+    // 选项本身就是 label：点击要像真实用户那样点整块，而不是硬点被裁剪掉的 input。
+    await page.locator('label.import-purpose-option:has(input[name="assetPreflightPurpose"][value="tm"])').click();
+    assert.equal(await page.locator("#assetPreflightTermLibraryRow").isHidden(), true, "人工 TM 不该再让人选术语库");
+    assert.match(await page.locator("#assetPreflightTarget").textContent(), /人工 TM → 主 TM/u);
+    // 这里选的库就是提交时带上的库：换一个术语库再切回来。
+    await page.locator('label.import-purpose-option:has(input[name="assetPreflightPurpose"][value="term"])').click();
+    assert.equal(await page.locator("#assetPreflightTermLibraryRow").isHidden(), false);
+    await page.locator("#assetPreflightTermLibrary").selectOption("term-2");
+    assert.match(await page.locator("#assetPreflightTarget").textContent(), /术语 → 角色术语/u);
+    await page.locator("#assetPreflightConfirm").click();
+    await page.waitForFunction(() => /已提交后台导入/.test(document.querySelector("#assetPreflightSummary")?.textContent || ""));
+    assert.equal(commitBody?.purpose, "term");
+    assert.equal(commitBody?.termLibraryId, "term-2", "弹窗里换的库必须进提交体");
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/term-library-upload.png`, animations: "disabled" });
     }
     await page.locator('[data-close="assetPreflightDialog"]').first().click();
+    // 关掉预检后导入页要留一条能再打开的入口，而且说的是现状（已提交），不是"还没确认"。
+    await page.waitForFunction(() => document.querySelector("#assetPreflightDialog")?.open === false);
+    await page.getByRole("button", { name: "双语资产导入" }).click();
+    await page.waitForSelector("#importPreflightResume:not([hidden])");
+    assert.match(await page.locator("#importPreflightResumeTitle").textContent(), /已提交后台导入：1 个文件、2 条双语条目/u);
+    assert.equal(await page.locator("#importPreflightResumeReset").isHidden(), true, "已提交后不该再提供重新预检");
+    await page.locator("#importPreflightResumeOpen").click();
+    await page.waitForSelector("#assetPreflightDialog[open]");
+    if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/asset-preflight-destination.png`, animations: "disabled" });
+    await page.locator('[data-close="assetPreflightDialog"]').first().click();
+    await page.waitForFunction(() => document.querySelector("#assetPreflightDialog")?.open === false);
     await page.getByRole("button", { name: "风格指导" }).click();
     await page.locator("#styleGuideFile").setInputFiles({ name: "项目风格指南.md", mimeType: "text/markdown", buffer: Buffer.from("对白使用自然口语。", "utf8") });
     assert.equal(await page.locator("#styleGuideImportButton").isDisabled(), false);

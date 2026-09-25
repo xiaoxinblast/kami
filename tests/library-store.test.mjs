@@ -10,6 +10,13 @@ const termRows = [
 const memoryRows = [
   { id: "m1", source: "メンテナンスは明日開始します。", target: "维护明天开始。", entry_key: "ID-1", quality_status: "human_approved", qa_score: 100, provenance: "table-import", source_file: "a.xlsx", source_row: 2, project_id: "project-a", library_id: "tm-master", date_created: "2026-09-18T10:14:14Z" }
 ];
+// 文件层的两个信号：轨迹自带 asset_refs.sourceFile；缺失时退回批次文件名。
+const trajectoryRows = [
+  { id: "tr-1", target_locale: "zh-CN", project: "project-a", batch_id: "batch-a", asset_refs: { sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff" }, human_decision: { accepted: true } },
+  { id: "tr-2", target_locale: "zh-CN", project: "project-a", batch_id: "batch-a", asset_refs: { sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff" }, human_decision: null },
+  { id: "tr-3", target_locale: "zh-CN", project: "project-a", batch_id: "batch-c", asset_refs: null, human_decision: { accepted: true } }
+];
+const batchRows = [{ id: "batch-c", filename: "Trophy.xlsx_zho-CN.mqxliff" }];
 
 async function readBody(req) {
   const chunks = [];
@@ -26,7 +33,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname.startsWith("/items/")) {
     requests.push({ method: "GET", collection, query: url.search, fields });
     const grouped = url.searchParams.getAll("groupBy[]");
-    if (grouped.length) {
+    if (collection === "learning_trajectories") {
+      data = trajectoryRows;
+    } else if (collection === "batch_runs") {
+      const wanted = (url.searchParams.get("filter[id][_in]") || "").split(",").filter(Boolean);
+      data = wanted.length ? batchRows.filter((row) => wanted.includes(row.id)) : batchRows;
+    } else if (grouped.length) {
       if (grouped.includes("library_id")) {
         // 库统计：术语只按库分组；TM 还按来源文件分组，用来算"几个文件"。
         data = collection === "terms_zh_cn"
@@ -80,6 +92,7 @@ process.env.DIRECTUS_TOKEN = "test-token";
 const {
   deleteDirectusLibraryEntries,
   deleteDirectusMemory,
+  countDirectusLearningTrajectoriesByFile,
   getDirectusAsset,
   getDirectusLibraryStats,
   listDirectusLibraryFiles,
@@ -112,6 +125,22 @@ test("文件清单把同一文件的多个批次合并成一行，按最近更�
   assert.equal(files[0].lastEntryAt, "2026-09-18T11:00:00Z");
   const query = requests.find((call) => call.query.includes("groupBy%5B%5D=source_file"));
   assert.ok(query.query.includes("filter%5Blibrary_id%5D%5B_eq%5D=tm-master"), "文件清单要限定在打开的库里");
+});
+
+test("文件层轨迹统计按来源文件分桶，并单独数出人工终稿", async () => {
+  requests.length = 0;
+  const counts = await countDirectusLearningTrajectoriesByFile({ locale: "zh-CN", project: "project-a" });
+  const byFile = new Map(counts.map((item) => [item.sourceFile, item]));
+  assert.deepEqual(byFile.get("Asia_batch18_new.xlsx_zho-CN.mqxliff"), {
+    sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff", count: 2, humanReviewed: 1
+  }, "同一文件的轨迹要合并计数，人工终稿单独数");
+  assert.deepEqual(byFile.get("Trophy.xlsx_zho-CN.mqxliff"), {
+    sourceFile: "Trophy.xlsx_zho-CN.mqxliff", count: 1, humanReviewed: 1
+  }, "asset_refs 缺 sourceFile 时退回批次文件名");
+  assert.equal(counts.length, 2);
+  const query = requests.find((call) => call.collection === "learning_trajectories");
+  assert.ok(query.query.includes("filter%5Btarget_locale%5D%5B_eq%5D=zh-CN"), "轨迹要按目标语言过滤");
+  assert.ok(query.query.includes("filter%5Bproject%5D%5B_eq%5D=project-a"), "轨迹要按项目过滤");
 });
 
 test("库条目列表按库过滤、分页并映射术语/TM 两种字段", async () => {

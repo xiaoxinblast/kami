@@ -146,6 +146,19 @@ export function createProjectSettingsPanel(dialog, { api, onSaved }) {
     }
   }
 
+  /**
+   * 加一条资源库草稿。面板里的「添加」按钮和术语库 / 记忆库 / 导入页的
+   * 「＋ 新增库」入口都走这里，避免两套新增流程各自演化。
+   */
+  function addLibrary(kind) {
+    const key = `new-${crypto.randomUUID()}`;
+    draft.libraries.push({ key, name: "", kind, role: "reference", priority: draft.libraries.filter((library) => library.kind === kind).length + 1, enabled: true });
+    renderLibraries();
+    find(`[data-library="${key}"] input`).focus();
+    if (validationShown) showErrors();
+    updateStatus();
+  }
+
   function fieldMarkup(field) {
     return `<div class="ps-setting-row"><label for="ps-${field.key}"><strong>${field.label}</strong><small>${field.hint}</small></label><div class="ps-value"><div class="ps-number"><input id="ps-${field.key}" data-setting="${field.key}" data-error-key="${field.key}" aria-describedby="ps-range-${field.key} ps-error-${field.key}" type="number" min="${field.min}" max="${field.max}" step="1" value="${getValue(draft.settings, field.key)}" required><span>${field.unit}</span></div><small id="ps-range-${field.key}">${field.min}–${field.max} ${field.unit}</small><small class="ps-error" id="ps-error-${field.key}" data-error="${field.key}"></small></div></div>`;
   }
@@ -258,15 +271,7 @@ export function createProjectSettingsPanel(dialog, { api, onSaved }) {
     if (button.matches("[data-close-settings], [data-cancel-settings]")) requestClose();
     if (button.matches("[data-keep-editing]")) { find("[data-discard-prompt]").hidden = true; find("[data-save]").focus(); }
     if (button.matches("[data-discard]")) dialog.close();
-    if (button.dataset.addLibrary) {
-      const key = `new-${crypto.randomUUID()}`;
-      const kind = button.dataset.addLibrary;
-      draft.libraries.push({ key, name: "", kind, role: "reference", priority: draft.libraries.filter((library) => library.kind === kind).length + 1, enabled: true });
-      renderLibraries();
-      find(`[data-library="${key}"] input`).focus();
-      if (validationShown) showErrors();
-      updateStatus();
-    }
+    if (button.dataset.addLibrary) addLibrary(button.dataset.addLibrary);
     if (button.dataset.move) {
       const current = draft.libraries.findIndex((library) => library.key === button.dataset.key);
       const peers = draft.libraries.map((library, index) => ({ library, index })).filter(({ library }) => library.kind === draft.libraries[current].kind);
@@ -320,7 +325,7 @@ export function createProjectSettingsPanel(dialog, { api, onSaved }) {
   dialog.addEventListener("change", edit);
 
   return {
-    open(project, libraries, { initialTab = "libraries" } = {}) {
+    open(project, libraries, { initialTab = "libraries", addKind = "" } = {}) {
       draft = createProjectDraft(project, libraries);
       initial = signature();
       validationShown = false;
@@ -340,7 +345,14 @@ export function createProjectSettingsPanel(dialog, { api, onSaved }) {
       selectTab(tabs.some((item) => item.id === initialTab) ? initialTab : "libraries");
       updateStatus();
       dialog.showModal();
-      find('[data-tab="libraries"]').focus();
+      // 从术语库 / 记忆库 / 导入页的「＋ 新增库」进来时，直接把新库草稿摆好并聚焦名称，
+      // 用户只需要填名字再保存。
+      if (["term_base", "translation_memory"].includes(addKind)) {
+        selectTab("libraries");
+        addLibrary(addKind);
+      } else {
+        find('[data-tab="libraries"]').focus();
+      }
     }
   };
 }

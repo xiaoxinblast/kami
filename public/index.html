@@ -240,10 +240,18 @@
                 <div class="import-target-row" id="importTargetRow">
                   <label id="importTermLibraryRow"><span>术语写入库</span><select id="importTermLibrary"></select></label>
                   <label id="importTmLibraryRow"><span>句段写入库</span><select id="importTmLibrary"></select></label>
-                  <small class="import-target-note">下拉来自「项目设置 → 资源库」，只有启用的库会被写入。</small>
+                  <small class="import-target-note">只有启用的库会被写入；这里缺库时可直接新增，新增与优先级在同一个面板里完成。</small>
+                  <button class="button ghost small" type="button" id="importAddLibrary">＋ 新增库 / 调优先级</button>
                 </div>
                 <label class="import-toggle" id="importAiCleaningRow"><input type="checkbox" id="importAiCleaning" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>导入前先做 AI 清洗</strong><small>默认按表直接导入；打开后让模型逐条判定术语 / 句段，几千行会明显变慢。</small></span></label>
                 <label class="import-toggle"><input type="checkbox" id="importStyleEvidence" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>作为风格学习证据</strong><small>人工 TM 默认勾选；术语表默认不勾。</small></span></label>
+              </div>
+              <div class="import-resume" id="importPreflightResume" hidden>
+                <div><strong id="importPreflightResumeTitle">预检结果还没确认</strong><small id="importPreflightResumeMeta"></small></div>
+                <div class="import-resume-actions">
+                  <button class="button primary small" type="button" id="importPreflightResumeOpen">打开导入预检</button>
+                  <button class="button ghost small" type="button" id="importPreflightResumeReset">重新预检</button>
+                </div>
               </div>
               <label class="drop-zone" id="dropZone" for="termFile">
                 <input id="termFile" type="file" accept=".xlsx,.csv,.xliff,.mqxliff" multiple hidden />
@@ -320,7 +328,7 @@
         <section class="view" id="view-assets">
           <div class="locale-strip" id="assetLocales" aria-label="资产语言"></div>
           <article class="panel asset-list-panel">
-            <div class="panel-head"><div><span class="card-kicker">TERM BASE LIBRARIES</span><h2 id="assetListTitle">简体中文术语库</h2><p class="panel-caption">按库管理术语：库的设置与「项目设置 → 资源库」是同一份数据，只有启用的库才参与翻译检索。</p></div><div class="asset-count" id="assetRevision">0 条</div></div>
+            <div class="panel-head"><div><span class="card-kicker">TERM BASE LIBRARIES</span><h2 id="assetListTitle">简体中文术语库</h2><p class="panel-caption">按库管理术语：库的设置与「项目设置 → 资源库」是同一份数据，只有启用的库才参与翻译检索。新增库从这里进，优先级用列表里的 ↑ ↓ 直接调。</p></div><div class="panel-head-actions"><button class="button secondary small" type="button" id="assetAddLibrary">＋ 新增库</button><div class="asset-count" id="assetRevision">0 条</div></div></div>
             <div class="library-breadcrumb" id="assetBreadcrumb" hidden>
               <button class="button ghost small" type="button" id="assetBreadcrumbBack">← 返回库列表</button>
               <div><strong id="assetBreadcrumbName">术语库</strong><small id="assetBreadcrumbMeta"></small></div>
@@ -346,7 +354,7 @@
         <section class="view" id="view-memories">
           <div class="locale-strip" id="memoryLocales" aria-label="记忆库语言"></div>
           <article class="panel asset-list-panel">
-            <div class="panel-head"><div><span class="card-kicker">TRANSLATION MEMORY LIBRARIES</span><h2>记忆库 TM</h2><p class="panel-caption">主 TM 接收人工确认译文，工作 TM 接收通过 QA 的机器译文，参考 TM 只读参与检索。库设置与「项目设置 → 资源库」同步。</p></div><div class="asset-count" id="memoryCount">0 条</div></div>
+            <div class="panel-head"><div><span class="card-kicker">TRANSLATION MEMORY LIBRARIES</span><h2>记忆库 TM</h2><p class="panel-caption">主 TM 接收人工确认译文，工作 TM 接收通过 QA 的机器译文，参考 TM 只读参与检索。库设置与「项目设置 → 资源库」同步，新增库从这里进，优先级用列表里的 ↑ ↓ 直接调。</p></div><div class="panel-head-actions"><button class="button secondary small" type="button" id="memoryAddLibrary">＋ 新增库</button><div class="asset-count" id="memoryCount">0 条</div></div></div>
             <div class="library-breadcrumb" id="memoryBreadcrumb" hidden>
               <button class="button ghost small" type="button" id="memoryBreadcrumbBack">← 返回库列表</button>
               <div><strong id="memoryBreadcrumbName">主 TM</strong><small id="memoryBreadcrumbMeta"></small><small class="library-crumb" id="memoryBreadcrumbFile" hidden></small></div>
@@ -363,7 +371,7 @@
             <div id="memoryFilesView" hidden>
               <div class="library-table-wrap">
                 <table class="library-table">
-                  <thead><tr><th>来源文件</th><th>条目数</th><th>批次</th><th>最近更新</th><th>操作</th></tr></thead>
+                  <thead><tr><th>来源文件</th><th>条目数</th><th>翻译进度</th><th>学习轨迹 / 人工审校</th><th>最近更新</th><th>操作</th></tr></thead>
                   <tbody id="memoryFileBody"></tbody>
                 </table>
               </div>
@@ -681,6 +689,18 @@
         <div class="dialog-head"><div><span class="card-kicker">ASSET PREFLIGHT</span><h2>确认双语资产去向</h2></div><button class="icon-button" type="button" data-close="assetPreflightDialog" aria-label="关闭">×</button></div>
         <p class="panel-caption" id="assetPreflightSummary">正在本地识别文件……</p>
         <p class="panel-caption" id="assetPreflightTarget"></p>
+        <div class="import-purpose preflight-purpose" id="assetPreflightPurposeRow">
+          <div class="import-purpose-head"><span>入库去向</span><small>这里选的就是最终去向，换库不用退回上一页</small></div>
+          <div class="import-purpose-switch" role="radiogroup" aria-label="预检入库类型">
+            <label class="import-purpose-option"><input type="radio" name="assetPreflightPurpose" value="term" /><span>术语表</span><small>短词条入术语库，完整句段入主 TM</small></label>
+            <label class="import-purpose-option"><input type="radio" name="assetPreflightPurpose" value="tm" /><span>人工 TM</span><small>整批作为人工确认译文写入主 TM</small></label>
+          </div>
+          <div class="import-target-row">
+            <label id="assetPreflightTermLibraryRow"><span>术语写入库</span><select id="assetPreflightTermLibrary"></select></label>
+            <label id="assetPreflightTmLibraryRow"><span>句段写入库</span><select id="assetPreflightTmLibrary"></select></label>
+            <button class="button ghost small" type="button" id="assetPreflightAddLibrary">＋ 新增库 / 调优先级</button>
+          </div>
+        </div>
         <div class="asset-preflight-options" id="assetPreflightOptions">
           <label class="import-toggle" id="assetPreflightAiRow"><input type="checkbox" id="assetPreflightAiCleaning" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>先做 AI 清洗</strong><small>默认按表直接导入（本地规则分流）；打开后模型逐条判定，几千行会明显变慢。</small></span></label>
           <label class="import-toggle"><input type="checkbox" id="assetPreflightStyleEvidence" /><span class="import-toggle-box" aria-hidden="true"></span><span class="import-toggle-copy"><strong>作为风格学习证据</strong><small>人工 TM 默认写入证据池；术语表默认只写术语库与主 TM。</small></span></label>

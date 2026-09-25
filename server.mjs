@@ -13,7 +13,7 @@ import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, al
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
 import { chunkReferencePages, extractReferenceFile, scanReferenceRisk } from "./src/reference-materials.mjs";
 import { buildReferenceToolRunner as assembleReferenceToolRunner, createProjectReferenceIndex } from "./src/reference-context.mjs";
 import { canDeleteQaIssues, deleteQaIssue } from "./src/qa-issue-deletion.mjs";
@@ -2271,7 +2271,38 @@ async function apiHandler(req, res, url) {
     const projectId = String(url.searchParams.get("projectId") || "").trim();
     const libraryId = String(url.searchParams.get("libraryId") || "").trim();
     if (!projectId || !libraryId) return json(res, 400, { error: "缺少项目或资源库" });
-    return json(res, 200, { libraryId, files: await listLibraryFiles({ locale, projectId, libraryId }) });
+    const files = await listLibraryFiles({ locale, projectId, libraryId });
+    // 文件层顺带回答两个问题：这个文件翻译到哪一步了（批次进度）、有没有学习轨迹。
+    // 轨迹里带 human_decision.accepted 就说明人工审校版本已经回填过这个文件。
+    const [runs, trajectoryCounts] = await Promise.all([
+      listBatchRuns({ locale, projectId, limit: 500 }).catch(() => []),
+      countLearningTrajectoriesByFile({ locale, project: projectId }).catch(() => [])
+    ]);
+    // 批次列表已按最近更新时间倒序：同名文件取第一条就是最新的那次翻译。
+    const runByFile = new Map();
+    for (const run of runs) {
+      const name = String(run.filename || "").trim();
+      if (!name || runByFile.has(name)) continue;
+      runByFile.set(name, run);
+    }
+    const learningByFile = new Map(trajectoryCounts.map((item) => [item.sourceFile, item]));
+    return json(res, 200, {
+      libraryId,
+      files: files.map((file) => {
+        const name = String(file.sourceFile || "").trim();
+        const run = name ? runByFile.get(name) : null;
+        const learning = learningByFile.get(name);
+        return {
+          ...file,
+          batch: run ? {
+            batchId: run.batchId, status: run.status, runState: run.runState,
+            totalSegments: run.totalSegments, completedSegments: run.completedSegments,
+            failedSegments: run.failedSegments, qaPending: run.qaPending, updatedAt: run.updatedAt
+          } : null,
+          learning: { count: Number(learning?.count) || 0, humanReviewed: Number(learning?.humanReviewed) || 0 }
+        };
+      })
+    });
   }
   if (req.method === "DELETE" && url.pathname === "/api/library-entries") {
     // "删库并删除库内条目"：先按库把条目 id 全量取回，再分批删（逐条 DELETE 在

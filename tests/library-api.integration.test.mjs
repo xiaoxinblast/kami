@@ -93,6 +93,9 @@ test("库页面能用：条目按库过滤、条目编辑删除、库导出、�
     const batch18 = files.files.find((file) => file.sourceFile === "Asia_batch18_new.xlsx_zho-CN.mqxliff");
     assert.equal(batch18.entryCount, 2);
     assert.ok(batch18.batchId, "文件组要带上它来自哪个批次");
+    // 文件层还要回答两件事：这个文件翻到哪一步、有没有学习轨迹（人工终稿就写在轨迹里）。
+    assert.equal(batch18.batch, null, "双语资产导入的条目没有对应翻译批次");
+    assert.deepEqual(batch18.learning, { count: 0, humanReviewed: 0 }, "文件层要带上按文件分桶的轨迹统计");
     const scopedEntries = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}&sourceFile=${encodeURIComponent("Asia_batch18_new.xlsx_zho-CN.mqxliff")}&limit=50`);
     assert.equal(scopedEntries.total, 2, "只取这个文件的条目");
 

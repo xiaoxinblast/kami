@@ -62,6 +62,21 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
       if (path === "/api/projects/project-1/libraries") {
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ projectId: "project-1", libraries }) });
       }
+      // 库行里的「＋ 新增库」会打开项目设置面板，面板要读单项目与资源库这两份数据。
+      if (path === "/api/projects/project-1") {
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "project-1", name: "测试项目", settings: createDefaultProjectSettings(), qaRuleMetadata: [] }) });
+      }
+      const libraryPatch = path.match(/^\/api\/projects\/project-1\/libraries\/([^/]+)$/u);
+      if (libraryPatch && method === "PATCH") {
+        const body = JSON.parse(request.postData() || "{}");
+        const target = libraries.find((library) => library.id === libraryPatch[1]);
+        // enabled 只用来断言请求体：后面的步骤还要拿这个库做导入，别真把它停掉。
+        if (target) {
+          const { enabled, ...rest } = body;
+          Object.assign(target, rest);
+        }
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ library: target || {} }) });
+      }
       if (path === "/api/tasks") {
         // 库导出跑完后任务中心要给出下载入口（复用 batch_export 的下载链路）。
         return route.fulfill({
@@ -86,8 +101,15 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
       if (path === "/api/library-files" && method === "GET") {
         const libraryId = url.searchParams.get("libraryId");
         const files = libraryId === "tm-working"
-          ? [{ sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff", entryCount: 2, batchCount: 1, batchId: "23c6e25c-a697-499a-851c-c0d5cd518f1a", lastEntryAt: "2026-09-18T12:03:15Z" }]
-          : [{ sourceFile: "Asia_Batch15_new.xlsx_zho-CN.mqxliff", entryCount: 1, batchCount: 1, batchId: "15aabbcc-1111-2222-3333-444455556666", lastEntryAt: "2026-09-18T10:14:14Z" }];
+          ? [{
+            sourceFile: "Asia_batch18_new.xlsx_zho-CN.mqxliff", entryCount: 2, batchCount: 1, batchId: "23c6e25c-a697-499a-851c-c0d5cd518f1a", lastEntryAt: "2026-09-18T12:03:15Z",
+            batch: { batchId: "23c6e25c-a697-499a-851c-c0d5cd518f1a", status: "completed", totalSegments: 2, completedSegments: 2, failedSegments: 0, qaPending: 0, updatedAt: "2026-09-18T12:03:15Z" },
+            learning: { count: 2, humanReviewed: 2 }
+          }]
+          : [{
+            sourceFile: "Asia_Batch15_new.xlsx_zho-CN.mqxliff", entryCount: 1, batchCount: 1, batchId: "15aabbcc-1111-2222-3333-444455556666", lastEntryAt: "2026-09-18T10:14:14Z",
+            batch: null, learning: { count: 0, humanReviewed: 0 }
+          }];
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ libraryId, files }) });
       }
       if (path === "/api/library-entries" && method === "DELETE") {
@@ -240,6 +262,10 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
     const fileRow = page.locator('#memoryFileBody .library-row[data-file-key="Asia_batch18_new.xlsx_zho-CN.mqxliff"]');
     assert.match(await fileRow.textContent(), /Asia_batch18_new\.xlsx_zho-CN\.mqxliff/u);
     assert.match(await fileRow.textContent(), /23c6e25c/u, "文件行要显示它来自哪个批次");
+    // 文件层要回答两个问题：翻到哪一步了、有没有人工审校版本回填过。
+    assert.match(await fileRow.textContent(), /翻译完成/u, "文件行要显示翻译进度");
+    assert.match(await fileRow.textContent(), /2 \/ 2 段/u);
+    assert.match(await fileRow.textContent(), /已回填人工终稿 2 条/u, "人工终稿回填要能看出来");
     assert.match(await page.locator("#memoryFilesView .isolation-note").textContent(), /按翻译文件分开/u);
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/library-files-tm.png`, animations: "disabled" });
@@ -281,10 +307,32 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
     // 主 TM 也有文件层，但这只是浏览维度：文案必须写清"匹配仍是整个库"。
     await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-master"] [data-library-action="open"]').click();
     await page.waitForSelector('#memoryFileBody .library-row[data-file-key="Asia_Batch15_new.xlsx_zho-CN.mqxliff"]');
+    // 没有翻译批次（例如双语资产导入）的文件：说清来源，而不是含糊地写"未完成"。
+    const importedFileRow = page.locator('#memoryFileBody .library-row[data-file-key="Asia_Batch15_new.xlsx_zho-CN.mqxliff"]');
+    assert.match(await importedFileRow.textContent(), /没有翻译批次/u);
+    assert.match(await importedFileRow.textContent(), /尚无学习轨迹/u);
     assert.match(await page.locator("#memoryFilesNote").textContent(), /整个库（跨全部文件）/u, "主 TM 不能让人以为按文件匹配");
     assert.doesNotMatch(await page.locator("#memoryFilesNote").textContent(), /只在同一个文件内参与/u);
     await page.locator("#memoryBreadcrumbBack").click();
     await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-master"]');
+
+    // 「＋ 新增库」不再要求先想到去项目设置：点一下就在资源库页摆好新库草稿并聚焦名称。
+    await page.locator("#memoryAddLibrary").click();
+    await page.waitForSelector("#projectSettingsDialog[open]");
+    const newDraft = page.locator('#projectSettingsDialog [data-library-list="translation_memory"] [data-library]').last();
+    assert.match(await newDraft.textContent(), /新增 · 保存后生效/u);
+    assert.equal(await newDraft.locator('input[data-library-field="name"]').inputValue(), "");
+    assert.equal(await newDraft.locator('input[data-library-field="name"]').evaluate((node) => node === document.activeElement), true, "新增后要直接聚焦名称");
+    await page.locator("[data-cancel-settings]").click();
+    await page.locator("[data-discard]").click();
+    await page.waitForFunction(() => document.querySelector("#projectSettingsDialog")?.open === false);
+
+    // 优先级也能在列表里调：↑ 会把工作 TM 提到主 TM 前面（同类库优先级重排成 1、2…）。
+    await page.locator('#memoryLibraryBody .library-row[data-library-id="tm-working"] [data-library-action="priority"][data-direction="up"]').click();
+    await page.waitForFunction(() => /第 1 位/.test(document.querySelector("#toast")?.textContent || ""));
+    const priorityPatches = writes.filter((call) => call.method === "PATCH" && /^\/api\/projects\/project-1\/libraries\/tm-/u.test(call.path));
+    assert.deepEqual(priorityPatches.map((call) => [call.path.split("/").pop(), call.body.priority]), [["tm-working", 1], ["tm-master", 2]], "上调优先级要写成连续的 1、2…");
+    await page.waitForSelector('#memoryLibraryBody .library-row[data-library-id="tm-working"]');
 
     // 导出的任务行要能直接下载（库导出复用 batch_export 的下载按钮）
     await page.locator('.nav-item[data-view="tasks"]').click();
