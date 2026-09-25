@@ -144,9 +144,26 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     await mkdir(dirname(await jobPath(job.jobId)), { recursive: true });
     const path = await jobPath(job.jobId);
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(job, null, 2)}
+    // 不做缩进：这份检查点里有输入快照（实测 77 MB 数据，缩进后 200 MB），
+    // 每完成一对样本都要重写一次——缩进只是让写盘和临时字符串都翻三倍。
+    await writeFile(temporary, `${JSON.stringify(job)}
 `, "utf8");
     await renameWithRetry(temporary, path);
+  }
+
+  /**
+   * 已完成的评测不再需要输入快照。
+   *
+   * benchmarkSnapshot 是这份检查点里最大的一块（实测 77 MB JSON，解析进内存后 450 MB 堆），
+   * 而 completed 的任务永远不会被续跑（RESUMABLE_STATUSES 里没有它）。磁盘上保留一份供审计，
+   * 内存里立刻释放——否则重启时把每个历史任务都读进内存，再加上正在跑的评测，
+   * 很容易把 Node 默认的 ~4 GB 堆顶爆，进程被 OOM 掉，界面表现为"连不上工作台"。
+   */
+  function releaseCompletedPayload(job) {
+    if (!job || job.status !== COMPLETED) return false;
+    if (!job.benchmarkSnapshot) return false;
+    job.benchmarkSnapshot = null;
+    return true;
   }
 
   function chainPersist(job) {
@@ -168,6 +185,8 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
           job.updatedAt = now();
           await persist(job);
         }
+        // 历史里已完成的评测只需要摘要：快照留在磁盘上，不进内存。
+        releaseCompletedPayload(job);
         jobs.set(job.jobId, job);
       } catch { /* 损坏的检查点文件不阻断启动，直接忽略 */ }
     }
@@ -453,6 +472,8 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         await persist(job);
       }
     }
+    // 所有落盘都完成后才释放内存里的快照：磁盘上留着完整的一份，内存里只留结论。
+    releaseCompletedPayload(job);
   }
 
   return {
@@ -520,6 +541,18 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       job.updatedAt = now();
       await persist(job);
       pumpQueue();
+      return publicJob(job);
+    },
+    /**
+     * 明确终止一个任务（候选已经被拒绝、配对已经过期……）。
+     * 这类任务永远续跑不了，必须落到终态：否则每个客户端每轮轮询都会再试一次续跑，
+     * 日志会被 409 刷屏（实测每 4 秒一条）。
+     */
+    async fail(jobId, reason = "") {
+      const job = jobs.get(String(jobId));
+      if (!job) return null;
+      if (TERMINAL_STATUSES.has(job.status)) return publicJob(job);
+      await markFailed(job, String(reason || "评测任务已终止"));
       return publicJob(job);
     }
   };

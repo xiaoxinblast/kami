@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import v8 from "node:v8";
 import { ACTIVE_LOCALES, CONTENT_TAGS, CONTENT_TYPES, LOCALES, assertActiveLocale, assertLocale } from "./src/config.mjs";
 import { classifyContent, descriptorFromContext, inferContentTags, resolveDomain } from "./src/classifier.mjs";
 import { buildContextPack } from "./src/context-pack.mjs";
@@ -21,7 +22,7 @@ import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, ex
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
-import { countMemories, deleteBatchRun, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
+import { countMemories, deleteBatchRun, deleteStyleProfile, deleteTranslationSkill, deleteUserProfile, persistImportCleaning, saveUserProfile } from "./src/store.mjs";
 import { clearLogs, getLogSettings, installConsoleCapture, listLogs, loadPreviousRunLogs, logInfo, readLogFile, setLogLevel, writeLog } from "./src/logger.mjs";
 import { describeBatchColumns, exportBatchDocument, prepareBatchDocument } from "./src/batch-document.mjs";
 import { deleteBatchOriginal, readBatchOriginal, saveBatchOriginal } from "./src/batch-originals.mjs";
@@ -3159,6 +3160,47 @@ async function apiHandler(req, res, url) {
     }
     return json(res, 200, rejected);
   }
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/style-profiles/") && url.pathname.endsWith("/rules")) {
+    // 删掉一条自动蒸馏出来的规则。规则集是累积的（带 id / 证据数），所以
+    // 既要把这条从 rules 里去掉，也要重建 instruction（提示词读的就是它）。
+    const id = decodeURIComponent(url.pathname.slice("/api/style-profiles/".length, -"/rules".length));
+    const body = await readJsonBody(req).catch(() => ({}));
+    const text = String(body.text || "").trim();
+    if (!text) return json(res, 400, { error: "缺少要删除的规则文本" });
+    const profile = await findStyleProfile(id);
+    if (!profile) return json(res, 404, { error: "风格版本不存在" });
+    if (profile.kind === "user_profile") {
+      return json(res, 409, { error: "人工风格指南是一整篇文档，不能按条删规则；请直接删除这篇指南或重新导入" });
+    }
+    const rules = Array.isArray(profile.rules) ? profile.rules : [];
+    const nextRules = rules.filter((rule) => String(rule?.rule || "").trim() !== text);
+    const strippedInstruction = stripStyleRuleLine(profile.instruction, text);
+    if (nextRules.length === rules.length && strippedInstruction === String(profile.instruction || "")) {
+      return json(res, 404, { error: "这一版里找不到这条规则（可能已经删掉或被重新蒸馏过）" });
+    }
+    const instruction = nextRules.some((rule) => rule?.status !== "retired")
+      ? renderInstruction(nextRules, "")
+      : strippedInstruction;
+    const updated = await updateStyleProfileRules(id, { rules: nextRules, instruction });
+    logInfo("删除风格规则", { id, rule: text.slice(0, 60) });
+    return json(res, 200, { deleted: true, remaining: nextRules.filter((rule) => rule?.status !== "retired").length, instruction: updated?.instruction ?? instruction });
+  }
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/style-profiles/")) {
+    // 删掉一个不再要的风格版本。生效版本不能删：先在界面上停用，再删。
+    const id = decodeURIComponent(url.pathname.slice("/api/style-profiles/".length));
+    const body = await readJsonBody(req).catch(() => ({}));
+    const profile = await findStyleProfile(id);
+    if (!profile) return json(res, 404, { error: "风格版本不存在" });
+    if (String(profile.projectId || "") !== String(body.projectId || "")) {
+      return json(res, 404, { error: "未找到当前项目的风格版本" });
+    }
+    if (String(profile.status) === "active") {
+      return json(res, 409, { error: profile.kind === "user_profile" ? "这份风格指南正在生效：先「停用」，再删除" : "当前生效版本不能删除：先「停用」，再删除" });
+    }
+    const deleted = profile.kind === "user_profile" ? await deleteUserProfile(id) : await deleteStyleProfile(id);
+    logInfo(profile.kind === "user_profile" ? "删除人工风格指南" : "删除风格版本", { id, version: profile.version, status: profile.status });
+    return json(res, 200, { deleted, id });
+  }
   if (req.method === "GET" && url.pathname === "/api/qa-cases/pending") {
     const locale = assertActiveLocale(url.searchParams.get("locale"));
     const projectId = String(url.searchParams.get("projectId") || "");
@@ -3387,6 +3429,9 @@ async function apiHandler(req, res, url) {
     try {
       assertCurrentCandidate(candidate, currentChampion);
     } catch (error) {
+      // 候选已经被拒绝 / 已被新版本替代：这个任务永远续跑不了，直接判失败。
+      // 否则前端每轮轮询都会再 POST 一次续跑，日志被 409 刷屏（实测每 4 秒一条）。
+      await evaluationJobs.fail(jobId, `无法续跑：${error.message}`);
       return json(res, 409, { error: `无法续跑：${error.message}` });
     }
     await evaluationJobs.resume(jobId);
@@ -3465,6 +3510,19 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/rollback")) {
     const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length, -"/rollback".length));
     return json(res, 200, await rollbackTranslationSkill(id));
+  }
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/learning/skills/")) {
+    // 删掉一个不再要的候选版本。生效版本不能删：删了等于生产翻译失去当前策略，
+    // 要走「先用新版本替换 / 回滚」这条线。
+    const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length));
+    const skill = await getTranslationSkill(id);
+    if (!skill) return json(res, 404, { error: "技能版本不存在" });
+    if (String(skill.status) === "champion") {
+      return json(res, 409, { error: "当前生效版本不能删除：先启用新版本或回滚，再删掉它" });
+    }
+    const deleted = await deleteTranslationSkill(id);
+    logInfo("删除翻译技能版本", { id, version: skill.version, status: skill.status });
+    return json(res, 200, { deleted, id });
   }
   if (req.method === "GET" && url.pathname === "/api/quality/assets") {
     const scope = learningScope({
@@ -5477,6 +5535,7 @@ try {
   installConsoleCapture();
   loadPreviousRunLogs();
   logInfo("工作台进程启动", { version: process.env.npm_package_version || "", port: PORT, pid: process.pid });
+  startHeapWatchdog();
   await initializeStore();
   await recoverInterruptedBatchWorkers();
   await recoverInterruptedImportTasks();
@@ -5713,6 +5772,39 @@ function closeServerForAutomaticShutdown() {
     });
     server.closeAllConnections?.();
   });
+}
+
+/**
+ * 内存看门狗：评测任务会把输入快照读进内存（实测 77 MB JSON 解析后约 450 MB 堆），
+ * 一旦顶到 Node 堆上限，进程会被 OOM 掉，界面上只表现为"连不上工作台"，
+ * 日志里什么都没有。接近上限时先留一条 warn，事后能直接看出是内存问题。
+ */
+
+/**
+ * 从 instruction 文本里删掉一条规则的整行。
+ * 新版规范的正文由 rules 重建，旧版（没有结构化 rules）只能按行删：
+ * 既认「· 规则正文」，也认裸文本，忽略首尾空白与项目符号。
+ */
+function stripStyleRuleLine(instruction, text) {
+  const target = String(text || "").trim();
+  if (!target) return String(instruction || "");
+  return String(instruction || "")
+    .split(/\r?\n/u)
+    .filter((line) => line.replace(/^[\s·•*\-]+/u, "").trim() !== target)
+    .join("\n");
+}
+
+function startHeapWatchdog() {
+  const timer = setInterval(() => {
+    const used = process.memoryUsage().heapUsed;
+    const limit = v8.getHeapStatistics().heap_size_limit;
+    if (!limit || used / limit < 0.85) return;
+    logWarn("堆内存接近上限，评测任务可能把工作台压垮", {
+      usedMB: Math.round(used / 1024 / 1024),
+      limitMB: Math.round(limit / 1024 / 1024)
+    });
+  }, 60_000);
+  timer.unref?.();
 }
 
 async function recoverInterruptedBatchWorkers() {

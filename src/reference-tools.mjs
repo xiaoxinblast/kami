@@ -7,6 +7,8 @@
 
 export const SEARCH_REFERENCES_TOOL = "search_references";
 export const READ_REFERENCE_TOOL = "read_reference";
+export const LIST_REFERENCE_FILES_TOOL = "list_reference_files";
+export const READ_REFERENCE_FILE_TOOL = "read_reference_file";
 export const DEFAULT_REFERENCE_BUDGET = Object.freeze({
   maxResults: 4,
   maxCharsPerCall: 2_400,
@@ -47,6 +49,30 @@ export function referenceToolSchemas() {
             after: { type: "integer", description: "可选，向后多读几段，默认 1" }
           },
           required: ["chunk_id"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: LIST_REFERENCE_FILES_TOOL,
+        description: "列出当前项目的参考资料文件（名称、段数、字数）。想直接读某份资料而不是检索片段时，先调它。",
+        parameters: { type: "object", properties: {} }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: READ_REFERENCE_FILE_TOOL,
+        description: "按名称直接读取某份参考资料正文（整篇或指定区间），例如完整设定表、剧本片段。资料很长时可以配合 offset 分次读取。",
+        parameters: {
+          type: "object",
+          properties: {
+            document: { type: "string", description: "资料名称，可用 list_reference_files 查；支持部分匹配" },
+            offset: { type: "integer", description: "可选，从第几个字符开始读，默认 0" },
+            limit: { type: "integer", description: "可选，本次最多读多少字符（受本次翻译的注入预算限制）" }
+          },
+          required: ["document"]
         }
       }
     }
@@ -140,6 +166,43 @@ export function createReferenceToolRunner({ index, listChunks, budget = {}, onAc
         usedChars += [...body].length;
         onActivity?.({ tool: name, chunkId, hits: window.length, elapsedMs: Date.now() - startedAt });
         return { text: `${BOUNDARY}\n\n${body}`, refs: window };
+      }
+      if (name === LIST_REFERENCE_FILES_TOOL) {
+        const documents = typeof index.documents === "function" ? await index.documents({ projectId }) : [];
+        if (!documents.length) return { text: "当前项目没有可用参考资料。", refs: [] };
+        onActivity?.({ tool: name, hits: documents.length, elapsedMs: Date.now() - startedAt });
+        return {
+          text: `当前项目的参考资料（可直接用 read_reference_file 按名称读正文）：\n${documents.map((item) => `· ${item.name}（${item.chunks} 段 / ${item.characters} 字）`).join("\n")}`,
+          refs: []
+        };
+      }
+      if (name === READ_REFERENCE_FILE_TOOL) {
+        // "AI 自己读文件"：不走向量检索，直接把该文件的正文（或指定区间）交给模型。
+        const wanted = String(args.document || "").trim();
+        if (!wanted) return { text: "read_reference_file 需要 document（资料名称，可用 list_reference_files 查）。", refs: [] };
+        const documents = typeof index.documents === "function" ? await index.documents({ projectId }) : [];
+        const needle = wanted.toLowerCase();
+        const document = documents.find((item) => String(item.name).toLowerCase() === needle)
+          || documents.find((item) => String(item.name).toLowerCase().includes(needle))
+          || null;
+        if (!document) {
+          return { text: `没有找到名为「${wanted}」的资料。可用资料：${documents.map((item) => item.name).join("、") || "（暂无）"}。`, refs: [] };
+        }
+        let chunks = typeof index.chunksOf === "function" ? await index.chunksOf({ projectId, documentId: document.id }) : [];
+        if (onlyChunkIds) chunks = chunks.filter((item) => onlyChunkIds.has(String(item.id)));
+        const full = [...chunks.map((item) => String(item.text || "").trim()).filter(Boolean).join("\n")];
+        if (!full.length) return { text: `资料「${document.name}」没有可读正文（可能导入失败或被停用）。`, refs: [] };
+        const room = Math.max(0, limits.maxCharsTotal - usedChars);
+        if (!room) return { text: `本次翻译注入的参考资料已达上限（${limits.maxCharsTotal} 字），请基于已有信息继续。`, refs: [] };
+        const offset = Math.max(0, Math.min(Number(args.offset) || 0, full.length));
+        const requested = Number(args.limit) > 0 ? Number(args.limit) : room;
+        const size = Math.max(1, Math.min(room, requested));
+        const body = full.slice(offset, offset + size).join("");
+        usedChars += [...body].length;
+        onActivity?.({ tool: name, document: document.name, offset, chars: [...body].length, elapsedMs: Date.now() - startedAt });
+        const readTo = offset + [...body].length;
+        const more = readTo < full.length ? `\n\n（本次读到第 ${readTo} / ${full.length} 字；要继续读，把 offset 设为 ${readTo} 再调一次）` : "";
+        return { text: `${BOUNDARY}\n\n资料：${document.name}（第 ${offset + 1}-${readTo} 字 / 共 ${full.length} 字）\n${body}${more}`, refs: chunks };
       }
       return { text: `未知工具 ${name}，已忽略。`, refs: [] };
     } catch (error) {

@@ -74,30 +74,57 @@ function config() {
   return { baseUrl, token };
 }
 
+/** 只读请求遇到连接层失败时的尝试次数（写请求永远只发一次，避免重复写入）。 */
+const DIRECTUS_READ_ATTEMPTS = 3;
+
 async function request(path, { method = "GET", body, timeoutMs = 10_000 } = {}) {
   const { baseUrl, token } = config();
-  const { response, text } = await fetchWithTimeout(`${baseUrl}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(body === undefined ? {} : { "content-type": "application/json" })
-    },
-    body: body === undefined ? undefined : JSON.stringify(body)
-  }, { timeoutMs, label: "Directus" });
-  let payload = null;
-  if (response.status !== 204 && text) {
-    try { payload = JSON.parse(text); } catch { payload = null; }
+  // 报错信息会被写进任务记录并显示在界面上：去掉查询串、截断长度，
+  // 否则一条 431 里那几 KB 的过滤条件会把任务行撑爆。
+  const plainPath = String(path).split("?")[0].slice(0, 80);
+  const idempotent = method === "GET" || method === "HEAD";
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const { response, text } = await fetchWithTimeout(`${baseUrl}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" })
+        },
+        body: body === undefined ? undefined : JSON.stringify(body)
+      }, {
+        timeoutMs,
+        label: "Directus",
+        // 只读请求连超时也补一次：Directus 偶发 stall（例如评测任务跑满时）不该直接变成 500。
+        // 写请求绝不重试——超时可能只是响应慢，重试就会重复写入。
+        ...(idempotent ? { retries: 1, retryDelayMs: 250 } : {})
+      });
+      let payload = null;
+      if (response.status !== 204 && text) {
+        try { payload = JSON.parse(text); } catch { payload = null; }
+      }
+      if (!response.ok) {
+        const details = payload?.errors?.map((error) => error.message).join("; ") || response.statusText;
+        const error = new Error(`Directus ${method} ${plainPath} 失败（${response.status}${details ? ` ${details.slice(0, 120)}` : ""}）`);
+        error.statusCode = response.status >= 500 ? 503 : response.status;
+        throw error;
+      }
+      return payload?.data ?? payload;
+    } catch (error) {
+      // 工作台到 Directus 的连接会偶发被对端掐断（复用中的 keep-alive 连接受限、
+      // Directus 重启、容器抖动），undici 报的是 TypeError: fetch failed。
+      // 这类抖动不该把只读接口变成 500：重试两次。写请求与业务错误一律直接抛出。
+      const connectionFailure = error?.name === "TypeError";
+      if (!idempotent || !connectionFailure || attempt >= DIRECTUS_READ_ATTEMPTS) {
+        // 日志里只写一句 fetch failed 没法定位，把 undici 的 cause 带出来。
+        if (connectionFailure && error.cause) {
+          error.message = `Directus ${method} ${plainPath} 连接失败（${error.cause.code || error.cause.message || "unknown"}）`;
+        }
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120 * attempt));
+    }
   }
-  if (!response.ok) {
-    const details = payload?.errors?.map((error) => error.message).join("; ") || response.statusText;
-    // 报错信息会被写进任务记录并显示在界面上：去掉查询串、截断长度，
-    // 否则一条 431 里那几 KB 的过滤条件会把任务行撑爆。
-    const plainPath = String(path).split("?")[0].slice(0, 80);
-    const error = new Error(`Directus ${method} ${plainPath} 失败（${response.status}${details ? ` ${details.slice(0, 120)}` : ""}）`);
-    error.statusCode = response.status >= 500 ? 503 : response.status;
-    throw error;
-  }
-  return payload?.data ?? payload;
 }
 
 async function createItemsInChunks(path, records, { onProgress } = {}) {
@@ -2297,7 +2324,9 @@ export async function saveDirectusTranslationSkill(input) {
   }
   const scope = directusLearningScope(input);
   const previous = await latestDirectusTranslationSkill(scope);
-  const version = Math.max(1, Number(input.version) || (Number(previous?.version) || 0) + 1);
+  // 版本号不能照抄调用方的建议值：被拒绝的旧候选会占着它的版本号，
+  // 于是"重新生成候选"会撞号并直接 409。取「建议版本」与「下一个空闲版本」的较大者。
+  const version = Math.max(1, Number(input.version) || 0, (Number(previous?.version) || 0) + 1);
   const versionParams = addLearningScopeFilters(new URLSearchParams({ limit: "1", fields: "id" }), scope);
   versionParams.set("filter[version][_eq]", String(version));
   if ((await request(`/items/translation_skills?${versionParams}`))[0]) throw directusConflict(`Translation skill version ${version} already exists in this scope`);
@@ -2965,6 +2994,42 @@ export async function deleteDirectusResourceLibrary(projectId, libraryId) {
   if (target.role === "master" || target.role === "working") throw new Error("主 TM 和工作 TM 不能删除，请先停用或改为参考 TM");
   await request(`/items/${RESOURCE_LIBRARY_COLLECTION}/${encodeURIComponent(normalizedLibraryId)}`, { method: "DELETE" });
   return true;
+}
+
+/**
+ * 删掉一个技能版本（候选 / 被拒绝 / 旧版本）。
+ * 生效版本由路由层拦住——删掉它等于让生产翻译失去当前策略。
+ */
+export async function deleteDirectusTranslationSkill(id) {
+  try {
+    await request(`/items/translation_skills/${encodeURIComponent(String(id))}`, { method: "DELETE" });
+    return true;
+  } catch (error) {
+    if (isMissingItem(error)) return false;
+    throw error;
+  }
+}
+
+/** 删掉一个自动蒸馏出的风格规范版本（生效版本同样由路由层拦住）。 */
+export async function deleteDirectusStyleProfile(id) {
+  try {
+    await request(`/items/style_profiles/${encodeURIComponent(String(id))}`, { method: "DELETE" });
+    return true;
+  } catch (error) {
+    if (isMissingItem(error)) return false;
+    throw error;
+  }
+}
+
+/** 删掉人工导入的风格指南（user_profiles 里的一整篇文档）。 */
+export async function deleteDirectusUserProfile(id) {
+  try {
+    await request(`/items/user_profiles/${encodeURIComponent(String(id))}`, { method: "DELETE" });
+    return true;
+  } catch (error) {
+    if (isMissingItem(error)) return false;
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------

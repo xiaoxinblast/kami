@@ -715,9 +715,12 @@ select { min-width: 150px; }
 .style-rule-list { display: grid; gap: 12px; margin-top: 11px; }
 .style-rule-section-group { display: grid; gap: 5px; }
 .style-rule-section { margin: 0 0 2px; color: #2f4237; font-size: 12px; font-weight: 850; }
-.style-rule-row { display: grid; grid-template-columns: 25px 1fr; gap: 8px; padding: 7px 8px; border-radius: 7px; background: #f2f5f2; }
+.style-rule-row { display: grid; grid-template-columns: 25px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 7px 8px; border-radius: 7px; background: #f2f5f2; }
 .style-rule-row span { color: #7b8a82; font-size: 12px; font-weight: 850; }
 .style-rule-row p { margin: 0; color: #4f5f57; font-size: 11px; line-height: 1.55; }
+/* 每条规则都能单独删：默认淡一点，指着这一行时才显眼。 */
+.style-rule-row .button { padding: 3px 8px; opacity: .6; }
+.style-rule-row:hover .button, .style-rule-row .button:focus-visible { opacity: 1; }
 .style-rule-row.reused { background: #f7f8f5; }
 .style-rule-row.reused p { color: #7d8a83; }
 .style-rule-tag { margin-left: 6px; padding: 1px 5px; border-radius: 5px; color: #8a5a1c; background: #fdf0d9; font-size: 10px; font-style: normal; font-weight: 800; }

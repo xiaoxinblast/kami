@@ -74,6 +74,31 @@ export function createReferenceIndex({ loader, ttlMs = DEFAULT_TTL_MS, now = () 
       if (projectId) cache.delete(String(projectId));
       else cache.clear();
     },
+    /**
+     * 当前项目可用的参考资料清单（按文件聚合）。
+     * 给"AI 自己挑文件读"用：模型先看有哪些文件，再按名字读正文。
+     */
+    async documents({ projectId = "" } = {}) {
+      const items = await itemsFor(String(projectId));
+      const byId = new Map();
+      for (const entry of items) {
+        if (!entry?.documentId) continue;
+        if (entry.documentStatus === "disabled" || entry.documentStatus === "failed") continue;
+        if (entry.libraryEnabled === false) continue;
+        const document = byId.get(entry.documentId) || { id: entry.documentId, name: entry.documentName || "未命名资料", chunks: 0, characters: 0 };
+        document.chunks += 1;
+        document.characters += [...String(entry.text || "")].length;
+        byId.set(entry.documentId, document);
+      }
+      return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name));
+    },
+    /** 某份资料的全部片段，按片段顺序排列（读到的是完整正文）。 */
+    async chunksOf({ projectId = "", documentId = "" } = {}) {
+      const items = await itemsFor(String(projectId));
+      return items
+        .filter((entry) => String(entry?.documentId || "") === String(documentId))
+        .sort((left, right) => (Number(left.ordinal) || 0) - (Number(right.ordinal) || 0));
+    },
     async search({ projectId = "", query = "", documentName = "", limit = 4, includeRisk = false, onlyChunkIds = null } = {}) {
       const text = String(query || "").trim();
       if (!text) return [];

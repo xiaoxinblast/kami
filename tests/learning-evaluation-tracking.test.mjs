@@ -20,7 +20,7 @@ test("正在跑的评测是页面状态，不是按钮上的临时文字", () =>
   assert.match(app, /button\.dataset\.hasEvaluation === "1" \? "重新评测" : "运行评测"/u);
   // 进页面就带任务清单：后台还在跑时不用再点一次才知道。
   assert.match(app, /async function loadLearningEvaluationJobs\(\)/u);
-  assert.match(app, /api\(`\/api\/learning\/evaluation-jobs\$\{params\.size \? `\?\$\{params\}` : ""\}`\)/u);
+  assert.match(app, /api\(`\/api\/learning\/evaluation-jobs\$\{params\.size \? `\?\$\{params\}` : ""\}`, \{\}, \{ logFailure: false \}\)/u);
   assert.match(app, /\[state\.learningData\] = await Promise\.all\(\[/u);
   // 轮询：网络抖动只跳过这一轮，不再把"评测中"退回"运行评测"；结束后自动刷新结论。
   assert.match(app, /catch \{ continue; \}/u);
@@ -42,4 +42,9 @@ test("通知中心：铃铛、未读角标与面板都在页面里", () => {
   assert.match(app, /state\.notificationHighlight = new Set\(unreadNotifications\(\)\.map\(\(item\) => item\.id\)\);/u);
   assert.match(styles, /\.notification-item\.is-read \.notification-dot \{ background: #dfe4dc; \}/u);
   assert.match(styles, /\.notification-item\.is-read strong \{ color: #7c8981;/u);
+  // 后台轮询失败不写日志、不点亮日志角标，页面在后台时也不轮询。
+  assert.match(app, /const silent = \{ logFailure: false \};/u);
+  assert.match(app, /api\(`\/api\/tasks\?\$\{params\}`, \{\}, silent\)\.catch\(\(\) => \[\]\)/u);
+  assert.match(app, /async function api\(path, options = \{\}, \{ logFailure = true \} = \{\}\)/u);
+  assert.match(app, /if \(document\.hidden\) return;/u);
 });

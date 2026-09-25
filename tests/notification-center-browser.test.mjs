@@ -104,3 +104,67 @@ test("右上角通知中心显示任务完成与待处理并保留未读", { ski
     await server.close();
   }
 });
+
+/**
+ * 通知轮询是后台行为：Directus 抖一下导致 /api/tasks 500 时，不该写日志、也不该点亮
+ * 日志角标（实测事故：轮询每 20 秒把一次连接抖动写成两条 error）。
+ */
+test("通知轮询失败不写日志、不点亮日志角标", { skip: !process.env.KAMI_BROWSER_TEST_MODULE, timeout: 60000 }, async () => {
+  const { chromium } = createRequire(import.meta.url)(process.env.KAMI_BROWSER_TEST_MODULE);
+  const browser = await chromium.launch({ headless: true, ...(process.env.KAMI_BROWSER_EXECUTABLE ? { executablePath: process.env.KAMI_BROWSER_EXECUTABLE } : {}) });
+  const server = createServer(async (req, res) => {
+    const pathname = req.url === "/" ? "/index.html" : req.url;
+    const extension = pathname.split(".").at(-1);
+    try {
+      const body = await readFile(new URL(`../public${pathname}`, import.meta.url));
+      res.setHeader("content-type", ({ html: "text/html", js: "text/javascript", css: "text/css", png: "image/png", svg: "image/svg+xml" })[extension] || "application/octet-stream");
+      res.end(body);
+    } catch { res.writeHead(404); res.end(); }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const clientLogs = [];
+
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.route("**/api/**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/logs/client") {
+        clientLogs.push(route.request().postData());
+        return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      }
+      // 通知轮询的两个只读接口都坏掉：模拟 Directus 抖动。
+      if (url.pathname === "/api/tasks" || url.pathname === "/api/qa-cases/pending") {
+        return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ detail: "fetch failed", path: "/" }) });
+      }
+      let payload = {};
+      if (url.pathname === "/api/bootstrap") payload = {
+        locales: { "zh-CN": LOCALES["zh-CN"] }, contentTypes: CONTENT_TYPES, contentTags: CONTENT_TAGS,
+        provider: { model: "test", baseUrl: "http://127.0.0.1/v1" }, backend: {}, assets: { "zh-CN": { revision: 0, termCount: 0 } }
+      };
+      else if (url.pathname === "/api/health") payload = { ok: true, version: "0.7.0" };
+      else if (url.pathname === "/api/projects") payload = { projects: [{ id: "project-1", name: "测试项目", settings: createDefaultProjectSettings() }] };
+      else if (url.pathname === "/api/projects/project-1/libraries") payload = { libraries: [] };
+      else if (url.pathname === "/api/assets") payload = { locale: "zh-CN", revision: 0, terms: [] };
+      else if (url.pathname === "/api/memories") payload = { memories: [], total: 0 };
+      else if (url.pathname === "/api/feedback/pending" || url.pathname === "/api/feedback") payload = [];
+      else if (url.pathname === "/api/style-profiles") payload = { styleProfiles: [], evidencePools: [], learningRuns: [], userProfiles: [] };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+    });
+
+    await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.waitForSelector("#notificationBell");
+    await page.waitForTimeout(1500);
+    await page.locator("#notificationBell").click();
+    await page.waitForSelector("#notificationPanel:not([hidden])");
+    assert.match(await page.locator("#notificationList").innerText(), /暂无通知/u);
+    assert.equal(await page.locator("#notificationBadge").isHidden(), true);
+    assert.equal(await page.locator("#logNavBadge").isHidden(), true, "后台轮询失败不该点亮日志角标");
+    assert.deepEqual(clientLogs, [], "后台轮询失败不该写进日志");
+    assert.deepEqual(errors, [], `页面不应抛异常：${errors.join(" | ")}`);
+  } finally {
+    await browser.close();
+    await server.close();
+  }
+});

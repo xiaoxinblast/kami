@@ -9,11 +9,15 @@ delete process.env.KAMI_STORE;
 delete process.env.EMBEDDING_MODEL;
 
 const {
+  deleteStyleProfile,
+  deleteUserProfile,
   getStyleEvidence,
   getStyleLearningRuns,
   getStyleProfile,
   initializeStore,
   listStyleProfiles,
+  findStyleProfile,
+  saveUserProfile,
   saveStyleEvidence,
   saveStyleLearningRun,
   saveStyleProfile
@@ -119,4 +123,30 @@ test("历史证据没有新字段时按正例回落，不影响既有数据", as
   assert.equal(legacy.machineTranslation, "");
   const [stored] = await getStyleEvidence("ko-KR", { contentType: "ui", domain: "game", exactScope: true, limit: 10 });
   assert.equal(stored.polarity, "positive");
+});
+
+test("风格版本与人工指南都能删除，且不会误删另一类", async () => {
+  const profile = await saveStyleProfile({
+    locale: "ja-JP", contentType: "ui", domain: "game", projectId: "delete-style",
+    name: "待删版本", instruction: "【语气】\n· 用自然口语。", rules: [], status: "draft"
+  });
+  const guide = await saveUserProfile({
+    locale: "ja-JP", projectId: "delete-style", name: "风格指南 · 待删", instruction: "整篇指南正文", status: "inactive"
+  });
+
+  assert.equal(await deleteStyleProfile(guide.id), false, "人工指南不能被风格版本删除误伤");
+  assert.ok(await findStyleProfile(guide.id));
+
+  assert.equal(await deleteStyleProfile(profile.id), true);
+  assert.equal(await findStyleProfile(profile.id), null);
+  assert.equal((await listStyleProfiles("ja-JP", null, { projectId: "delete-style" })).styleProfiles.some((item) => item.id === profile.id), false);
+  // 生效风格不受影响（这份 draft 之外另存的 active 仍在）。
+  const active = await saveStyleProfile({
+    locale: "ja-JP", contentType: "ui", domain: "game", projectId: "delete-style",
+    name: "生效版本", instruction: "【语气】\n· 保持自然。", rules: [], status: "active"
+  });
+  assert.equal(await deleteUserProfile(guide.id), true);
+  assert.equal(await findStyleProfile(guide.id), null);
+  assert.ok(await findStyleProfile(active.id), "生效版本没有被连带删除");
+  assert.equal(await deleteUserProfile("does-not-exist"), false);
 });

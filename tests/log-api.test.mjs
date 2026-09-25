@@ -22,7 +22,9 @@ test("日志接口齐全，并且 console 在启动初始化之前就被接管",
   assert.ok(boot.length >= 0);
   // 日志接口自身失败时不再递归上报（前端 api() 里要排除 /api/logs）
   const app = await read("../public/app.js");
-  assert.match(app, /if \(!String\(path\)\.startsWith\("\/api\/logs"\)\) recordClientLog\("error"/u);
+  assert.match(app, /if \(logFailure && !String\(path\)\.startsWith\("\/api\/logs"\)\) recordClientLog\("error"/u);
+  // 后台轮询（通知中心）失败不写日志：Directus 抖一下不该等于一次报错。
+  assert.match(app, /const silent = \{ logFailure: false \};/u);
 });
 
 test("日志等级与过滤在后端实现（不是只在前端筛）", async () => {

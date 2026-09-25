@@ -119,7 +119,7 @@ function supportsBatchApi(version) {
   return major > 0 || minor >= 5;
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, { logFailure = true } = {}) {
   let response;
   try {
     response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
@@ -132,13 +132,13 @@ async function api(path, options = {}) {
       ? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"
       : `请求失败（${detail}）：请确认工作台仍在运行`;
     // 界面上只闪一句提示，同时把原始信息写进日志，事后能查。
-    if (!String(path).startsWith("/api/logs")) recordClientLog("error", `请求未送达：${options.method || "GET"} ${path}`, detail);
+    if (logFailure && !String(path).startsWith("/api/logs")) recordClientLog("error", `请求未送达：${options.method || "GET"} ${path}`, detail);
     throw new Error(message);
   }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = payload.error || `请求失败：${response.status}`;
-    if (!String(path).startsWith("/api/logs")) recordClientLog("error", `${options.method || "GET"} ${path} → HTTP ${response.status}`, message);
+    if (logFailure && !String(path).startsWith("/api/logs")) recordClientLog("error", `${options.method || "GET"} ${path} → HTTP ${response.status}`, message);
     throw new Error(message);
   }
   return payload;
@@ -2592,7 +2592,8 @@ async function loadTasks() {
  * "完成了 / 需要处理 / 进行中"的条目。不额外维护一张通知表：任务被删掉，
  * 对应通知自然消失；已读与否只记一个时间点。
  */
-const NOTIFICATION_POLL_MS = 20000;
+/** 轮询只要够新就行：30 秒一轮既能让角标及时，也不会给 Directus 添压力。 */
+const NOTIFICATION_POLL_MS = 30000;
 const NOTIFICATION_LIMIT = 20;
 let notificationTimer = 0;
 
@@ -2687,16 +2688,24 @@ async function loadNotifications() {
   if (!state.activeProjectId) return;
   const params = new URLSearchParams({ limit: "60", projectId: state.activeProjectId });
   const qaParams = new URLSearchParams({ locale: state.autoQaLocale || "zh-CN", projectId: state.activeProjectId });
+  // 后台轮询失败不该刷日志、也不该点亮日志角标：Directus 抖一下不该等于一次报错。
+  // 真要看错误，去任务中心/日志页，那是用户主动发起的请求。
+  const silent = { logFailure: false };
   const [tasks, pendingQaCases] = await Promise.all([
-    api(`/api/tasks?${params}`).catch(() => []),
-    api(`/api/qa-cases/pending?${qaParams}`).catch(() => [])
+    api(`/api/tasks?${params}`, {}, silent).catch(() => []),
+    api(`/api/qa-cases/pending?${qaParams}`, {}, silent).catch(() => [])
   ]);
   state.notifications = buildNotifications(Array.isArray(tasks) ? tasks : [], Array.isArray(pendingQaCases) ? pendingQaCases : []);
   renderNotificationCenter();
 }
 
 function startNotificationPolling() {
-  notificationTimer ||= window.setInterval(() => { loadNotifications().catch(() => {}); }, NOTIFICATION_POLL_MS);
+  notificationTimer ||= window.setInterval(() => {
+    // 页面在后台就不轮询：没人看的刷新只会白占请求。
+    if (document.hidden) return;
+    loadNotifications().catch(() => {});
+  }, NOTIFICATION_POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadNotifications().catch(() => {}); });
   loadNotifications().catch(() => {});
 }
 
@@ -4210,9 +4219,10 @@ function renderManualGuide(profiles) {
     ? "正在作为最高优先级风格规则参与翻译"
     : status === "draft" ? "尚未启用，当前翻译不会使用它" : "已停用，历史版本仍保留";
   const history = guides.filter((item) => item.id !== current.id).length;
-  const action = status === "active"
+  const deleteButton = '<button class="button ghost small danger" data-action="delete-guide" title="删除这份人工风格指南">删除</button>';
+  const action = (status === "active"
     ? '<button class="button ghost small" data-action="disable">停用（保留历史）</button>'
-    : `<button class="button secondary small" data-action="activate">${status === "draft" ? "批准并启用" : "重新启用"}</button>`;
+    : `<button class="button secondary small" data-action="activate">${status === "draft" ? "批准并启用" : "重新启用"}</button>`) + deleteButton;
   container.innerHTML = `<article class="manual-guide-card ${escapeHtml(status)}" data-profile-id="${escapeHtml(current.id)}">
     <div class="manual-guide-head"><div><strong>${escapeHtml(String(current.name || "").replace(/^风格指南 · /u, ""))}</strong><small>${escapeHtml(statusNote)} · v${Number(current.version) || 1} · 正文 ${[...String(current.instruction || "")].length} 字 · 最近更新 ${escapeHtml(formatStyleTime(current.updatedAt))}${history ? ` · 另有 ${history} 个历史版本` : ""}</small></div><span class="style-state ${escapeHtml(status)}">${statusLabel}</span></div>
     <div class="manual-guide-actions">${renderManualGuideDocument(current.instruction)}${action}</div>
@@ -4312,7 +4322,7 @@ function renderStyleGuidance() {
     const diffChips = diff
       ? `<p class="style-rule-diff">对比 v${diff.baselineVersion}：新增 ${diff.added} · 改写 ${diff.updated} · 逐字沿用 ${diff.reused} · 已退休 ${diff.retired}</p>`
       : "";
-    const ruleRow = (rule, index, { reused = false } = {}) => `<div class="style-rule-row${reused ? " reused" : ""}"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}${updatedTexts.has(rule) ? '<em class="style-rule-tag">本版改写</em>' : ""}</p></div>`;
+    const ruleRow = (rule, index, { reused = false } = {}) => `<div class="style-rule-row${reused ? " reused" : ""}"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}${updatedTexts.has(rule) ? '<em class="style-rule-tag">本版改写</em>' : ""}</p><button class="button ghost small danger" type="button" data-action="delete-rule" data-rule="${escapeHtml(rule)}" title="从这一版规则里删掉这条">删除</button></div>`;
     return `<article class="style-guidance-card ${escapeHtml(item.status)}" data-profile-id="${escapeHtml(item.id)}">
       <div class="style-guidance-head"><div><strong>${escapeHtml(item.name)}</strong><small>适用范围：${escapeHtml(state.bootstrap.locales[state.styleLocale].label)} × ${escapeHtml(item.scopeLabel)} · v${item.version}</small><small>生成方式：${escapeHtml(item.name.startsWith("风格指南 · ") ? "人工上传，正文未被改写" : item.name.includes("复盘修订") ? "AIQA 复盘结合已沉淀语料" : "同类双语语料自动精炼")} · ${item.evidenceCount} 条证据${sourceBatchId ? ` · 来源批次 ${escapeHtml(String(sourceBatchId).slice(0, 8))}` : ""}</small>${evidenceFilesNote}</div><span class="style-state ${escapeHtml(item.status)}">${item.status === "active" ? "已启用" : item.status === "draft" ? "待批准" : "已停用"}</span></div>
       ${learningSummary ? `<p class="style-learning-summary">本批浓缩：${escapeHtml(learningSummary)}</p>` : ""}
@@ -4324,7 +4334,7 @@ function renderStyleGuidance() {
         return `<div class="style-rule-section-group">${section.title ? `<p class="style-rule-section">${escapeHtml(section.title)}</p>` : ""}${changed.map((rule, index) => ruleRow(rule, index)).join("")}${reused.length ? `<details class="style-rule-reused"><summary>沿用 v${diff.baselineVersion} 的 ${reused.length} 条（逐字相同）</summary>${reused.map((rule, index) => ruleRow(rule, index, { reused: true })).join("")}</details>` : ""}</div>`;
       }).join("") : '<div class="batch-detail-empty">该版本没有可展示的规则条目</div>'}</div>
       ${examples.length ? `<details class="style-examples"><summary>查看 ${examples.length} 个正反例</summary>${examples.map((example) => `<div><strong>${example.type === "negative" ? "反例" : "正例"}</strong><p>${escapeHtml(example.source || "")}</p><p>${escapeHtml(example.target || "")}</p><small>${escapeHtml(example.reason || "")}</small></div>`).join("")}</details>` : ""}
-      <div class="style-guidance-actions"><button class="button ${item.status === "active" ? "ghost" : "secondary"} small" data-action="${item.status === "active" ? "disable" : "activate"}">${item.status === "active" ? "停用（保留历史）" : "批准并启用"}</button></div>
+      <div class="style-guidance-actions"><button class="button ${item.status === "active" ? "ghost" : "secondary"} small" data-action="${item.status === "active" ? "disable" : "activate"}">${item.status === "active" ? "停用（保留历史）" : "批准并启用"}</button><button class="button ghost small danger" data-action="delete-profile" title="${item.status === "active" ? "生效中的版本要先停用才能删除" : "删除这一版风格规范"}">删除</button></div>
     </article>`;
   }).join("") : '<div class="empty-list">当前筛选条件下没有自动蒸馏的规则条目；人工导入的风格指南在上面的「人工风格指南」模块里单独展示（它是一整篇文档，不按条计）。</div>';
   $("#styleQaCount").textContent = `${pending.length} 条`;
@@ -4340,6 +4350,28 @@ function renderStyleGuidance() {
         await navigator.clipboard.writeText(String(guide?.instruction || ""));
         toast("已复制人工风格指南全文");
       } catch (error) { toast(`复制失败：${error.message}`); }
+      return;
+    }
+    if (action === "delete-rule") {
+      const text = String(button.dataset.rule || "");
+      if (!confirm(`删除这条风格规则？\n\n${text}`)) return;
+      button.disabled = true;
+      try {
+        await api(`/api/style-profiles/${encodeURIComponent(id)}/rules`, { method: "DELETE", body: JSON.stringify({ ...projectPayload(), text }) });
+        toast("规则已删除，后续翻译不再注入它");
+        await loadStyleGuidance(state.styleLocale);
+      } catch (error) { button.disabled = false; toast(error.message); }
+      return;
+    }
+    if (action === "delete-profile" || action === "delete-guide") {
+      const label = action === "delete-guide" ? "这份人工风格指南" : "这一版风格规范";
+      if (!confirm(`确认删除${label}？删除后无法恢复。`)) return;
+      button.disabled = true;
+      try {
+        await api(`/api/style-profiles/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify(projectPayload()) });
+        toast(`已删除${label}`);
+        await loadStyleGuidance(state.styleLocale);
+      } catch (error) { button.disabled = false; toast(error.message); }
       return;
     }
     button.disabled = true;
@@ -6218,7 +6250,7 @@ function renderLearningCandidates(candidates, evaluations, champions, validTraje
       <div class="learning-change-reason"><span>为什么提出这次变更</span><p>${escapeHtml(reason)}</p></div>
       ${sanitizationNote}
       ${rules.length ? `<details class="learning-change-details"><summary>查看 ${rules.length} 项候选执行配置</summary>${rules.map((rule) => `<p>${escapeHtml(rule)}</p>`).join("")}</details>` : ""}
-      <div class="learning-card-footer"><small>${escapeHtml(footerText)}</small><div class="learning-actions"><button class="button secondary small" type="button" data-learning-action="evaluate" data-skill-id="${escapeHtml(id)}" data-baseline-current="${baselineCurrent ? "1" : "0"}" data-has-evaluation="${evaluation ? "1" : "0"}" ${baselineCurrent && !activeJob ? "" : "disabled"}>${escapeHtml(activeJob ? evaluationProgressText(activeJob) : evaluation ? "重新评测" : "运行评测")}</button><button class="button primary small" type="button" data-learning-action="activate" data-skill-id="${escapeHtml(id)}" ${canActivate ? "" : "disabled"}>批准启用</button><button class="button ghost small danger" type="button" data-learning-action="reject" data-skill-id="${escapeHtml(id)}">拒绝</button></div></div>
+      <div class="learning-card-footer"><small>${escapeHtml(footerText)}</small><div class="learning-actions"><button class="button secondary small" type="button" data-learning-action="evaluate" data-skill-id="${escapeHtml(id)}" data-baseline-current="${baselineCurrent ? "1" : "0"}" data-has-evaluation="${evaluation ? "1" : "0"}" ${baselineCurrent && !activeJob ? "" : "disabled"}>${escapeHtml(activeJob ? evaluationProgressText(activeJob) : evaluation ? "重新评测" : "运行评测")}</button><button class="button primary small" type="button" data-learning-action="activate" data-skill-id="${escapeHtml(id)}" ${canActivate ? "" : "disabled"}>批准启用</button><button class="button ghost small danger" type="button" data-learning-action="reject" data-skill-id="${escapeHtml(id)}">拒绝</button><button class="button ghost small danger" type="button" data-learning-action="delete" data-skill-id="${escapeHtml(id)}" title="把这个候选版本从列表里删掉（评测记录保留）">删除</button></div></div>
     </article>`;
   }).join("");
 }
@@ -6943,6 +6975,7 @@ function learningActionBody() {
 async function runLearningAction(skillId, action, button) {
   if (!skillId) return toast("技能缺少可操作的版本 ID");
   if (action === "evaluate") return runSkillEvaluation(skillId);
+  if (action === "delete") return deleteLearningSkill(skillId);
   const prompts = { activate: "确认批准这个候选并替换当前生效版本？原版本仍可回滚。", reject: "确认拒绝这个候选版本？它会保留在审计记录中。", rollback: "确认回滚到上一已验证版本？当前版本不会被删除。" };
   if (prompts[action] && !confirm(prompts[action])) return;
   const original = button?.textContent;
@@ -6959,6 +6992,22 @@ async function runLearningAction(skillId, action, button) {
 
 /** 评测任务只在这几种状态下才算"还在跑"。 */
 const LEARNING_EVALUATION_ACTIVE_STATUSES = new Set(["queued", "running", "interrupted"]);
+
+/**
+ * 删掉一个候选技能版本。拒绝只是标记状态（仍留在列表里），删除才是清掉；
+ * 已经产生的评测记录保留，所以这里只提示"候选从列表里消失"。
+ */
+async function deleteLearningSkill(skillId) {
+  const candidate = (learningPayload().candidates || []).find((item) => learningId(item) === String(skillId));
+  const label = candidate ? learningSkillTitle(candidate) : "该候选";
+  if (!confirm(`确认删除「${label}」？删除后无法恢复；已产生的评测记录会保留。`)) return;
+  try {
+    await api(`/api/learning/skills/${encodeURIComponent(skillId)}`, { method: "DELETE" });
+    toast(`已删除「${label}」`);
+    if (state.learningSelectedSkillId === String(skillId)) state.learningSelectedSkillId = "";
+    await loadLearning(state.learningLocale);
+  } catch (error) { toast(error.message); }
+}
 
 function isActiveEvaluationJob(job) {
   return Boolean(job) && LEARNING_EVALUATION_ACTIVE_STATUSES.has(String(job.status || ""));
@@ -6988,7 +7037,8 @@ function evaluationProgressText(job) {
 async function loadLearningEvaluationJobs() {
   const params = learningAllScopes() ? new URLSearchParams() : new URLSearchParams(learningActionBody());
   try {
-    const payload = await api(`/api/learning/evaluation-jobs${params.size ? `?${params}` : ""}`);
+    // 后台轮询静默：失败不写日志、不点亮日志角标。
+    const payload = await api(`/api/learning/evaluation-jobs${params.size ? `?${params}` : ""}`, {}, { logFailure: false });
     state.learningEvaluationJobs = learningArray(payload.jobs);
   } catch {
     state.learningEvaluationJobs = [];
@@ -7031,11 +7081,20 @@ async function tickLearningEvaluationJobs() {
   for (const job of active) {
     const jobId = encodeURIComponent(job.jobId);
     let fresh = null;
-    try { ({ job: fresh } = await api(`/api/learning/evaluation-jobs/${jobId}`)); }
+    try { ({ job: fresh } = await api(`/api/learning/evaluation-jobs/${jobId}`, {}, { logFailure: false })); }
     catch { continue; }
     if (fresh.status === "interrupted") {
-      try { ({ job: fresh } = await api(`/api/learning/evaluation-jobs/${jobId}/resume`, { method: "POST" })); }
-      catch (error) { toast(`评测任务无法续跑：${error.message}`); continue; }
+      try { ({ job: fresh } = await api(`/api/learning/evaluation-jobs/${jobId}/resume`, { method: "POST" }, { logFailure: false })); }
+      catch (error) {
+        // 候选被拒绝 / 已被替换时续跑永远不会成功：就地判失败并停止跟踪，
+        // 否则每一轮轮询都会再试一次，变成 409 刷屏 + 反复弹提示。
+        const reason = String(error.message || "").replace(/^无法续跑：/u, "");
+        state.learningEvaluationJobs = (state.learningEvaluationJobs || []).map((item) => item.jobId === job.jobId
+          ? { ...item, status: "failed", error: `无法续跑：${reason}`, finishedAt: new Date().toISOString() }
+          : item);
+        toast(`评测任务无法续跑：${reason}`);
+        continue;
+      }
     }
     state.learningEvaluationJobs = (state.learningEvaluationJobs || []).map((item) => item.jobId === fresh.jobId ? fresh : item);
     if (["completed", "failed"].includes(fresh.status)) finished = fresh;

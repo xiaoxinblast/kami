@@ -76,7 +76,7 @@ async function spreadsheetPages(buffer) {
     worksheet.eachRow({ includeEmpty: false }, (row) => {
       const cells = [];
       for (let index = 1; index <= worksheet.columnCount; index += 1) {
-        cells.push(String(row.getCell(index).text ?? "").trim());
+        cells.push(spreadsheetCellText(row.getCell(index)));
       }
       const line = cells.join("\t").trimEnd();
       if (line.trim()) rows.push(line);
@@ -85,6 +85,36 @@ async function spreadsheetPages(buffer) {
     if (text) pages.push({ page: worksheet.name || null, text, origin: "text" });
   }
   return pages;
+}
+
+/**
+ * 单元格文本：不能直接用 ExcelJS 的 `cell.text`。
+ *
+ * 合并区域的从属单元格拿到的是 MergeValue，它的 `toString()` 会对 master 的值调用
+ * `.toString()`；master 本身是空值时就是 `null.toString()` —— 实测上传
+ * END3_CorelTrain_SCENARIO_ORDER.xlsx 时整份参考资料导入直接失败，报的就是
+ * "Cannot read properties of null (reading 'toString')"。
+ * 这里自己取原始值再格式化：数字 / 日期 / 富文本 / 公式结果 / 超链接各按需要拼。
+ */
+function spreadsheetCellText(cell) {
+  const raw = cell?.value ?? null;
+  // MergeValue 的内部形态：指向 master，取它的值即可（绝不调用 toString）。
+  const value = raw && typeof raw === "object" && "_master" in raw ? raw.value : raw;
+  return plainCellText(value).trim();
+}
+
+function plainCellText(value) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (typeof value !== "object") return String(value);
+  if (Array.isArray(value.richText)) return value.richText.map((part) => String(part?.text ?? "")).join("");
+  if (Array.isArray(value)) return value.map(plainCellText).join(" ");
+  if (value.error) return String(value.error);
+  if (Object.hasOwn(value, "result")) return plainCellText(value.result);
+  // 超链接单元格是 { text, hyperlink }。
+  if (Object.hasOwn(value, "text")) return plainCellText(value.text);
+  if (Object.hasOwn(value, "hyperlink")) return String(value.hyperlink);
+  return "";
 }
 
 function csvPages(buffer) {

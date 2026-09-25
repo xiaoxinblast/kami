@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { chunkReferencePages, extractReferenceFile, scanReferenceRisk } from "../src/reference-materials.mjs";
 import { createReferenceIndex } from "../src/reference-index.mjs";
-import { createReferenceToolRunner, SEARCH_REFERENCES_TOOL } from "../src/reference-tools.mjs";
+import { createReferenceToolRunner, LIST_REFERENCE_FILES_TOOL, READ_REFERENCE_FILE_TOOL, SEARCH_REFERENCES_TOOL } from "../src/reference-tools.mjs";
 
 const pages = [
   { page: 1, origin: "text", text: "第一章 角色设定\n\n林晚是主角，习惯自称“我”。\n\n她的搭档叫陆遥，两人在第三章才正式见面。" }
@@ -36,6 +36,32 @@ test("DOCX 之外的不支持格式直接报错，TXT 正常解析", async () =>
   assert.equal(parsed.format, "txt");
   assert.equal(parsed.characters > 0, true);
   await assert.rejects(() => extractReferenceFile({ filename: "guide.exe", base64: text }), /仅支持/u);
+});
+
+/**
+ * 实测事故：上传 END3_CorelTrain_SCENARIO_ORDER.xlsx 时整份参考资料导入失败，
+ * 报 "Cannot read properties of null (reading 'toString')"。
+ * 根因是 ExcelJS 的 cell.text 对"合并区域里空 master"的单元格会 null.toString()。
+ * 这类表格恰恰是参考资料最常见的形态，所以必须能读过去。
+ */
+test("XLSX 里合并区域的空单元格不会让参考资料导入崩掉", async () => {
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("SCENARIO");
+  sheet.getCell("A1").value = "章节";
+  sheet.getCell("B1").value = "文本";
+  sheet.mergeCells("C1:D1");           // 空的合并区域：master 值为 null
+  sheet.getCell("A2").value = "第一章";
+  sheet.getCell("B2").value = "序幕";
+  sheet.getCell("C2").value = "林晚登场";
+  const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  const parsed = await extractReferenceFile({ filename: "scenario.xlsx", base64: buffer.toString("base64") });
+  assert.equal(parsed.format, "xlsx");
+  assert.ok(parsed.pages.length >= 1);
+  const text = parsed.pages.map((page) => page.text).join("\n");
+  assert.match(text, /章节\t文本/u);
+  assert.match(text, /第一章\t序幕\t林晚登场/u);
 });
 
 function item(id, text, { embedding = null, risk = false, allowed = false, status = "ready" } = {}) {
@@ -81,6 +107,39 @@ test("工具运行器给出带边界声明的片段，并受调用次数预算�
   assert.match(read.text, /陆遥是她的搭档/u);
   const third = await runner.execute({ name: SEARCH_REFERENCES_TOOL, arguments: JSON.stringify({ query: "林晚" }), projectId: "p1" });
   assert.match(third.text, /查询次数已达上限/u);
+});
+
+/**
+ * "AI 自己读文件"：模型可以先列出资料，再按名称把某份资料整篇读进来
+ * （长资料配合 offset 分次读）。读取同样受本次翻译的注入预算约束。
+ */
+test("AI 能按名称直接读整份参考资料，并按预算分段", async () => {
+  const chunks = [
+    { id: "c1", documentId: "d1", documentName: "SCENARIO_ORDER", documentStatus: "ready", libraryEnabled: true, ordinal: 0, heading: "", page: "1", origin: "text", text: "第一篇" },
+    { id: "c2", documentId: "d1", documentName: "SCENARIO_ORDER", documentStatus: "ready", libraryEnabled: true, ordinal: 1, heading: "", page: "1", origin: "text", text: "第二篇" }
+  ];
+  const index = createReferenceIndex({ loader: async () => chunks });
+  const runner = createReferenceToolRunner({ index, budget: { maxCalls: 6, maxCharsTotal: 7 } });
+
+  const list = await runner.execute({ name: LIST_REFERENCE_FILES_TOOL, arguments: "{}", projectId: "p1" });
+  assert.match(list.text, /SCENARIO_ORDER（2 段 \/ 6 字）/u);
+
+  // 名称支持部分匹配、大小写不敏感。
+  const first = await runner.execute({ name: READ_REFERENCE_FILE_TOOL, arguments: JSON.stringify({ document: "scenario", limit: 4 }), projectId: "p1" });
+  assert.match(first.text, /仅供事实、设定与用词参考/u, "读文件同样要带资料边界声明");
+  assert.match(first.text, /资料：SCENARIO_ORDER（第 1-4 字 \/ 共 7 字）/u);
+  assert.match(first.text, /第一篇/u);
+  assert.match(first.text, /offset/u, "没读完要告诉模型怎么继续");
+
+  const second = await runner.execute({ name: READ_REFERENCE_FILE_TOOL, arguments: JSON.stringify({ document: "SCENARIO_ORDER", offset: 4, limit: 4 }), projectId: "p1" });
+  assert.match(second.text, /第二篇/u);
+
+  // 预算（7 字）已经用完：第三次读取要明确拒绝，而不是继续往提示词里塞。
+  const third = await runner.execute({ name: READ_REFERENCE_FILE_TOOL, arguments: JSON.stringify({ document: "SCENARIO_ORDER", offset: 0 }), projectId: "p1" });
+  assert.match(third.text, /已达上限/u);
+
+  const missing = await runner.execute({ name: READ_REFERENCE_FILE_TOOL, arguments: JSON.stringify({ document: "不存在的资料" }), projectId: "p1" });
+  assert.match(missing.text, /没有找到名为/u);
 });
 
 test("上游返回 tool_calls 时执行工具并回灌，第二轮给出最终译文", async () => {

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { CONTENT_TYPES, CONTENT_TAGS, LOCALES } from "../src/config.mjs";
+import { waitForCount } from "./fixtures/browser-wait.mjs";
 
 /**
  * 真实浏览器回归：学习中心的「全部语体 / 全部领域」
@@ -158,7 +159,8 @@ test("学习中心支持全部语体 / 全部领域，条目带自己的范围�
     await page.locator("#learningDomain").selectOption("game");
     await page.waitForFunction(() => document.querySelector("#learningScopeHint")?.hidden === false || document.querySelector("#learningTrajectoryCount")?.textContent === "2");
     assert.deepEqual(learningCalls.at(-1), { locale: "zh-CN", contentType: "dialogue", domain: "game", project: "project-1" });
-    assert.equal(await page.locator("#learningEvidenceList .learning-scope-tag").count(), 0, "具体范围不需要重复标范围");
+    // 等渲染到位再断言：切了两个下拉会连着发两次请求，读早了还是上一个（全部）视图的 DOM。
+    await waitForCount(page.locator("#learningEvidenceList .learning-scope-tag"), 0);
     assert.match(await page.locator("#learningEvidenceList").innerText(), /来源：/u, "每条轨迹要写清来自哪个文件");
     assert.equal(await page.locator("#learningGateRun").isDisabled(), false, "切回具体范围后按钮要恢复可点");
     assert.equal(await page.locator("#learningGateRun").getAttribute("title"), "", "恢复可点后要清掉说明");

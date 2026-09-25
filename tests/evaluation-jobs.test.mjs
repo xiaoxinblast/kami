@@ -145,6 +145,10 @@ test("后台评测任务完成全流程：双变体重跑、成本采集、保�
 
   const persistedFiles = (await readdir(jobsDirectory)).filter((file) => file.endsWith(".json"));
   assert.equal(persistedFiles.length, 1, "任务检查点应持久化到磁盘");
+  // 检查点不再缩进：真实检查点里输入快照占 77 MB，缩进后写成 200 MB，
+  // 每完成一对样本都要重写一次，白白放大写盘量与临时字符串。
+  const checkpointText = await readFile(join(jobsDirectory, `${createdJob.jobId}.json`), "utf8");
+  assert.doesNotMatch(checkpointText, /\n\s+"[^"]+":/u, "检查点不应带缩进");
 
   const reusedJob = await runner.create({ scope, champion, challenger, trajectories, requireCost: true });
   const reusedFinal = await waitForTerminal(runner, reusedJob.jobId);
@@ -237,6 +241,61 @@ test("表达型 Skill 的重复采样结论相反时标记 unstable 并禁止晋
   assert.equal(finalJob.result.report.reproducibility.stable, false);
   assert.deepEqual(finalJob.result.report.reproducibility.repeatConclusions.map((item) => item.status), ["promote", "reject"]);
   assert.equal(saved.decision, "needs_review");
+});
+
+/**
+ * 实测事故：评测跑一会儿工作台就"连不上"——进程被 OOM 掉。
+ * 单个检查点文件 199.7 MB（其中输入快照 77 MB），JSON.parse 之后一个任务就吃 910 MB 堆；
+ * 重启时把每个历史任务都读进内存，再加上正在跑的评测，很容易顶爆 Node 默认的 ~4 GB 堆。
+ * 所以：已完成的评测只在内存里留摘要（快照仍在磁盘上，供审计与复现），并且检查点不再缩进。
+ */
+test("已完成任务的输入快照留在磁盘、不进内存，检查点也不缩进", async () => {
+  const scope = { locale: "zh-CN", contentType: "general", domain: "game", project: "default" };
+  const jobsDirectory = join(dataDir, "learning", "jobs-completed-payload");
+  await mkdir(jobsDirectory, { recursive: true });
+  const completedJob = {
+    jobId: "completed-payload-1",
+    kind: "skill-evaluation",
+    scope,
+    championId: "champion-1",
+    challengerId: "challenger-1",
+    championVariant: { id: "champion-1" },
+    challengerVariant: { id: "challenger-1" },
+    requestedCaseIds: ["case-1"],
+    caseTrajectories: {},
+    caseSamples: { "case-1": { champion: [{ caseId: "case-1" }], challenger: [{ caseId: "case-1" }] } },
+    caseFailures: {},
+    benchmarkSnapshot: { terms: Array.from({ length: 200 }, (_, index) => ({ id: `term-${index}`, padding: "x".repeat(200) })) },
+    snapshotFingerprint: "fingerprint-1",
+    status: "completed",
+    result: { evaluationId: "eval-1", report: { promotable: false } },
+    error: "",
+    createdAt: "2026-09-25T00:00:00.000Z",
+    updatedAt: "2026-09-25T00:10:00.000Z",
+    finishedAt: "2026-09-25T00:10:00.000Z"
+  };
+  await writeFile(join(jobsDirectory, "completed-payload-1.json"), JSON.stringify(completedJob, null, 2));
+
+  const runner = jobsModule.createEvaluationJobRunner({
+    benchmark: async () => ({ caseId: "unused" }),
+    jobsDirectory,
+    concurrency: 1,
+    deps: makeDeps()
+  });
+  await runner.initialize();
+
+  // 摘要照常可用；结论与复现信息（指纹）都还在。
+  const restored = runner.get("completed-payload-1");
+  assert.equal(restored.status, "completed");
+  assert.equal(restored.result.report.promotable, false);
+  assert.equal(restored.reproducibility.snapshotFingerprint, "fingerprint-1");
+  // 磁盘上仍然保留完整快照：审计与复现要用，不能因为内存优化把它删掉。
+  const onDisk = JSON.parse(await readFile(join(jobsDirectory, "completed-payload-1.json"), "utf8"));
+  assert.equal(onDisk.benchmarkSnapshot.terms.length, 200, "磁盘上的检查点要保留输入快照");
+  // 内存释放无法从外部观察（publicJob 本来就不暴露快照），用源码级断言守住这两处调用点。
+  const source = await readFile(new URL("../src/evaluation-jobs.mjs", import.meta.url), "utf8");
+  assert.match(source, /function releaseCompletedPayload\(job\)/u);
+  assert.equal((source.match(/releaseCompletedPayload\(job\);/gu) || []).length, 2, "恢复与完成两条路径都要释放内存里的快照");
 });
 
 test("完成钩子失败只记录警告，不把已完成的评测伪装成失败", async () => {

@@ -12,8 +12,22 @@ param(
   [int]$TimeoutSeconds = 20
 )
 
-$targets = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-  Where-Object { $_.CommandLine -match 'server\.mjs' -and $_.CommandLine -notmatch 'artifact-template-picker' })
+# Only stop Kami's own workbench server. `npm start` runs:
+#   node --use-system-ca --env-file=directus/.env server.mjs
+# Matching bare "server.mjs" is too loose: unrelated tools ship their own
+# ./server.mjs (Codex's app-tools MCP server does), and killing them shows up as
+# random tool failures. Require the --env-file marker, and additionally treat
+# whoever currently holds the port as a Kami server even if it was started
+# differently (e.g. a manual PORT=4173 node server.mjs).
+$nodeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'")
+$portOwners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique)
+$targets = @($nodeProcesses |
+  Where-Object {
+    $_.CommandLine -match 'server\.mjs' -and
+    $_.CommandLine -notmatch 'artifact-template-picker' -and
+    (($_.CommandLine -match '--env-file') -or ($portOwners -contains $_.ProcessId))
+  })
 
 if ($targets.Count -eq 0) {
   Write-Host "  no Kami server process found"

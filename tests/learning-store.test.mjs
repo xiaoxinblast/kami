@@ -10,6 +10,7 @@ delete process.env.EMBEDDING_MODEL;
 
 const {
   activateTranslationSkill,
+  deleteTranslationSkill,
   getLearningTrajectory,
   getSkillEvaluation,
   getTranslationSkill,
@@ -189,4 +190,38 @@ test("JSON concurrent learning writes do not lose records and stale candidates c
   await assert.rejects(() => activateTranslationSkill(stale.id), /current champion/);
   assert.equal((await getTranslationSkill(current.id))?.status, "champion");
   await assert.rejects(() => updateTranslationSkill(current.id, { status: "rejected" }), /must be replaced or rolled back/);
+});
+
+test("删除技能版本：只删指定版本，别的版本不受影响", async () => {
+  const scope = { locale: "th-TH", contentType: "ui", domain: "game", project: "delete-skill" };
+  const champion = await saveTranslationSkill({ ...scope, name: "baseline", status: "champion", strategy: {} });
+  const rejected = await saveTranslationSkill({ ...scope, name: "被拒绝的候选", status: "rejected", parentId: champion.id, strategy: {} });
+
+  assert.equal(await deleteTranslationSkill(rejected.id), true);
+  assert.equal(await getTranslationSkill(rejected.id), null, "被删的版本读不回来");
+  assert.ok(await getTranslationSkill(champion.id), "生效版本不受影响");
+  assert.equal((await listTranslationSkills({ ...scope, limit: 10 })).length, 1);
+  // 删不存在的版本返回 false（路由层据此报 404），而不是静默成功。
+  assert.equal(await deleteTranslationSkill("does-not-exist"), false);
+});
+
+/**
+ * 实测事故：候选被拒绝后仍占着 version 2，再点「重新生成候选」就 409
+ * "Translation skill version 2 already exists in this scope"——生成路径按
+ * 「生效版本 + 1」提交建议版本号，存储层照抄就撞号。
+ */
+test("版本号由存储层分配：建议版本被占用时顺延到下一个空闲版本", async () => {
+  const scope = { locale: "th-TH", contentType: "dialogue", domain: "game", project: "version-alloc" };
+  const champion = await saveTranslationSkill({ ...scope, name: "v1", status: "champion", strategy: {} });
+  const rejected = await saveTranslationSkill({ ...scope, name: "被拒绝的 v2", version: 2, status: "rejected", parentId: champion.id, strategy: {} });
+  assert.equal(rejected.version, 2);
+
+  // 生成路径会带着"v2"来提交（因为它只看到 champion.version + 1）。
+  const regenerated = await saveTranslationSkill({ ...scope, name: "重新生成的候选", version: 2, status: "challenger", parentId: champion.id, strategy: {} });
+  assert.equal(regenerated.version, 3, "撞号时顺延，而不是直接 409");
+  assert.equal((await listTranslationSkills({ ...scope, limit: 10 })).map((item) => item.version).sort().join(","), "1,2,3");
+
+  // 显式给一个更高的版本号仍然被尊重。
+  const explicit = await saveTranslationSkill({ ...scope, name: "显式 v7", version: 7, status: "challenger", parentId: champion.id, strategy: {} });
+  assert.equal(explicit.version, 7);
 });

@@ -112,6 +112,9 @@ import {
   ,getDirectusResourceLibraries
   ,saveDirectusResourceLibrary
   ,deleteDirectusResourceLibrary
+  ,deleteDirectusTranslationSkill
+  ,deleteDirectusStyleProfile
+  ,deleteDirectusUserProfile
   ,saveDirectusAssets
 } from "./directus-store.mjs";
 
@@ -479,6 +482,26 @@ async function saveJsonUserProfile(input) {
   profiles.unshift(profile);
   await writeJsonAtomic(path, profiles);
   return profile;
+}
+
+/** 删除人工导入的风格指南（styles/profiles.json 里的一整篇文档）。 */
+async function deleteJsonUserProfile(id) {
+  const path = join(ROOT, "styles", "profiles.json");
+  const profiles = await readJson(path, []);
+  const next = profiles.filter((item) => item.id !== String(id));
+  if (next.length === profiles.length) return false;
+  await writeJsonAtomic(path, next);
+  return true;
+}
+
+/** 删除自动蒸馏出的风格规范版本；生效版本由路由层拦住。 */
+async function deleteJsonStyleProfile(id) {
+  const located = await locateJsonStyleProfile(id);
+  if (!located || located.kind === "user_profile") return false;
+  const next = located.profiles.filter((item) => item.id !== String(id));
+  if (next.length === located.profiles.length) return false;
+  await writeJsonAtomic(located.path, next);
+  return true;
 }
 
 async function saveJsonStyleEvidence(input) {
@@ -1584,7 +1607,11 @@ async function saveJsonTranslationSkill(input) {
     const scoped = items.filter((item) => matchesLearningScope(item, scope));
     const previous = scoped.sort((a, b) => Number(b.version) - Number(a.version))[0] || null;
     const status = assertChoice(input.status ?? existing?.status ?? "draft", TRANSLATION_SKILL_STATUSES, "translation skill status");
-    const version = existing?.version || Math.max(1, Number(input.version) || (Number(previous?.version) || 0) + 1);
+    // 版本号只由存储层分配：调用方给的"建议版本"可能已经过时——例如候选被拒绝后
+    // 仍按「生效版本 + 1」提交，就会撞上那个还留着的旧版本号，手动重新生成候选直接 409
+    // （实测 "Translation skill version 2 already exists in this scope"）。
+    // 取「建议版本」与「下一个空闲版本」的较大者，既尊重显式指定，又不会撞号。
+    const version = existing?.version || Math.max(1, Number(input.version) || 0, (Number(previous?.version) || 0) + 1);
     if (!existing && scoped.some((item) => Number(item.version) === version)) throw conflict(`Translation skill version ${version} already exists in this scope`);
     const now = new Date().toISOString();
     const item = {
@@ -1627,6 +1654,18 @@ async function listJsonTranslationSkills(filters = {}) {
 async function getJsonTranslationSkill(id) {
   const items = await readJson(learningPath("skills.json"), []);
   return items.find((item) => item.id === String(id)) || null;
+}
+
+/** 删除一个技能版本（候选 / 被拒绝 / 旧版本）。生效版本由路由层拦住，不在这里判断。 */
+async function deleteJsonTranslationSkill(id) {
+  const path = learningPath("skills.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const next = items.filter((item) => item.id !== String(id));
+    if (next.length === items.length) return false;
+    await writeJsonAtomic(path, next);
+    return true;
+  });
 }
 
 async function updateJsonTranslationSkill(id, patch) {
@@ -2043,6 +2082,21 @@ export async function findStyleProfile(id) {
 /** 就地改写某份风格规范的规则集（不新建版本），供人工处置规则冲突使用。 */
 export async function updateStyleProfileRules(id, patch) {
   return usesDirectus() ? updateDirectusStyleProfileRules(id, patch) : updateJsonStyleProfileRules(id, patch);
+}
+
+/** 删除一个技能版本（生效版本由调用方拦住）。 */
+export async function deleteTranslationSkill(id) {
+  return usesDirectus() ? deleteDirectusTranslationSkill(id) : deleteJsonTranslationSkill(id);
+}
+
+/** 删除一个自动蒸馏出的风格规范版本（生效版本由调用方拦住）。 */
+export async function deleteStyleProfile(id) {
+  return usesDirectus() ? deleteDirectusStyleProfile(id) : deleteJsonStyleProfile(id);
+}
+
+/** 删除人工导入的风格指南（整篇文档）。 */
+export async function deleteUserProfile(id) {
+  return usesDirectus() ? deleteDirectusUserProfile(id) : deleteJsonUserProfile(id);
 }
 
 export async function saveStyleProfileEvaluation(id, evaluation) {
