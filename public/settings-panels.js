@@ -48,7 +48,7 @@ const parameterTabs = [
   { id: "quality", title: "质量与 QA", subtitle: "通过分、权重与扣分", icon: "check" },
   { id: "retrieval", title: "检索与上下文", subtitle: "译例、反例与邻段", icon: "search" },
   { id: "learning", title: "学习与评测", subtitle: "蒸馏、提议与门禁", icon: "spark" },
-  { id: "orthography", title: "分享与标点", subtitle: "拆解上限与作品名括号", icon: "quote" }
+  { id: "orthography", title: "标点约定", subtitle: "作品名括号", icon: "quote" }
 ];
 
 function icon(name) {
@@ -103,6 +103,14 @@ function thinkingMarkup(role, { thinking, effort }) {
   </div>`;
 }
 
+/** 连接与鉴权页的「测试连接」：拿当前填的值（含未保存的修改）打一次最小请求。 */
+function probeMarkup() {
+  return `<div class="sp-probe">
+    <button type="button" class="sp-ghost" data-provider-probe>测试连接</button>
+    <p data-probe-result role="status" aria-live="polite">用当前填写的地址与模型发一条最小请求（不保存设置）。</p>
+  </div>`;
+}
+
 export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
   let active = "connection";
   let provider = null;
@@ -147,6 +155,7 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
         const controls = role ? thinkingMarkup(role, { thinking: valueOf(`${role}Thinking`, "enabled"), effort: valueOf(`${role}Effort`, "high") }) : "";
         return fieldMarkup({ ...field, placeholder, controls }, value);
       }).join("")}</div>
+      ${tab.id === "connection" ? probeMarkup() : ""}
       ${tab.id === "connection" ? `<div class="sp-note"><strong>密钥安全</strong><p>API Key 使用 Windows 当前用户级 DPAPI 加密保存，不会以明文写入项目文件。</p></div>` : ""}
       ${tab.id === "models" ? `<div class="sp-note"><strong>思考设置</strong><p>每个角色单独设置是否思考、思考多深（低 / 高 / 最高）。DeepSeek 官方 API：关闭思考时发送 thinking.type=disabled，开启时按强度发送 reasoning_effort（默认高）。专用模型留空仍会复用主模型，但思考设置按角色独立生效。</p></div>` : ""}
     </section>`).join("");
@@ -184,6 +193,42 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
     }
   }
 
+  /** 测试连接：只报告结果，不改配置、不关闭面板。 */
+  async function probe(button) {
+    const result = find("[data-probe-result]");
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "测试中…";
+    if (result) {
+      result.className = "";
+      result.textContent = "正在用当前填写的地址发一条最小请求……";
+    }
+    try {
+      const outcome = await api("/api/provider/probe", {
+        method: "POST",
+        body: JSON.stringify({
+          baseUrl: valueOf("baseUrl"),
+          model: valueOf("model"),
+          apiKey: draft && Object.hasOwn(draft, "apiKey") ? draft.apiKey : ""
+        })
+      });
+      if (result) {
+        result.className = outcome.ok ? "ok" : "fail";
+        result.textContent = outcome.ok
+          ? `连接正常：${outcome.model} · ${outcome.baseUrl} · ${outcome.latencyMs} ms`
+          : `连接失败：${outcome.error}（检查 Base URL、网络与 API Key）`;
+      }
+    } catch (error) {
+      if (result) {
+        result.className = "fail";
+        result.textContent = `测试请求失败：${error.message}`;
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+
   dialog.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (!button || saving) return;
@@ -191,6 +236,7 @@ export function createProviderSettingsPanel(dialog, { api, onSaved } = {}) {
       active = button.dataset.tab;
       render();
     }
+    if (button.matches("[data-provider-probe]")) probe(button);
     if (button.matches("[data-close-panel]")) dialog.close();
   });
   dialog.addEventListener("input", (event) => {
@@ -235,7 +281,7 @@ function parameterSections(group, fields) {
       else if (field.path.includes("Evaluation")) section = "评测门禁";
       else if (field.path.includes("distill")) section = "蒸馏取样";
       else if (field.path.includes("rule") || field.path.includes("conflict")) section = "规则治理";
-    } else if (group === "share") section = "分享页";
+    }
     if (!sections.has(section)) sections.set(section, []);
     sections.get(section).push(field);
   }
@@ -266,17 +312,16 @@ export function createParameterSettingsPanel(dialog, { api, onSaved } = {}) {
       if (tab.id === "orthography") {
         const source = draft?.orthography?.titleBrackets || payload.settings.orthography?.titleBrackets || {};
         const bracketRows = Object.entries(payload.locales).map(([locale, label]) => `<label class="sp-field"><span><strong>${escape(label)}</strong><small>${escape(locale)}</small></span><div class="sp-input"><select data-bracket="${escape(locale)}">${payload.titleBracketChoices.map((choice) => `<option value="${escape(choice)}"${source[locale] === choice ? " selected" : ""}>${escape(choice || "不检查")}</option>`).join("")}</select></div></label>`).join("");
-        const shareFields = groups.get("share")?.fields || [];
-        return `<section class="sp-panel" data-panel="${tab.id}" ${tab.id === active ? "" : "hidden"}><div class="sp-page-heading"><span class="sp-eyebrow">${escape(tab.subtitle)}</span><h3>${escape(tab.title)}</h3><p>控制分享页拆解规模，并配置作品名使用哪对括号。</p></div>${shareFields.length ? `<div class="sp-card"><h4>分享页</h4>${renderFields(shareFields)}</div>` : ""}<div class="sp-card"><h4>作品名括号约定</h4>${bracketRows}</div></section>`;
+        return `<section class="sp-panel" data-panel="${tab.id}" ${tab.id === active ? "" : "hidden"}><div class="sp-page-heading"><span class="sp-eyebrow">${escape(tab.subtitle)}</span><h3>${escape(tab.title)}</h3><p>配置作品名使用哪对括号。</p></div><div class="sp-card"><h4>作品名括号约定</h4>${bracketRows}</div></section>`;
       }
-      const group = groups.get(tab.id) || groups.get("share");
+      const group = groups.get(tab.id);
       const sections = parameterSections(tab.id, group?.fields || []);
       return `<section class="sp-panel" data-panel="${tab.id}" ${tab.id === active ? "" : "hidden"}><div class="sp-page-heading"><span class="sp-eyebrow">${escape(tab.subtitle)}</span><h3>${escape(tab.title)}</h3><p>${tab.id === "quality" ? "控制 AIQA 通过分、修订轮数、三维权重和扣分。" : tab.id === "retrieval" ? "控制翻译时注入多少参考译例、QA 反例和邻段上下文。" : "控制风格/画像蒸馏、自动提议和评测门禁。"}</p></div>${[...sections.entries()].map(([section, fields]) => `<div class="sp-card"><h4>${escape(section)}</h4>${renderFields(fields)}</div>`).join("")}</section>`;
     }).join("");
     dialog.innerHTML = panelShell({
       title: "参数设置",
       eyebrow: "WORKBENCH TUNING",
-      description: "按分类调整质量、检索、学习和分享行为；改动保存后立即生效。",
+      description: "按分类调整质量、检索与学习行为；改动保存后立即生效。",
       tabs: parameterTabs,
       active,
       body,

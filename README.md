@@ -87,7 +87,7 @@ npm run directus:snapshot
 
 **自动收尾规则**：用 `启动Kami工作台.cmd` 启动时（`KAMI_AUTO_SHUTDOWN=1`），真正关掉最后一个页面 15 秒后会停止工作台并退出 Docker Desktop；页面被最小化、切到后台标签等"挂机"状态不再算关闭——浏览器会把定时器节流到每分钟一次甚至冻结，只有心跳失联满 30 分钟才按关闭处理。后台任务（导入、清洗、批次翻译、导出）执行期间一律不自动收尾，任务结束再按上面的规则收尾。启动后如果一直没有任何页面报到（例如浏览器没打开），要等 5 分钟才收尾，避免浏览器冷启动慢一点就被误杀。三个宽限期分别用 `KAMI_AUTO_SHUTDOWN_CLOSE_GRACE_MS`（默认 15000）、`KAMI_AUTO_SHUTDOWN_HEARTBEAT_GRACE_MS`（默认 1800000）和 `KAMI_AUTO_SHUTDOWN_STARTUP_GRACE_MS`（默认 300000）调整。
 
-**启动容错**：`KAMI_STORE=directus` 时如果 Directus 不可用（Docker 未启动、健康检查失败或缺少 token），Kami 不会崩溃，而是自动回退到本地 JSON 存储，并在控制台、健康检查接口和页面顶部横幅中告警。Directus 恢复后重启服务即自动回到资产后台模式。注意：回退期间的写入保存在 `data/` 下，不会自动同步回 Directus。
+**Directus 是唯一的生产存储，连不上就直接启动失败。** 这里曾经会静默回退到本地 JSON，代价比看起来大得多：回退后术语、翻译记忆、风格证据与学习轨迹都不在视野里，模型在零参考的情况下继续翻译，同时新写入落到 `data/` 形成数据分叉，界面横幅并不足以让人及时发现。现在 `KAMI_STORE=directus` 时启动探针失败会带上排查清单直接退出（Docker Desktop、`npm run directus:up`、`npm run directus:provision`、`directus/.env` 里的 `DIRECTUS_URL` 与 Service Token）。JSON 存储仍然保留，但只服务于单元测试。
 
 默认模型地址是本地 Ollama 的 OpenAI-compatible 端点：
 

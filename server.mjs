@@ -1,5 +1,4 @@
 import http from "node:http";
-import os from "node:os";
 import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -10,11 +9,14 @@ import { classifyContent, descriptorFromContext, inferContentTags, resolveDomain
 import { buildContextPack } from "./src/context-pack.mjs";
 import { refineCorpus } from "./src/corpus.mjs";
 import { matchTerms } from "./src/matcher.mjs";
-import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, glossTranslationWithModel, isEmbeddingConfigured, probeModelAvailability, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig } from "./src/provider.mjs";
+import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig } from "./src/provider.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, countStyleEvidence, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveShare, getShare, listShares, updateShare, deleteShare, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary } from "./src/store.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
+import { chunkReferencePages, extractReferenceFile, scanReferenceRisk } from "./src/reference-materials.mjs";
+import { buildReferenceToolRunner as assembleReferenceToolRunner, createProjectReferenceIndex } from "./src/reference-context.mjs";
+import { canDeleteQaIssues, deleteQaIssue } from "./src/qa-issue-deletion.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
@@ -38,8 +40,6 @@ import { environmentOverrides, getSettings, resetSettings, saveSettings } from "
 import { classifyChange, isNegativeEvidence, positiveEvidenceOnly } from "./src/style-delta.mjs";
 import { NO_STYLE_PROFILE_ID, STYLE_MIN_EVALUATION_SAMPLES, STYLE_PROMOTION_GUARDRAILS, benchmarkStyleVariant, selectStyleHoldout, styleVariant, validateStylePromotionState } from "./src/style-benchmark.mjs";
 import { proposeChallengerSkill, selectProposalTrajectories } from "./src/skill-proposal.mjs";
-import { finalizeShareGlossGeneration } from "./src/share-gloss.mjs";
-import { buildAdoptedStyleEvidence, buildKnownIssueFeedbackRequest, presentKnownIssue, selectKnownIssues } from "./src/share-feedback.mjs";
 import { checkFactSchema, detectDeliveryContext, extractFactSchema } from "./src/fact-schema.mjs";
 import { applyProjectQaPolicy, projectRuleMetadata } from "./src/project-config.mjs";
 import { assessTranslationRisk, decideQualityRoute, qualityThresholdForRisk, selectTranslationRoute, TRANSLATION_ROUTES } from "./src/translation-routing.mjs";
@@ -145,61 +145,6 @@ function json(res, status, payload) {
     "cache-control": "no-store"
   });
   res.end(body);
-}
-
-/** 本机局域网 IPv4 候选分享地址（同事在同一网络内可访问）。 */
-function lanShareUrls(token) {
-  const urls = [];
-  for (const entries of Object.values(os.networkInterfaces())) {
-    for (const entry of entries || []) {
-      if (entry.family === "IPv4" && !entry.internal) urls.push(`http://${entry.address}:${PORT}/share/${token}`);
-    }
-  }
-  return [...new Set(urls)];
-}
-
-/** 把分享记录里的一条反馈组装成跨分享的统一条目。 */
-function feedbackEntry(share, feedback) {
-  const segment = (share.segments || []).find((item) => item.index === feedback.segmentIndex);
-  return {
-    id: feedback.id,
-    token: share.token,
-    filename: share.filename,
-    locale: share.locale,
-    contentType: share.contentType,
-    domain: share.domain,
-    segmentIndex: feedback.segmentIndex,
-    source: segment?.source || "",
-    translation: segment?.translation || "",
-    request: feedback.request,
-    suggestedTranslation: feedback.suggestedTranslation || "",
-    reviewer: feedback.reviewer || "匿名",
-    status: feedback.status || "pending",
-    createdAt: feedback.createdAt,
-    resolvedAt: feedback.resolvedAt || ""
-  };
-}
-
-/** 单个分享最多生成的语素拆解段数。 */
-/** 出厂值；实际生效值来自设置面板（getSettings().share.glossLimit）。 */
-const SHARE_GLOSS_LIMIT = 30;
-
-/** 简体中文译文无需再向中文审阅者做“目标语→中文”的语素拆解。 */
-function shareNeedsGloss(locale) {
-  return locale !== "zh-CN";
-}
-
-function finalizeShareWithoutGloss(share) {
-  const meta = share?.meta && typeof share.meta === "object" && !Array.isArray(share.meta) ? { ...share.meta } : {};
-  delete meta.generationError;
-  delete meta.generationFailedSegments;
-  return {
-    ...share,
-    status: "ready",
-    glossedSegments: 0,
-    totalSegments: Number(share?.totalSegments) || (share?.segments || []).length,
-    meta: Object.keys(meta).length ? meta : null
-  };
 }
 
 /**
@@ -366,75 +311,118 @@ async function persistQualityRun({ scope, skill, result, triggeredBy }) {
 }
 
 /**
- * 后台生成分享的语素拆解：请求返回后异步执行，进度写回分享记录，
- * 服务重启后由启动恢复逻辑续跑未完成的分享。
+ * 参考资料检索索引：按项目缓存，写入后失效。只加载启用资料库里的可用资料。
  */
-async function generateShareGlosses(token) {
-  const share = await getShare(token);
-  if (!share || share.status === "ready" || share.status === "failed") return;
-  if (!shareNeedsGloss(share.locale)) {
-    await updateShare(token, finalizeShareWithoutGloss);
-    return;
-  }
-  const targets = (share.segments || [])
-    .slice(0, getSettings().share.glossLimit)
-    .map((segment, index) => ({ index, segment }))
-    .filter(({ segment }) => !segment.gloss);
-  if (!targets.length) {
-    await updateShare(token, (item) => finalizeShareGlossGeneration(item, { maxSegments: getSettings().share.glossLimit }));
-    return;
-  }
-  try {
-    await probeModelAvailability({ timeoutMs: 20_000 });
-  } catch (error) {
-    await updateShare(token, (item) => finalizeShareGlossGeneration(item, { failures: [error], maxSegments: getSettings().share.glossLimit }));
-    return;
-  }
-  const flush = async (updates) => {
-    await updateShare(token, (item) => {
-      const nextSegments = item.segments.map((segment) => {
-        const gloss = updates.get(segment.index);
-        return gloss ? { ...segment, gloss } : segment;
-      });
-      const limit = Math.min(nextSegments.length, SHARE_GLOSS_LIMIT);
-      const glossed = nextSegments.slice(0, limit).filter((segment) => segment.gloss).length;
-      return { ...item, segments: nextSegments, glossedSegments: glossed, status: glossed >= limit ? "ready" : "generating" };
-    });
-  };
-  const settled = await runTaskPool(
-    targets.map(({ segment }) => ({ translation: segment.translation, locale: share.locale })),
-    (target) => glossTranslationWithModel({ translation: target.translation, locale: target.locale }),
-    { concurrency: 2 }
-  );
-  const updates = new Map();
-  const failures = [];
-  for (let index = 0; index < targets.length; index += 1) {
-    const result = settled[index];
-    if (result?.status === "fulfilled" && result.value) updates.set(targets[index].segment.index, result.value);
-    else failures.push(result?.reason || "模型未返回有效的语素拆解结果");
-    if (updates.size >= 5 || index === targets.length - 1) {
-      await flush(updates);
-      updates.clear();
-    }
-  }
-  const final = await getShare(token);
-  if (final) await updateShare(token, (item) => finalizeShareGlossGeneration(item, { failures, maxSegments: SHARE_GLOSS_LIMIT }));
+const referenceIndex = createProjectReferenceIndex();
+
+/** 生产翻译与质检共用的参考资料工具装配。 */
+function buildReferenceToolRunner({ projectId = "", onActivity = null, skill = null, onlyChunkIds = null } = {}) {
+  return assembleReferenceToolRunner({
+    index: referenceIndex,
+    projectId,
+    settings: getSettings().reference || {},
+    skill,
+    onActivity,
+    onlyChunkIds
+  });
 }
 
-/** 后台任务发生存储级/意外错误时也必须离开 generating，避免永久假进度。 */
-function startShareGlossGeneration(token, label = "分享拆解生成失败") {
-  generateShareGlosses(token).catch(async (error) => {
-    console.error(`${label} ${token}:`, error.message);
-    try {
-      await updateShare(token, (item) => finalizeShareGlossGeneration(item, { failures: [error], maxSegments: getSettings().share.glossLimit }));
-    } catch (updateError) {
-      console.error(`分享拆解失败状态写回失败 ${token}:`, updateError.message);
-    }
+/**
+ * 参考资料导入：解析 → 分块 → 向量化 → 入库。扫描页交给模型识图。
+ */
+async function ingestReferenceDocument({ projectId, libraryId, name, kind, contentType, domain, filename, base64, onProgress = null }) {
+  const document = await saveReferenceDocument({
+    projectId, libraryId, name, kind, contentType, domain,
+    sourceFile: filename, sourceFormat: "", status: "indexing"
   });
+  try {
+    onProgress?.({ phase: "parsing", message: "正在解析参考资料", percent: 5 });
+    const parsed = await extractReferenceFile({
+      filename,
+      base64,
+      onScannedPage: async ({ page, render }) => {
+        onProgress?.({ phase: "vision", message: `第 ${page} 页没有文字层，正在用模型识图`, percent: 20 });
+        const png = await render();
+        return await extractTextFromImageWithModel({ base64: png });
+      }
+    });
+    const chunks = chunkReferencePages(parsed.pages);
+    if (!chunks.length) throw new Error("没有解析出可用文字内容");
+    const prepared = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      let embedding = null;
+      try {
+        embedding = (await embedSource(chunk.text))?.vector ?? null;
+      } catch {
+        embedding = null;
+      }
+      prepared.push({ ...chunk, embedding, risk: scanReferenceRisk(chunk.text), allowed: false, projectId });
+      if (index % 20 === 0 || index === chunks.length - 1) {
+        onProgress?.({ phase: "indexing", message: `正在向量化片段 ${index + 1} / ${chunks.length}`, percent: 30 + Math.round((index / chunks.length) * 60) });
+      }
+    }
+    await replaceReferenceChunks(document.id, { projectId, chunks: prepared });
+    const updated = await updateReferenceDocument(document.id, {
+      status: "ready",
+      sourceFormat: parsed.format,
+      characters: parsed.characters,
+      chunkCount: prepared.length,
+      error: "",
+      ingestReport: {
+        format: parsed.format,
+        pages: parsed.pages.length,
+        visionPages: parsed.pages.filter((page) => page.origin === "vision").length,
+        riskChunks: prepared.filter((chunk) => chunk.risk).length
+      }
+    });
+    referenceIndex.invalidate(projectId);
+    return updated;
+  } catch (error) {
+    await updateReferenceDocument(document.id, { status: "failed", error: String(error.message || error).slice(0, 500) }).catch(() => {});
+    throw error;
+  }
+}
+
+async function runReferenceIngestInBackground({ taskId, projectId, libraryId, name, kind, contentType, domain, filename, base64 }) {
+  const control = beginBackgroundRun(taskId);
+  try {
+    const document = await ingestReferenceDocument({
+      projectId, libraryId, name, kind, contentType, domain, filename, base64,
+      onProgress: (update) => updateBackgroundTaskProgress(taskId, { progress: update }).catch(() => {})
+    });
+    await updateBackgroundTaskProgress(taskId, {
+      status: "completed",
+      progress: { phase: "completed", message: `参考资料已就绪：${document.chunkCount} 个片段`, percent: 100, completed: document.chunkCount, total: document.chunkCount },
+      payload: { documentId: document.id, name: document.name, chunkCount: document.chunkCount, characters: document.characters }
+    });
+  } catch (error) {
+    const cancelled = isCancellation(error);
+    await updateBackgroundTaskProgress(taskId, {
+      status: cancelled ? "needs_attention" : "failed",
+      progress: { phase: cancelled ? "cancelled" : "failed", message: error.message, percent: 100 },
+      payload: { error: error.message }
+    }).catch(() => {});
+  } finally {
+    endBackgroundRun(taskId, control);
+  }
 }
 
 function learningScope({ locale, contentType = "general", domain = "general", project = "default" }) {
   return { locale: assertLocale(locale), contentType: String(contentType || "general"), domain: String(domain || "general"), project: String(project || "default") };
+}
+
+/** 学习中心的"全部"：把该维度整维度放开（存储层用空串表示"不按这一维过滤"）。 */
+function learningScopeAll(value) {
+  return String(value || "").trim().toLowerCase() === "all";
+}
+
+function learningScopeQuery(scope) {
+  return {
+    ...scope,
+    contentType: learningScopeAll(scope.contentType) ? "" : scope.contentType,
+    domain: learningScopeAll(scope.domain) ? "" : scope.domain
+  };
 }
 
 async function ensureChampionTranslationSkill(scope) {
@@ -526,7 +514,7 @@ function learningEvaluationUiReport(result) {
     conclusion: result.reportZh,
     gates: result.gates,
     guardrails: result.appliedGuardrails || {},
-    evaluationBasis: `同一人工批准留出集上的 Champion / Challenger 隔离重跑；重跑前剔除与留出原文同源的翻译记忆、QA 案例和风格/画像正反例，防止标准答案泄漏进评测上下文；人工采纳率为相对人工终稿的自动近似指标，不冒充新增人工投票；${costBasis}`,
+    evaluationBasis: `同一人工批准留出集上的「生效版本 / 候选版本」隔离重跑；重跑前剔除与留出原文同源的翻译记忆、QA 案例和风格/画像正反例，防止标准答案泄漏进评测上下文；人工采纳率为相对人工终稿的自动近似指标，不冒充新增人工投票；${costBasis}`,
     metrics: [
       { key: "termAccuracy", label: "强制术语正确率", unit: "%", higherIsBetter: true, champion: result.championMetrics.mandatoryTermAccuracy, candidate: result.challengerMetrics.mandatoryTermAccuracy, delta: result.deltas.mandatoryTermAccuracy },
       { key: "hardErrors", label: "硬错误数", unit: "", higherIsBetter: false, champion: result.championMetrics.hardErrorCount, candidate: result.challengerMetrics.hardErrorCount, delta: result.deltas.hardErrorCount },
@@ -1666,9 +1654,13 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
     await trajectoriesForExternalReview(run.locale, projectId)
   );
   const linkByIndex = new Map(trajectoryMatch.links.map((link) => [link.candidateIndex, link]));
+  // 已采纳过的轨迹也要能定位：终稿这次若有变化，学习语料必须跟着更新，不能只更新 TM。
+  const acceptedByIndex = new Map((trajectoryMatch.acceptedLinks || []).map((link) => [link.candidateIndex, link]));
   const failures = [];
   let memoriesWritten = 0;
   let trajectoriesLinked = 0;
+  let trajectoriesUpdated = 0;
+  let acceptedUnchanged = 0;
   for (const [index, { pair }] of applied.entries()) {
     try {
       await saveMemory(run.locale, {
@@ -1687,21 +1679,42 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
       continue;
     }
     const link = linkByIndex.get(index);
-    if (!link) continue;
+    if (link) {
+      try {
+        await updateLearningTrajectory(link.trajectory.id, externalReviewTrajectoryPatch({
+          trajectory: link.trajectory, target: pair.target, sourceFile: filename,
+          sourceRow: pair.sourceRow || null, matchMethod: link.method
+        }));
+        trajectoriesLinked += 1;
+      } catch (error) {
+        failures.push({ source: pair.source, reason: `接回学习轨迹失败：${error.message}` });
+      }
+      continue;
+    }
+    const accepted = acceptedByIndex.get(index);
+    if (!accepted) continue;
+    // 这条终稿上一轮已经采纳过：内容一样就不动（也不重复记事件），
+    // 只有真的改了才更新轨迹终稿，否则学习语料会一直停留在旧版本。
+    const previousFinal = String(accepted.trajectory.finalTranslation || "").trim();
+    if (previousFinal === String(pair.target || "").trim()) {
+      acceptedUnchanged += 1;
+      continue;
+    }
     try {
-      await updateLearningTrajectory(link.trajectory.id, externalReviewTrajectoryPatch({
-        trajectory: link.trajectory, target: pair.target, sourceFile: filename,
-        sourceRow: pair.sourceRow || null, matchMethod: link.method
+      await updateLearningTrajectory(accepted.trajectory.id, externalReviewTrajectoryPatch({
+        trajectory: accepted.trajectory, target: pair.target, sourceFile: filename,
+        sourceRow: pair.sourceRow || null, matchMethod: accepted.method
       }));
-      trajectoriesLinked += 1;
+      trajectoriesUpdated += 1;
     } catch (error) {
-      failures.push({ source: pair.source, reason: `接回学习轨迹失败：${error.message}` });
+      failures.push({ source: pair.source, reason: `更新已采纳学习轨迹失败：${error.message}` });
     }
   }
 
   logInfo("审校回填完成", {
     batchId: run.batchId, filename, pairs: pairs.length,
-    matched: matched.matches.length, unmatched: matched.unmatched.length, ambiguous: matched.ambiguous.length
+    matched: matched.matches.length, unmatched: matched.unmatched.length, ambiguous: matched.ambiguous.length,
+    trajectoriesLinked, trajectoriesUpdated, acceptedUnchanged
   });
   return {
     batchId: run.batchId, filename, total: pairs.length,
@@ -1712,8 +1725,17 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
     ambiguous: matched.ambiguous.length,
     memoriesWritten,
     trajectoriesLinked,
+    trajectoriesUpdated,
+    trajectoryAlreadyAccepted: trajectoryMatch.alreadyAccepted.length,
+    trajectoryAcceptedUnchanged: acceptedUnchanged,
     trajectoryUnmatched: trajectoryMatch.unmatched.length,
     trajectoryAmbiguous: trajectoryMatch.ambiguous.length,
+    // 本批解析时跳过的句段：回填里"原文不在批次中"的条目多半就是它们（锁定 / 已有译文），
+    // 明细里带上原因，用户才看得懂为什么这几条进不来。
+    skippedUnits: {
+      locked: Number(run.structure?.xliff?.skippedLocked) || 0,
+      existing: Number(run.structure?.xliff?.skippedExisting) || 0
+    },
     failures: failures.slice(0, 50),
     details: {
       unmatched: matched.unmatched.slice(0, 50),
@@ -2712,6 +2734,25 @@ async function apiHandler(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/provider") {
     return json(res, 200, updateProviderConfig(await readJsonBody(req)));
   }
+  if (req.method === "POST" && url.pathname === "/api/provider/probe") {
+    // 面板里刚改、还没保存的地址/密钥也要能试：空字段回落到当前生效配置。
+    const body = await readJsonBody(req).catch(() => ({}));
+    const saved = getProviderConfig();
+    const baseUrl = String(body.baseUrl ?? "").trim().replace(/\/$/, "") || saved.baseUrl;
+    const model = String(body.model ?? "").trim() || saved.model;
+    const submittedApiKey = String(body.apiKey ?? "").trim();
+    if (!baseUrl || !model) return json(res, 400, { ok: false, error: "Base URL 与主模型都要填写后才能测试连接" });
+    // apiKey 留空表示"用已保存的那把"：不能塞 undefined 覆盖掉运行配置里的密钥。
+    const override = { baseUrl, model, ...(submittedApiKey ? { apiKey: submittedApiKey } : {}) };
+    const startedAt = Date.now();
+    try {
+      await probeModelAvailability({ config: override, timeoutMs: 20_000 });
+      return json(res, 200, { ok: true, baseUrl, model, latencyMs: Date.now() - startedAt });
+    } catch (error) {
+      // 连不上是预期结果之一，不抛 5xx：界面要拿到原因原样展示。
+      return json(res, 200, { ok: false, baseUrl, model, latencyMs: Date.now() - startedAt, error: String(error?.message || error) });
+    }
+  }
   if (req.method === "POST" && url.pathname === "/api/embedding/rebuild") {
     const body = await readJsonBody(req);
     const locale = body.locale ? assertActiveLocale(body.locale) : null;
@@ -2899,10 +2940,29 @@ async function apiHandler(req, res, url) {
       // 改写证据带着机器初稿，是信息量最高的一类，单独计数便于判断这个池子够不够"有话可说"。
       if (!isNegativeEvidence(item) && classifyChange(item) === "revised") pool.sources.revised += 1;
     }
+    // "这套规则是从哪些文件学来的"：证据池按来源文件统计，蒸馏版本再按自己的取样 id 归一次。
+    const poolFiles = await countStyleEvidenceFiles(locale, { projectId }).catch(() => []);
+    const evidenceFileRows = await listStyleEvidenceFiles(locale, { ids: profiles.styleProfiles.flatMap((item) => item.evidenceIds || []) }).catch(() => []);
+    const fileById = new Map(evidenceFileRows.map((row) => [row.id, row.sourceFile]));
+    const summarizeFiles = (names) => {
+      const counts = new Map();
+      for (const name of names) if (name) counts.set(name, (counts.get(name) || 0) + 1);
+      return [...counts.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+    };
+    const styleProfiles = profiles.styleProfiles.map((item) => {
+      // 本版取样覆盖到的来源文件（evidenceIds 对应的那些证据行）。
+      const ids = item.evidenceIds || [];
+      const files = summarizeFiles(ids.map((id) => fileById.get(String(id))));
+      // 老版本取样的证据行可能已被清掉：明确说"原证据已不在库中"，而不是显示成没有来源。
+      return { ...item, evidenceFiles: files, ...(ids.length && !files.length ? { evidenceFilesMissing: ids.length } : {}) };
+    });
     return json(res, 200, {
       ...profiles,
+      styleProfiles,
       learningRuns,
-      evidencePools: [pool],
+      evidencePools: [{ ...pool, files: poolFiles }],
       evidenceByScope: pool.byContentType
     });
   }
@@ -3118,19 +3178,43 @@ async function apiHandler(req, res, url) {
       domain: url.searchParams.get("domain") || "game",
       project: url.searchParams.get("project") || "default"
     });
-    await ensureChampionTranslationSkill(requestedScope);
+    // "全部"是按整维度浏览：查询时不带这一维的 filter，但默认冠军只能属于具体范围，
+    // 所以全部视图不去创建默认技能（否则会凭空多出一个 contentType=all 的冠军）。
+    const queriedScope = learningScopeQuery(requestedScope);
+    if (queriedScope.contentType && queriedScope.domain) await ensureChampionTranslationSkill(requestedScope);
     const [skills, trajectories, evaluations] = await Promise.all([
-      listTranslationSkills({ ...requestedScope, limit: 500 }),
-      listLearningTrajectories({ ...requestedScope, limit: 500 }),
-      listSkillEvaluations({ ...requestedScope, limit: 500 })
+      listTranslationSkills({ ...queriedScope, limit: 500 }),
+      listLearningTrajectories({ ...queriedScope, limit: 500 }),
+      listSkillEvaluations({ ...queriedScope, limit: 500 })
     ]);
-    const champion = skills.find((item) => item.status === "champion"
-      && item.contentType === requestedScope.contentType
-      && item.domain === requestedScope.domain
-      && item.project === requestedScope.project) || null;
+    // 语体与领域是逐段判定的：用户刚导入完语料，打开的常常是空作用域。
+    // 这里顺带给出"本项目其它范围各有多少条"，界面才能在空作用域上直接指路。
+    const scopeCounts = await countLearningTrajectoriesByScope({ locale, project: requestedScope.project }).catch(() => []);
+    // 每条轨迹的来源文件：批次原文件名（证据行上要写清"这条轨迹来自哪个文件"）。
+    const batchFiles = Object.fromEntries((await listBatchRuns({ projectId: requestedScope.project, limit: 500 }).catch(() => []))
+      .map((run) => [String(run.batchId), String(run.filename || "")])
+      .filter(([, filename]) => filename));
+    // 一个范围一份生效版本：具体范围取那一份，全部视图把范围内的都带上（界面逐张标范围）。
+    // 每个被用过的范围都有一份默认策略，全部视图会长出来一长串；有轨迹的范围排前面，
+    // 让人先看到真正在用的那些（0 条轨迹的默认策略排在后面）。
+    const trajectoryCountOfScope = new Map(scopeCounts.map((item) => [`${item.contentType}\u0000${item.domain}`, item.count]));
+    const champions = skills
+      .filter((item) => item.status === "champion"
+        && item.project === requestedScope.project
+        && (!queriedScope.contentType || item.contentType === queriedScope.contentType)
+        && (!queriedScope.domain || item.domain === queriedScope.domain))
+      .sort((left, right) => (trajectoryCountOfScope.get(`${right.contentType}\u0000${right.domain}`) || 0)
+        - (trajectoryCountOfScope.get(`${left.contentType}\u0000${left.domain}`) || 0)
+        || String(left.contentType).localeCompare(String(right.contentType))
+        || String(left.domain).localeCompare(String(right.domain)));
+    const champion = champions.length === 1
+      ? champions[0]
+      : champions.find((item) => item.contentType === requestedScope.contentType && item.domain === requestedScope.domain) || null;
     const candidates = skills.filter((item) => ["challenger", "draft"].includes(item.status));
     const evidence = trajectories.map((item) => ({
       ...item,
+      // 这条轨迹来自哪个文件：优先轨迹自己记的来源文件，其次它所属批次的原文件。
+      sourceFile: String(item.assetRefs?.sourceFile || batchFiles[String(item.batchId || "")] || ""),
       attribution: (() => {
         try {
           return summarizeTrajectoryAttribution({
@@ -3148,8 +3232,11 @@ async function apiHandler(req, res, url) {
     return json(res, 200, {
       overview: { trajectoryCount: trajectories.length, skillCount: skills.length, pendingCount: candidates.filter((item) => !evaluations.some((evaluation) => evaluation.challengerSkillId === item.id)).length },
       champion,
+      champions,
       skills,
       candidates,
+      scopeCounts,
+      batchFiles,
       evaluations: evaluations.map((item) => ({ ...item, result: item.report || {} })),
       evidence,
       trajectories
@@ -3191,7 +3278,7 @@ async function apiHandler(req, res, url) {
         guardrails: { requireCost: false }
       });
       const report = learningEvaluationUiReport(result);
-      report.conclusion = `证据不足：当前只有 ${evaluationPool.length} 条未参与本候选学习的人工批准终稿，至少需要 20 条才会真正重跑 Champion / Challenger 并开放晋升。`;
+      report.conclusion = `证据不足：当前只有 ${evaluationPool.length} 条未参与本候选学习的人工批准终稿，至少需要 20 条才会真正重跑「生效版本 / 候选版本」并开放晋升。`;
       report.benchmark = {
         requestedPairs: evaluationPool.length,
         completedPairs: 0,
@@ -3986,26 +4073,9 @@ async function apiHandler(req, res, url) {
     const projectId = String(url.searchParams.get("projectId") || "").trim();
     const search = url.searchParams.get("search") || "";
     const limit = Number(url.searchParams.get("limit")) || 200;
-    const batches = type === "autoqa" || type === "share" || type === "background" ? [] : await listBatchRuns({ locale, projectId, status, search, limit });
-    const qaTasks = type === "batch" || type === "share" || type === "background" ? [] : await listQaTasks({ locale, projectId, status, search, limit });
-    const shares = type === "batch" || type === "autoqa" || type === "background" ? [] : (await listShares({ projectId })).map((share) => ({
-      id: share.token,
-      type: "share",
-      title: share.filename,
-      locale: share.locale,
-      contentType: share.contentType || "general",
-      domain: share.domain || "general",
-      status: share.status === "generating" ? "in_progress" : share.status === "failed" ? "needs_attention" : (share.feedbacks || []).some((feedback) => feedback.status === "pending") ? "review" : "completed",
-      overallScore: null,
-      totalSegments: Number(share.totalSegments) || share.segments.length,
-      completedSegments: shareNeedsGloss(share.locale) ? (Number(share.glossedSegments) || 0) : (Number(share.totalSegments) || share.segments.length),
-      failedSegments: shareNeedsGloss(share.locale) && share.status === "failed" ? Math.max(0, (Number(share.totalSegments) || share.segments.length) - (Number(share.glossedSegments) || 0)) : 0,
-      qaPending: (share.feedbacks || []).filter((feedback) => feedback.status === "pending").length,
-      sharePath: `/share/${share.token}`,
-      createdAt: share.createdAt,
-      updatedAt: share.updatedAt
-    })).filter((item) => item.locale === locale && (!status || item.status === status) && (!search || item.title.toLowerCase().includes(String(search).toLowerCase())));
-    const backgroundTasks = type === "batch" || type === "autoqa" || type === "share" ? [] : (await listBackgroundTasks({ projectId, search, limit })).map((task) => ({
+    const batches = type === "autoqa" || type === "background" ? [] : await listBatchRuns({ locale, projectId, status, search, limit });
+    const qaTasks = type === "batch" || type === "background" ? [] : await listQaTasks({ locale, projectId, status, search, limit });
+    const backgroundTasks = type === "batch" || type === "autoqa" ? [] : (await listBackgroundTasks({ projectId, search, limit })).map((task) => ({
       id: task.id,
       type: "background",
       taskType: task.type,
@@ -4024,7 +4094,7 @@ async function apiHandler(req, res, url) {
       createdAt: task.createdAt,
       updatedAt: task.updatedAt
     })).filter((item) => (!item.locale || item.locale === locale) && (!status || item.status === status));
-    const merged = [...batches.map((item) => ({ ...item, type: "batch" })), ...qaTasks, ...shares, ...backgroundTasks]
+    const merged = [...batches.map((item) => ({ ...item, type: "batch" })), ...qaTasks, ...backgroundTasks]
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
       .slice(0, limit);
     return json(res, 200, merged);
@@ -4686,7 +4756,8 @@ async function evaluateQaBatch(batchId, projectId = "") {
         evaluateGrammarWithModel({ translation: pairTranslation, locale, contentType: scopeContentType }),
         evaluateAutoQaWithModel({
           source: pairSource, translation: pairTranslation, locale, contentType: scopeContentType, domain,
-          styleProfile, references: approvedReferences, machineDrafts, qaCases, evidence
+          styleProfile, references: approvedReferences, machineDrafts, qaCases, evidence,
+          toolRunner: buildReferenceToolRunner({ projectId: String(body.projectId || "").trim() })
         })
       ]);
       const failures = [];
@@ -4757,77 +4828,19 @@ async function evaluateQaBatch(batchId, projectId = "") {
     });
     return json(res, 200, { ...report, taskId: task.id });
   }
-  if (req.method === "POST" && url.pathname.startsWith("/api/qa-tasks/") && url.pathname.endsWith("/share")) {
-    const id = decodeURIComponent(url.pathname.slice("/api/qa-tasks/".length, -"/share".length));
+  if (req.method === "POST" && url.pathname.startsWith("/api/qa-tasks/") && url.pathname.endsWith("/issues/delete")) {
+    if (!canDeleteQaIssues(req)) return json(res, 403, { error: "只有在本机打开的报告可以删除 AI 意见" });
+    const id = decodeURIComponent(url.pathname.slice("/api/qa-tasks/".length, -"/issues/delete".length));
     const task = await getQaTask(id);
-    if (!task) {
-      const error = new Error("未找到该质检任务");
-      error.statusCode = 404;
-      throw error;
-    }
-    assertActiveLocale(task.locale);
-    const report = task.report || {};
-    const reportSegments = Array.isArray(report.segments) ? report.segments : [];
-    if (!reportSegments.length) {
-      const error = new Error("该质检报告没有可分享的句子");
-      error.statusCode = 400;
-      throw error;
-    }
-    // 链接立即可用：语素拆解由后台任务异步生成（任务中心可见进度，服务重启后续跑）
-    const segments = reportSegments.map((segment, index) => ({
-      index: index + 1,
-      source: segment.source,
-      translation: segment.translation,
-      sourceIndices: segment.sourceIndices || [],
-      translationIndices: segment.translationIndices || [],
-      qaScore: Number.isFinite(segment.scores?.overall) ? segment.scores.overall : null,
-      dimensionScores: segment.scores?.dimensions || null,
-      issues: (segment.issues || []).slice(0, 30).map((issue) => ({
-        severity: issue.severity || "warning",
-        type: issue.type || "qa",
-        category: issue.category || "other",
-        dimension: issue.dimension || "basic",
-        message: String(issue.message || ""),
-        suggestion: String(issue.suggestion || ""),
-        sourceSpan: String(issue.sourceSpan || ""),
-        targetSpan: String(issue.targetSpan || "")
-      })),
-      gloss: null
-    }));
-    const meta = {
-      source: "autoqa",
-      overallScore: Number.isFinite(report.scores?.overall) ? report.scores.overall : null,
-      dimensionScores: report.scores?.dimensions || null,
-      summary: report.summary || null,
-      alignmentNote: String(report.alignmentNote || ""),
-      alignmentIssues: Array.isArray(report.alignmentIssues) ? report.alignmentIssues : [],
-      segmentCounts: report.segmentCounts || {},
-      tagsStripped: Boolean(report.tagsStripped),
-      fallbackReason: String(report.fallbackReason || "")
-    };
-    const needsGloss = shareNeedsGloss(task.locale);
-    const share = await saveShare({
-      projectId: task.projectId || "",
-      qaTaskId: id,
-      filename: `Auto QA · ${task.title || "未命名质检"}`,
-      locale: task.locale,
-      contentType: task.contentType || "general",
-      domain: task.domain || "general",
-      meta,
-      segments,
-      status: needsGloss ? "generating" : "ready",
-      glossedSegments: 0,
-      totalSegments: segments.length
+    if (!task) return json(res, 404, { error: "未找到该质检任务" });
+    const body = await readJsonBody(req);
+    const result = deleteQaIssue({
+      report: task.report || {},
+      task,
+      fingerprint: String(body.fingerprint || "")
     });
-    if (needsGloss) startShareGlossGeneration(share.token);
-    return json(res, 200, {
-      token: share.token,
-      sharePath: `/share/${share.token}`,
-      shareUrls: lanShareUrls(share.token),
-      status: needsGloss ? "generating" : "ready",
-      glossedSegments: 0,
-      totalSegments: segments.length
-    });
+    const saved = await saveQaTask({ ...task, ...result.task });
+    return json(res, 200, { ok: true, scores: result.scores, summary: result.summary, deletedIssues: result.deletedIssues, taskId: saved.id });
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/qa-tasks/")) {
     const id = decodeURIComponent(url.pathname.slice("/api/qa-tasks/".length));
@@ -4865,289 +4878,104 @@ async function evaluateQaBatch(batchId, projectId = "") {
     }
     return json(res, 200, { ok: true });
   }
-  if (req.method === "POST" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/share")) {
-    const batchId = decodeURIComponent(url.pathname.slice("/api/tasks/".length, -"/share".length));
-    const run = await getBatchRun(batchId);
-    if (!run) {
-      const error = new Error("未找到该翻译任务");
-      error.statusCode = 404;
-      throw error;
-    }
-    assertActiveLocale(run.locale);
-    const doneSegments = (run.segments || []).filter((segment) => segment.selected !== false && segment.status === "done" && segment.translation);
-    if (!doneSegments.length) {
-      const error = new Error("该任务还没有已完成的译文段落，无法分享");
-      error.statusCode = 400;
-      throw error;
-    }
-    // 链接立即可用：语素拆解由后台任务异步生成（任务中心可见进度，服务重启后续跑）
-    const segments = doneSegments.map((segment, index) => ({
-      index: index + 1,
-      source: segment.source,
-      translation: segment.translation,
-      locator: segment.locator || "",
-      context: segment.context || "",
-      qaScore: Number.isFinite(segment.result?.qaScore) ? segment.result.qaScore : null,
-      issues: (segment.result?.issues || []).slice(0, 30).map((issue) => ({
-        severity: issue.severity || "warning",
-        type: issue.type || "qa",
-        category: issue.category || "other",
-        message: String(issue.message || ""),
-        suggestion: String(issue.suggestion || "")
-      })),
-      gloss: null
-    }));
-    const needsGloss = shareNeedsGloss(run.locale);
-    const share = await saveShare({
-      projectId: run.projectId || "", batchId, filename: run.filename, locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general",
-      segments, status: needsGloss ? "generating" : "ready", glossedSegments: 0, totalSegments: segments.length
+  if (req.method === "GET" && url.pathname === "/api/references") {
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
+    const result = await listReferenceDocuments({
+      projectId,
+      libraryId: String(url.searchParams.get("libraryId") || "").trim(),
+      status: String(url.searchParams.get("status") || "").trim(),
+      search: String(url.searchParams.get("search") || "").trim(),
+      offset: Number(url.searchParams.get("offset")) || 0,
+      limit: Number(url.searchParams.get("limit")) || 50
     });
-    if (needsGloss) startShareGlossGeneration(share.token);
     return json(res, 200, {
-      token: share.token,
-      sharePath: `/share/${share.token}`,
-      shareUrls: lanShareUrls(share.token),
-      status: needsGloss ? "generating" : "ready",
-      glossedSegments: 0,
-      totalSegments: segments.length
+      total: result.total,
+      items: result.items,
+      libraries: projectId ? await getResourceLibraries(projectId).catch(() => []) : []
     });
   }
-  if (req.method === "GET" && url.pathname.startsWith("/api/share/")) {
-    const token = decodeURIComponent(url.pathname.slice("/api/share/".length));
-    const share = await getShare(token);
-    if (!share) {
-      const error = new Error("分享链接无效或已删除");
-      error.statusCode = 404;
-      throw error;
-    }
-    assertActiveLocale(share.locale);
-    return json(res, 200, {
-      token: share.token,
-      filename: share.filename,
-      locale: share.locale,
-      contentType: share.contentType,
-      domain: share.domain,
-      qaTaskId: share.qaTaskId || "",
-      meta: share.meta ? {
-        ...share.meta,
-        alignmentIssues: Array.isArray(share.meta.alignmentIssues)
-          ? share.meta.alignmentIssues.map((issue) => presentKnownIssue(issue))
-          : []
-      } : null,
-      segments: (share.segments || []).map((segment) => ({
-        ...segment,
-        issues: (segment.issues || []).map((issue) => presentKnownIssue(issue))
-      })),
-      feedbackCount: share.feedbacks.length,
-      // 逐条公开处置结果：提意见的同事得看得到自己的意见最后被怎么处理了。
-      feedbacks: (share.feedbacks || []).map((entry) => ({
-        id: entry.id,
-        segmentIndex: entry.segmentIndex,
-        reviewer: entry.reviewer || "匿名",
-        request: entry.request || "",
-        suggestedTranslation: entry.suggestedTranslation || "",
-        status: entry.status || "pending",
-        createdAt: entry.createdAt || "",
-        resolvedAt: entry.resolvedAt || "",
-        resolution: entry.resolution
-          ? {
-            actionLabel: entry.resolution.actionLabel,
-            reason: entry.resolution.reason,
-            afterTranslation: entry.resolution.afterTranslation,
-            translationChanged: entry.resolution.translationChanged,
-            decidedBy: entry.resolution.decidedBy,
-            decidedAt: entry.resolution.decidedAt
-          }
-          : null
-      })),
-      feedbackSummary: {
-        total: (share.feedbacks || []).length,
-        pending: (share.feedbacks || []).filter((entry) => (entry.status || "pending") === "pending").length,
-        adopted: (share.feedbacks || []).filter((entry) => entry.status === "adopted").length,
-        ignored: (share.feedbacks || []).filter((entry) => entry.status === "ignored").length
-      },
-      status: share.status || "ready",
-      glossedSegments: Number(share.glossedSegments) || 0,
-      totalSegments: Number(share.totalSegments) || share.segments.length,
-      generationError: String(share.meta?.generationError || ""),
-      createdAt: share.createdAt
+  if (req.method === "POST" && url.pathname === "/api/references") {
+    const body = await readJsonBody(req);
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId) return json(res, 400, { error: "请先选择项目" });
+    const filename = String(body.filename || "").trim();
+    const base64 = String(body.base64 || "");
+    if (!filename || !base64) return json(res, 400, { error: "缺少文件内容" });
+    const task = await createBackgroundTask({
+      type: "reference_ingest",
+      title: `参考资料导入：${filename}`,
+      locale: ACTIVE_LOCALES[0],
+      projectId,
+      progress: { phase: "queued", message: "等待解析", percent: 1 }
     });
+    runReferenceIngestInBackground({
+      taskId: task.id,
+      projectId,
+      libraryId: String(body.libraryId || "").trim(),
+      name: String(body.name || filename.replace(/\.[^.]+$/u, "")).trim(),
+      kind: String(body.kind || "other"),
+      contentType: String(body.contentType || "").trim(),
+      domain: String(body.domain || "").trim(),
+      filename,
+      base64
+    }).catch((error) => console.error("[Kami] 参考资料导入失败", error));
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, filename });
   }
-  if (req.method === "DELETE" && url.pathname.startsWith("/api/share/")) {
-    const token = decodeURIComponent(url.pathname.slice("/api/share/".length));
-    const share = await getShare(token);
-    if (!share) {
-      const error = new Error("分享不存在或已删除");
-      error.statusCode = 404;
-      throw error;
+  if (req.method === "GET" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/chunks")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/chunks".length));
+    const document = await getReferenceDocument(id);
+    if (!document) return json(res, 404, { error: "资料不存在" });
+    const result = await listReferenceChunks({
+      documentId: id,
+      offset: Number(url.searchParams.get("offset")) || 0,
+      limit: Number(url.searchParams.get("limit")) || 50
+    });
+    return json(res, 200, { document, total: result.total, items: result.items });
+  }
+  if (req.method === "POST" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/reindex")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/reindex".length));
+    const document = await getReferenceDocument(id);
+    if (!document) return json(res, 404, { error: "资料不存在" });
+    const existing = await listReferenceChunks({ documentId: id, limit: 200 });
+    const refreshed = [];
+    for (const chunk of existing.items) {
+      let embedding = chunk.embedding;
+      try {
+        embedding = (await embedSource(chunk.text))?.vector ?? null;
+      } catch {
+        embedding = chunk.embedding ?? null;
+      }
+      refreshed.push({ ...chunk, embedding, risk: scanReferenceRisk(chunk.text) });
     }
-    assertActiveLocale(share.locale);
-    const deleted = await deleteShare(token);
-    if (!deleted) {
-      const error = new Error("分享不存在或已删除");
-      error.statusCode = 404;
-      throw error;
-    }
+    await replaceReferenceChunks(id, { projectId: document.projectId, chunks: refreshed });
+    await updateReferenceDocument(id, { status: "ready", chunkCount: refreshed.length, error: "" });
+    referenceIndex.invalidate(document.projectId);
+    return json(res, 200, { ok: true, chunkCount: refreshed.length });
+  }
+  if (req.method === "POST" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/status")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/status".length));
+    const body = await readJsonBody(req);
+    const status = body.status === "disabled" ? "disabled" : "ready";
+    const updated = await updateReferenceDocument(id, { status });
+    if (!updated) return json(res, 404, { error: "资料不存在" });
+    referenceIndex.invalidate(updated.projectId);
+    return json(res, 200, { document: updated });
+  }
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/references/")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length));
+    const document = await getReferenceDocument(id);
+    const removed = await deleteReferenceDocument(id);
+    if (!removed) return json(res, 404, { error: "资料不存在" });
+    referenceIndex.invalidate(document?.projectId || "");
     return json(res, 200, { ok: true });
   }
-  if (req.method === "POST" && url.pathname.startsWith("/api/share/") && url.pathname.endsWith("/feedback")) {
-    const token = decodeURIComponent(url.pathname.slice("/api/share/".length, -"/feedback".length));
-    const share = await getShare(token);
-    if (!share) {
-      const error = new Error("分享链接无效或已删除");
-      error.statusCode = 404;
-      throw error;
-    }
-    assertActiveLocale(share.locale);
+  if (req.method === "POST" && url.pathname.startsWith("/api/reference-chunks/") && url.pathname.endsWith("/allow")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/reference-chunks/".length, -"/allow".length));
     const body = await readJsonBody(req);
-    const segmentIndex = Number(body.segmentIndex);
-    const segment = (share.segments || []).find((item) => item.index === segmentIndex);
-    if (!segment) {
-      const error = new Error("段落不存在");
-      error.statusCode = 400;
-      throw error;
-    }
-    const knownIssues = selectKnownIssues(segment.issues, body.knownIssueIndexes);
-    const request = buildKnownIssueFeedbackRequest(knownIssues, body.request);
-    if (!request) {
-      const error = new Error("请勾选仍需上报的已知问题，或填写新的具体要求");
-      error.statusCode = 400;
-      throw error;
-    }
-    const feedback = {
-      id: randomUUID(),
-      segmentIndex,
-      request,
-      knownIssueIndexes: knownIssues.map((issue) => issue.issueIndex),
-      knownIssues,
-      suggestedTranslation: String(body.suggestedTranslation || "").trim().slice(0, 2_000),
-      reviewer: String(body.reviewer || "匿名").trim().slice(0, 80),
-      status: "pending",
-      createdAt: new Date().toISOString()
-    };
-    await updateShare(token, (item) => ({ ...item, feedbacks: [...(item.feedbacks || []), feedback] }));
-    return json(res, 200, { ok: true, message: "已提交，感谢反馈！" });
-  }
-  if (req.method === "GET" && url.pathname === "/api/feedback/pending") {
-    const shares = await listShares({ projectId: url.searchParams.get("projectId") || "" });
-    const pending = [];
-    for (const share of shares) {
-      if (!ACTIVE_LOCALES.includes(share.locale)) continue;
-      for (const feedback of share.feedbacks || []) {
-        if (feedback.status !== "pending") continue;
-        pending.push(feedbackEntry(share, feedback));
-      }
-    }
-    pending.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-    return json(res, 200, pending);
-  }
-  if (req.method === "GET" && url.pathname === "/api/feedback") {
-    const status = url.searchParams.get("status") || "";
-    const shares = await listShares({ projectId: url.searchParams.get("projectId") || "" });
-    const entries = [];
-    for (const share of shares) {
-      if (!ACTIVE_LOCALES.includes(share.locale)) continue;
-      for (const feedback of share.feedbacks || []) {
-        if (status && feedback.status !== status) continue;
-        entries.push(feedbackEntry(share, feedback));
-      }
-    }
-    entries.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-    return json(res, 200, entries.slice(0, Number(url.searchParams.get("limit")) || 500));
-  }
-  if (req.method === "GET" && url.pathname === "/api/shares") {
-    const batchId = url.searchParams.get("batchId") || "";
-    const qaTaskId = url.searchParams.get("qaTaskId") || "";
-    const shares = (await listShares({ projectId: url.searchParams.get("projectId") || "", batchId, qaTaskId })).filter((share) => ACTIVE_LOCALES.includes(share.locale));
-    return json(res, 200, shares.map((share) => ({
-      token: share.token,
-      batchId: share.batchId,
-      qaTaskId: share.qaTaskId || "",
-      filename: share.filename,
-      locale: share.locale,
-      contentType: share.contentType,
-      domain: share.domain,
-      meta: share.meta || null,
-      segmentCount: share.segments.length,
-      feedbacks: share.feedbacks || [],
-      createdAt: share.createdAt,
-      updatedAt: share.updatedAt
-    })));
-  }
-  if (req.method === "POST" && url.pathname.startsWith("/api/share/") && url.pathname.endsWith("/resolve")) {
-    const token = decodeURIComponent(url.pathname.slice("/api/share/".length, -"/resolve".length));
-    const share = await getShare(token);
-    if (!share) {
-      const error = new Error("分享链接无效或已删除");
-      error.statusCode = 404;
-      throw error;
-    }
-    assertActiveLocale(share.locale);
-    const body = await readJsonBody(req);
-    const feedbackId = String(body.feedbackId || "");
-    const action = body.action === "adopt" ? "adopt" : body.action === "ignore" ? "ignore" : "";
-    if (!feedbackId || !action) {
-      const error = new Error("缺少意见 ID 或有效操作");
-      error.statusCode = 400;
-      throw error;
-    }
-    const index = (share.feedbacks || []).findIndex((item) => item.id === feedbackId);
-    if (index < 0) {
-      const error = new Error("该意见不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-    const feedback = share.feedbacks[index];
-    if (feedback.status !== "pending") {
-      const error = new Error("该意见已处理过");
-      error.statusCode = 409;
-      throw error;
-    }
-    if (action === "adopt") {
-      const segment = (share.segments || []).find((item) => item.index === feedback.segmentIndex);
-      await saveStyleEvidence({ ...buildAdoptedStyleEvidence({ share, feedback, segment }), projectId: share.projectId || "" });
-      try {
-        // distillStyleProfileIfReady 内部已经落盘草稿；saveStyleProfile 不是 upsert，
-        // 再存一次会生成第二个内容相同、版本号 +1 的草稿。
-        const { distilled } = await distillStyleProfileIfReady({
-          locale: share.locale, projectId: share.projectId || "",
-          contentType: share.contentType,
-          domain: share.domain,
-          sourceBatchId: share.batchId,
-          threshold: getSettings().learning.styleDistillThreshold,
-          growthWindow: getSettings().learning.styleDistillGrowthWindow,
-          positiveLimit: getSettings().learning.distillPositiveSamples,
-          negativeLimit: getSettings().learning.distillNegativeSamples,
-          staleRounds: getSettings().learning.ruleStaleRounds
-        });
-        if (distilled) triggerConflictScan({ locale: share.locale, contentType: share.contentType, domain: share.domain, project: share.projectId || "default" });
-      } catch {
-        // 未达阈值或蒸馏失败不阻断采纳
-      }
-    }
-    const resolvedAt = new Date().toISOString();
-    // 每条意见都留一份结构化处置回执，审阅人在分享页就能看到自己的意见去哪了，
-    // 而不是只看到一个总数。
-    const resolution = normalizeReviewDecision({
-      issueId: feedbackId,
-      segmentId: String(feedback.segmentIndex ?? ""),
-      category: "同事反馈",
-      issue: feedback.request || "（未填写意见正文）",
-      suggestion: feedback.suggestedTranslation || "",
-      action: action === "adopt" ? "accept" : "reject",
-      reason: String(body.note || "").trim() || (action === "adopt" ? "已采纳并更新译文" : "经复核后未采纳"),
-      beforeTranslation: String(share.segments?.[feedback.segmentIndex]?.translation || ""),
-      afterTranslation: action === "adopt" ? String(feedback.suggestedTranslation || "") : "",
-      decidedBy: String(body.handledBy || "").trim() || "工作台处理人",
-      decidedAt: resolvedAt
-    });
-    await updateShare(token, (item) => ({
-      ...item,
-      feedbacks: item.feedbacks.map((entry) => entry.id === feedbackId
-        ? { ...entry, status: action === "adopt" ? "adopted" : "ignored", resolvedAt, resolution }
-        : entry)
-    }));
-    return json(res, 200, { ok: true, status: action === "adopt" ? "adopted" : "ignored", resolution });
+    const updated = await updateReferenceChunk(id, { allowed: body.allowed !== false });
+    if (!updated) return json(res, 404, { error: "片段不存在" });
+    referenceIndex.invalidate(updated.projectId);
+    return json(res, 200, { chunk: updated });
   }
   if (req.method === "POST" && url.pathname === "/api/translate") {
     const body = await readJsonBody(req);
@@ -5364,9 +5192,15 @@ async function evaluateQaBatch(batchId, projectId = "") {
         ...applyProjectQaPolicy(checkFactSchema({ schema: factSchema, translation, locale }), projectSettings || undefined)
       ];
       // 一次执行 = 一次初译 + 本档允许的质检强度。快速档不跑模型质检，只跑确定性检查。
+      const referenceUsages = [];
+      const referenceToolRunner = buildReferenceToolRunner({
+        projectId,
+        skill: translationSkill,
+        onActivity: (activity) => referenceUsages.push(activity)
+      });
       const executePlan = async (plan) => {
         const useModelQa = aiQaEnabled && plan.modelQa;
-        const translationResult = await translateWithRoute(contextPack, { routePlan: plan, reflect: plan.reflect === true });
+        const translationResult = await translateWithRoute(contextPack, { routePlan: plan, reflect: plan.reflect === true, toolRunner: referenceToolRunner });
         if (useModelQa) {
           const loop = await runAiQaLoop({
             contextPack, initialTranslation: translationResult.translation, matches, locale,
@@ -5483,6 +5317,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
             termDecisions: aiQa.termDecisions || [],
             qaBefore: { ...trajectoryMetricsFromIssues(initialIssues, calculateQaScore({ hardIssues: initialIssues }), matches), issues: initialIssues },
             qaAfter: { ...trajectoryMetricsFromIssues(aiQa.issues, aiQa.score, matches), issues: aiQa.issues, iterations: aiQa.iterations },
+            referenceUsage: { refs: referenceToolRunner?.refs?.() || [], events: referenceUsages },
             events: [
               { type: "started", at: trajectory.createdAt },
               { type: "completed", at: new Date().toISOString(), latencyMs: Date.now() - startedAt, aiQaIterations: aiQa.iterations }
@@ -5556,8 +5391,6 @@ async function evaluateQaBatch(batchId, projectId = "") {
 async function serveStatic(req, res, url) {
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === "/") pathname = "/index.html";
-  // 分享验证页：/share 与 /share/<token> 都渲染独立的轻量页面
-  if (pathname === "/share" || pathname.startsWith("/share/")) pathname = "/share.html";
   const safePath = normalize(pathname).replace(/^(\.\.(\/|\\|$))+/, "");
   const path = join(PUBLIC_ROOT, safePath);
   if (!path.startsWith(PUBLIC_ROOT)) return false;
@@ -5601,27 +5434,6 @@ try {
 } catch (error) {
   console.error(`[Kami] 启动失败\n${error.message}`);
   process.exit(1);
-}
-
-// 恢复未完成任务，并修复旧版本错误写成 ready、实际却没有完成拆解的历史记录。
-try {
-  const shares = await listShares({});
-  for (const share of shares) {
-    const expected = Math.min((share.segments || []).length, SHARE_GLOSS_LIMIT);
-    const glossed = (share.segments || []).slice(0, expected).filter((segment) => segment.gloss).length;
-    if (share.status === "ready" && (glossed < expected || Number(share.glossedSegments) !== glossed)) {
-      await updateShare(share.token, (item) => finalizeShareGlossGeneration(item, {
-        failures: glossed < expected ? [share.meta?.fallbackReason || "历史后台拆解未完成"] : [],
-        maxSegments: SHARE_GLOSS_LIMIT
-      }));
-      continue;
-    }
-    if (share.status === "generating") {
-      startShareGlossGeneration(share.token, "分享拆解恢复失败");
-    }
-  }
-} catch (error) {
-  console.error("恢复分享拆解任务失败", error);
 }
 
 // 技能评测后台任务队列：同一时刻只跑一个评测，逐对持久化检查点，重启后可续跑。
@@ -5810,7 +5622,7 @@ function triggerAutoProposal(scope) {
       }
       // 阈值未到/窗口防抖/已有候选等是正常不提议；其他原因按异常记录，避免被静默吞掉。
       const reason = String(result?.reason || "");
-      if (!/^(人工批准终稿|自上次自动提议后|当前作用域已有待评测候选|作用域尚无 Champion|没有可复盘的完成轨迹)/u.test(reason)) {
+      if (!/^(人工批准终稿|自上次自动提议后|当前作用域已有待评测候选|作用域尚无生效版本|没有可复盘的完成轨迹)/u.test(reason)) {
         console.error(`自动候选生成检查异常：${reason}`);
       }
     })
@@ -5932,8 +5744,5 @@ server.listen(PORT, HOST, () => {
     });
     workbenchSessionMonitor.start();
     console.log(`[Kami] 关闭最后一个页面 ${WORKBENCH_CLOSE_GRACE_MS / 1000} 秒后自动停止；最小化挂机时心跳失联 ${Math.round(WORKBENCH_HEARTBEAT_GRACE_MS / 60_000)} 分钟才视为关闭，后台任务执行期间不会停止。`);
-  }
-  if (HOST !== "127.0.0.1" && HOST !== "localhost") {
-    for (const url of lanShareUrls("")) console.log(`局域网访问（分享给同事可用）：${url.replace(/\/share\/$/, "")}`);
   }
 });

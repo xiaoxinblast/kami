@@ -145,7 +145,7 @@ test("候选只能基于当前 Champion 评测和激活，过期父版本或错�
     requireEvaluation: true
   });
   assert.equal(mismatched.valid, false);
-  assert.ok(mismatched.reasons.some((reason) => reason.includes("Champion 已过期")));
+  assert.ok(mismatched.reasons.some((reason) => reason.includes("生效版本已过期")));
 
   const inactive = validateCandidatePromotionState({ candidate: { ...candidate, status: "inactive" }, currentChampion: champion });
   assert.equal(inactive.valid, false);
@@ -283,7 +283,7 @@ test("同范围同评测集、质量不退步且存在实质收益时允许晋�
   assert.equal(result.status, "promote");
   assert.equal(result.promotable, true);
   assert.ok(result.gates.every((item) => item.passed));
-  assert.match(result.reportZh, /建议晋升 Challenger/);
+  assert.match(result.reportZh, /建议晋升候选版本/);
   assert.match(result.reportZh, /强制术语正确率/);
   assert.match(result.reportZh, /人工编辑距离/);
 });
@@ -476,7 +476,7 @@ test("晋升评测拒绝跨项目或跨语种混用", () => {
     minSamples: 1,
     champion: { scope, samples: [sample(1)] },
     challenger: { scope: { ...scope, locale: "ko-KR" }, samples: [sample(1)] }
-  }), /Challenger 作用域不一致/);
+  }), /候选版本 作用域不一致/);
 });
 
 test("技能没被学习循环动过时听设置面板的，动过了就尊重技能", () => {

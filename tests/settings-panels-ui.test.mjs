@@ -18,7 +18,7 @@ test("模型设置与参数设置使用分栏面板，不再平铺单页", async
   assert.match(script, /createParameterSettingsPanel/u);
   assert.match(script, /openProviderSettings/u);
   assert.match(script, /openParameterSettings/u);
-  for (const label of ["连接与鉴权", "模型分工", "Embedding", "成本门禁", "质量与 QA", "检索与上下文", "学习与评测", "分享与标点"]) {
+  for (const label of ["连接与鉴权", "模型分工", "Embedding", "成本门禁", "质量与 QA", "检索与上下文", "学习与评测", "标点约定"]) {
     assert.match(panels, new RegExp(label, "u"));
   }
   assert.match(panels, /data-tab=/u);
@@ -97,4 +97,39 @@ test("浏览器回归测试覆盖设置面板的草稿行为", async () => {
   assert.match(browserTest, /切分类后 Base URL 不应被重置/u);
   assert.match(browserTest, /关窗未保存应丢弃编辑/u);
   assert.match(browserTest, /保存后不应自动关闭面板/u);
+});
+
+test("连接与鉴权页有「测试连接」，走探针接口且不改配置", async () => {
+  const [panels, script, styles] = await Promise.all([
+    readFile(new URL("../public/settings-panels.js", import.meta.url), "utf8"),
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../public/settings-panels.css", import.meta.url), "utf8")
+  ]);
+  // 面板：按钮 + 结果行只出现在连接页；点击后只报告结果，不保存、不关窗。
+  assert.match(panels, /function probeMarkup\(\)/u);
+  assert.match(panels, /data-provider-probe/u);
+  assert.match(panels, /data-probe-result/u);
+  assert.match(panels, /\$\{tab\.id === "connection" \? probeMarkup\(\) : ""\}/u);
+  const probeBody = panels.slice(panels.indexOf("async function probe(button) {"), panels.indexOf('dialog.addEventListener("click"'));
+  assert.match(probeBody, /await api\("\/api\/provider\/probe", \{/u);
+  assert.match(probeBody, /连接正常：/u);
+  assert.match(probeBody, /连接失败：/u);
+  assert.doesNotMatch(probeBody, /\/api\/provider"/u, "测试连接不能顺手保存配置");
+  assert.doesNotMatch(probeBody, /dialog\.close\(\)/u, "测试连接不关面板");
+  // 服务端：探针接口把面板里刚填的值覆盖进去，连不上也返回 200 + 原因。
+  assert.match(script, /url\.pathname === "\/api\/provider\/probe"/u);
+  assert.match(script, /probeModelAvailability\(\{ config: override, timeoutMs: 20_000 \}\)/u);
+  assert.match(script, /if \(!baseUrl \|\| !model\) return json\(res, 400,/u);
+  assert.match(script, /\? \{ apiKey: submittedApiKey \} : \{\}\)/u);
+  // 样式：结果行有成功/失败两种状态。
+  assert.match(styles, /\.sp-probe p\.ok \{/u);
+  assert.match(styles, /\.sp-probe p\.fail \{/u);
+});
+
+test("思考开关只占内容宽度，不被强度下拉挤到换行", async () => {
+  const styles = await readFile(new URL("../public/settings-panels.css", import.meta.url), "utf8");
+  assert.match(styles, /\.sp-thinking \{ display: flex; align-items: center; justify-content: flex-end;/u);
+  assert.match(styles, /\.sp-switch \{ flex: 0 0 auto;/u);
+  assert.match(styles, /\.sp-switch \{ flex: 0 0 auto;[^}]*white-space: nowrap;/u);
+  assert.doesNotMatch(styles, /\.sp-switch \{ flex: 1;/u);
 });

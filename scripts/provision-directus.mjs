@@ -217,7 +217,7 @@ function resourceLibraryFields() {
     uuidField(),
     textField("project_id", "项目 ID", { required: true, sort: 2 }),
     textField("name", "资源库名称", { required: true, sort: 3 }),
-    selectField("kind", "资源类型", [["术语库", "term_base"], ["翻译记忆", "translation_memory"]], { defaultValue: "term_base", sort: 4 }),
+    selectField("kind", "资源类型", [["术语库", "term_base"], ["翻译记忆", "translation_memory"], ["参考资料库", "reference"]], { defaultValue: "term_base", sort: 4 }),
     selectField("role", "TM 角色", [["主 TM", "master"], ["工作 TM", "working"], ["参考 TM", "reference"]], { defaultValue: "reference", sort: 5 }),
     booleanField("enabled", "参与检索", { defaultValue: true, sort: 6 }),
     { field: "priority", type: "integer", meta: { interface: "input", width: "half", sort: 7, translations: label("优先级") }, schema: { is_nullable: false, default_value: 100 } },
@@ -283,6 +283,65 @@ const definitions = [
       jsonField("segments", "切分句段", { sort: 7 }),
       jsonField("candidates", "术语候选", { sort: 8 }),
       dateField("date_created", "创建时间", "date-created", 9)
+    ]
+  },
+  {
+    collection: "reference_documents",
+    meta: {
+      icon: "menu_book",
+      note: "参考资料：角色设定、剧本、故事梗概等不作为术语或 TM 注入的资料。",
+      display_template: "{{name}}",
+      group: "localization_assets",
+      sort: 2,
+      accountability: "all",
+      translations: label("参考资料")
+    },
+    schema: {},
+    fields: [
+      uuidField(),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
+      textField("library_id", "所属资料库", { width: "half", sort: 3 }),
+      textField("name", "资料名称", { required: true, sort: 4 }),
+      selectField("kind", "资料类型", [["角色设定", "character"], ["剧本", "script"], ["故事梗概", "synopsis"], ["设定资料", "setting"], ["其他", "other"]], { defaultValue: "other", sort: 5 }),
+      selectField("content_type", "限定语体", contentTypeValues, { sort: 6, nullable: true }),
+      textField("domain", "限定领域", { width: "half", sort: 7 }),
+      textField("source_file", "来源文件", { width: "half", sort: 8 }),
+      textField("source_format", "文件格式", { width: "half", sort: 9 }),
+      { field: "characters", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 10, translations: label("字数") }, schema: { is_nullable: false, default_value: 0 } },
+      { field: "chunk_count", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 11, translations: label("片段数") }, schema: { is_nullable: false, default_value: 0 } },
+      selectField("status", "状态", [["索引中", "indexing"], ["可用", "ready"], ["失败", "failed"], ["已停用", "disabled"]], { defaultValue: "indexing", sort: 12 }),
+      textField("error", "失败原因", { multiline: true, sort: 13 }),
+      jsonField("ingest_report", "导入报告", { note: "解析格式、识图页数与分块统计。", sort: 14 }),
+      dateField("date_created", "创建时间", "date-created", 15),
+      dateField("date_updated", "更新时间", "date-updated", 16)
+    ]
+  },
+  {
+    collection: "reference_chunks",
+    meta: {
+      icon: "segment",
+      note: "参考资料的检索片段；risk 片段默认不参与检索，人工放行后才可被模型查到。",
+      display_template: "{{heading}} · {{ordinal}}",
+      group: "localization_assets",
+      sort: 3,
+      accountability: "all",
+      translations: label("参考资料片段")
+    },
+    schema: {},
+    fields: [
+      uuidField(),
+      textField("document_id", "所属资料", { required: true, width: "half", sort: 2 }),
+      textField("project_id", "所属项目 ID", { width: "half", sort: 3 }),
+      { field: "ordinal", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 4, translations: label("片段序号") }, schema: { is_nullable: false, default_value: 0 } },
+      textField("heading", "章节", { width: "half", sort: 5 }),
+      textField("page", "页码 / 工作表", { width: "half", sort: 6 }),
+      selectField("origin", "来源", [["原文抽取", "text"], ["模型识图", "vision"]], { defaultValue: "text", sort: 7 }),
+      textField("text", "片段正文", { required: true, multiline: true, sort: 8 }),
+      { field: "characters", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 9, translations: label("字数") }, schema: { is_nullable: false, default_value: 0 } },
+      booleanField("risk", "疑似提示词注入", { defaultValue: false, sort: 10 }),
+      booleanField("allowed", "人工放行", { defaultValue: false, sort: 11 }),
+      jsonField("embedding", "语义向量", { note: "embedding 模型生成的归一化向量，用于相似度排序。", sort: 12 }),
+      dateField("date_created", "创建时间", "date-created", 13)
     ]
   },
   {
@@ -829,37 +888,13 @@ const definitions = [
     ]
   },
   {
-    collection: "shares",
-    meta: { icon: "share", note: "批次分享验证快照：语素拆解、评分与同事反馈队列。", display_template: "{{filename}}", group: "localization_pipeline", sort: 13, accountability: "all", translations: label("分享验证页") },
-    schema: {},
-    fields: [
-      uuidField(),
-      textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
-      textField("token", "分享令牌", { required: true, width: "half", sort: 2 }),
-      textField("batch_id", "来源批次 ID", { width: "half", sort: 3 }),
-      textField("qa_task_id", "来源质检任务 ID", { width: "half", sort: 4 }),
-      textField("filename", "来源文件", { required: true, sort: 5 }),
-      selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { sort: 6 }),
-      selectField("content_type", "内容语体", contentTypeValues, { defaultValue: "general", sort: 7 }),
-      textField("domain", "业务领域", { width: "half", sort: 8 }),
-      jsonField("meta", "质检摘要", { note: "Auto QA 分享的综合分、三维评分、对齐说明与整句级问题。", sort: 9 }),
-      jsonField("segments", "分享段落快照", { note: "每段的原文、译文、评分与语素拆解。", sort: 10 }),
-      jsonField("feedbacks", "同事反馈队列", { note: "pending 待采纳 / adopted 已入风格证据 / ignored 已忽略。", sort: 11 }),
-      selectField("status", "生成状态", [["生成中", "generating"], ["就绪", "ready"], ["失败", "failed"]], { defaultValue: "ready", sort: 12 }),
-      { field: "glossed_segments", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 13, translations: label("已生成拆解段数") }, schema: { is_nullable: true } },
-      { field: "total_segments", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 14, translations: label("总段数") }, schema: { is_nullable: true } },
-      dateField("date_created", "创建时间", "date-created", 15),
-      dateField("date_updated", "更新时间", "date-updated", 16)
-    ]
-  },
-  {
     collection: "background_tasks",
     meta: { icon: "hourglass_bottom", note: "术语导入、Embedding 重建与批次导出等后台任务，任务中心可见进度并可回看结果。", display_template: "{{title}}", group: "localization_pipeline", sort: 14, accountability: "all", translations: label("后台任务") },
     schema: {},
     fields: [
       uuidField(),
       textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
-      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["双语资产导入", "asset_import"], ["批次翻译", "batch_translation"], ["语境分析", "context_analysis"], ["一致性核对", "consistency_check"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
+      selectField("task_type", "任务类型", [["术语导入", "term_import"], ["双语资产导入", "asset_import"], ["参考资料导入", "reference_ingest"], ["批次翻译", "batch_translation"], ["语境分析", "context_analysis"], ["一致性核对", "consistency_check"], ["Embedding 重建", "embedding_rebuild"], ["批次导出", "batch_export"]], { required: true, sort: 2 }),
       textField("title", "任务标题", { required: true, sort: 3 }),
       // 不归属单一翻译任务的后台操作没有目标语言，必须允许为空。
       selectField("target_locale", "目标语言", Object.keys(localeCollections).map((locale) => [locale, locale]), { width: "half", sort: 4, nullable: true }),
@@ -1078,12 +1113,13 @@ async function ensureServiceAccount() {
     ...["create", "read", "update", "delete"].map((action) => ["translation_skills", action]),
     ...["create", "read", "update", "delete"].map((action) => ["skill_evaluations", action]),
     ...["create", "read", "update", "delete"].map((action) => ["quality_assets", action]),
+    ...["create", "read", "update", "delete"].map((action) => ["reference_documents", action]),
+    ...["create", "read", "update", "delete"].map((action) => ["reference_chunks", action]),
     ...["create", "read", "delete"].map((action) => ["quality_runs", action]),
     ...["create", "read", "update", "delete"].map((action) => ["training_runs", action]),
     ...["create", "read", "delete"].map((action) => ["qa_runs", action]),
     ...["create", "read", "update", "delete"].map((action) => ["qa_cases", action]),
     ...["create", "read", "update", "delete"].map((action) => ["qa_tasks", action]),
-    ...["create", "read", "update", "delete"].map((action) => ["shares", action]),
     ...["create", "read", "update", "delete"].map((action) => ["background_tasks", action])
   ];
   const currentPermissions = await api(`/permissions?filter[policy][_eq]=${policy.id}&limit=-1`);

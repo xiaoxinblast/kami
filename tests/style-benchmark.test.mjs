@@ -167,6 +167,6 @@ test("变体包装保留技能与两个风格规范槽位，空规范表示语�
 test("变体缺少 champion 技能时立刻报错，不静默跑出无意义样本", async () => {
   await assert.rejects(
     () => benchmarkStyleVariant({ id: "d1", styleProfile: null }, trajectory("t1", "甲")),
-    /缺少当前 champion 技能/
+    /缺少当前生效版本技能/
   );
 });

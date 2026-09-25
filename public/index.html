@@ -19,8 +19,8 @@
           <button class="nav-item active" data-view="workbench"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5h9M7.5 3v2c0 4-1.8 7-4.5 9M5 9c1.4 2.1 3.2 3.7 5.5 5M14 20l4-10 4 10M15.5 16h5" /></svg></span><span>翻译</span></button>
           <button class="nav-item" data-view="autoqa"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6l7-3z" /><path d="M8.5 12l2.2 2.2 4.8-5" /></svg></span><span>译文质检</span></button>
           <button class="nav-item" data-view="tasks"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 4h6M9 3h6v3H9zM7 5H5.5A1.5 1.5 0 0 0 4 6.5v13A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 18.5 5H17M8 11l1.5 1.5L12 10M14 12h3M8 16l1.5 1.5L12 15M14 17h3" /></svg></span><span>任务中心</span></button>
-          <button class="nav-item" data-view="feedback"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4V5zM9 10h6M9 13h4" /></svg></span><span>反馈中心</span><span class="nav-badge" id="feedbackNavBadge" hidden>0</span></button>
           <button class="nav-item" data-view="import"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5h18l-7 8v6l-4 2v-8L3 5zM17.5 2v5M15.5 5l2 2 2-2" /></svg></span><span>双语资产导入</span></button>
+          <button class="nav-item" data-view="references"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h9l5 6v10H5zM14 4v6h5" /><path d="M8 13h8M8 16h5" /></svg></span><span>参考资料</span></button>
           <button class="nav-item" data-view="assets"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 5.5A3.5 3.5 0 0 1 7 4h4a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H7a3.5 3.5 0 0 0-3.5 1.5v-14zM20.5 5.5A3.5 3.5 0 0 0 17 4h-2a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h2a3.5 3.5 0 0 1 3.5 1.5v-14z" /></svg></span><span>术语库</span></button>
           <button class="nav-item" data-view="memories"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 8h10M7 12h7M7 16h5" /></svg></span><span>记忆库 TM</span></button>
           <button class="nav-item" data-view="styles"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 20c4.5-1 8.5-4.2 11-8.5L19 4l1 1-7.5 4C8.2 11.5 5 15.5 4 20zM9 15l-2-2M17.5 13.5v4M15.5 15.5h4" /></svg></span><span>风格指导</span></button>
@@ -51,12 +51,6 @@
                   <button class="project-chip danger" id="deleteProject" type="button" title="删除当前项目">删除</button>
                 </div>
               </div>
-              <div class="feedback-bell-wrap">
-                <button class="icon-button feedback-bell" id="feedbackBell" title="同事反馈" aria-label="同事反馈">
-                  <svg viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 1.7 6.2 2 6.4H4c.3-.2 2-1.9 2-6.4zM10 19a2 2 0 0 0 4 0" /></svg>
-                </button>
-                <span class="feedback-bell-badge" id="feedbackBellBadge" hidden>0</span>
-              </div>
               <a class="text-action" id="openAdmin" href="http://127.0.0.1:18055/admin/content/terms_zh_cn" target="_blank" rel="noreferrer">Directus 后台</a>
               <button class="text-action" id="openProvider">模型设置</button><button class="text-action" id="openSettings" type="button">参数设置</button>
             </div>
@@ -74,7 +68,7 @@
             <button class="translation-mode active" data-translation-mode="single"><span>单句输入</span><small>手动输入即时处理</small></button>
             <button class="translation-mode" data-translation-mode="batch"><span>粘贴 / 文件翻译</span><small>自动分句与合并导出</small></button>
           </div>
-          <div class="tier-row">
+          <div class="tier-row" id="tierRow">
             <label><span>质量档</span><select id="qualityTier"><option value="auto" selected>自动（按句段风险分档）</option><option value="fast">快速 · 单次直译 + 确定性检查</option><option value="standard">标准 · 初译 + 模型质检</option><option value="strict">严苛 · 多候选 + 多轮修订</option></select></label>
             <small class="tier-note">系统按每段的事实锚点、承诺措辞、长度与术语冲突自动选档，只向上升级；短标签走快速，长句与高风险走严苛。用途（语体/领域）由整份文件的语境分析标注，不再逐段手填。</small>
           </div>
@@ -218,7 +212,7 @@
           <article class="panel task-center-panel">
             <div class="panel-head"><div><span class="card-kicker">PERSISTENT WORK QUEUE</span><h2>历史翻译任务</h2></div><div class="asset-count" id="taskCount">0 个任务</div></div>
             <div class="task-toolbar">
-              <label><span>任务类型</span><select id="taskType"><option value="">全部类型</option><option value="batch">翻译批次</option><option value="autoqa">译文质检报告</option><option value="share">分享验证</option><option value="background">后台任务</option></select></label>
+              <label><span>任务类型</span><select id="taskType"><option value="">全部类型</option><option value="batch">翻译批次</option><option value="autoqa">译文质检报告</option><option value="background">后台任务</option></select></label>
               <label><span>语言对</span><select id="taskLocale"><option value="zh-CN">日语→简体中文</option></select></label>
               <label><span>任务状态</span><select id="taskStatus"><option value="">全部状态</option><option value="in_progress">进行中</option><option value="review">QA 待处理</option><option value="needs_attention">存在失败</option><option value="completed">已完成</option></select></label>
               <label class="task-search"><span>搜索任务</span><input id="taskSearch" placeholder="文件名或任务名称" /></label>
@@ -226,17 +220,6 @@
             </div>
             <div class="task-summary" id="taskSummary"></div>
             <div class="task-list" id="taskList"><div class="empty-list">正在读取历史任务……</div></div>
-          </article>
-        </section>
-
-        <section class="view" id="view-feedback">
-          <article class="panel feedback-center-panel">
-            <div class="panel-head"><div><span class="card-kicker">COLLEAGUE FEEDBACK</span><h2>同事反馈</h2><p class="panel-caption">同事在分享验证页提出的要求。批准后进入风格证据池，满 8 条自动生成风格草稿（仍需你在风格指导页激活）。</p></div><div class="asset-count" id="feedbackPageCount">0 条</div></div>
-            <div class="task-toolbar">
-              <label><span>状态</span><select id="feedbackStatusFilter"><option value="pending">待批准</option><option value="all">全部</option><option value="adopted">已批准入风格</option><option value="ignored">已忽略</option></select></label>
-              <button class="button secondary" id="refreshFeedback">刷新反馈</button>
-            </div>
-            <div class="feedback-page-list" id="feedbackPageList"><div class="empty-list">正在读取同事反馈……</div></div>
           </article>
         </section>
 
@@ -314,6 +297,26 @@
           </article>
         </section>
 
+        <section class="view" id="view-references">
+          <article class="panel">
+            <div class="panel-head"><div><p class="panel-caption">角色设定、剧本、故事梗概等。它们不随每次翻译注入提示词，只在模型主动查询时按片段返回。</p></div><div class="asset-count" id="referenceCount">0 条</div></div>
+            <div class="task-toolbar">
+              <label><span>资料库</span><select id="referenceLibrary"><option value="">全部资料库</option></select></label>
+              <label><span>状态</span><select id="referenceStatus"><option value="">全部状态</option><option value="ready">可用</option><option value="indexing">索引中</option><option value="failed">失败</option><option value="disabled">已停用</option></select></label>
+              <label><span>搜索</span><input id="referenceSearch" type="search" placeholder="按名称或文件名" /></label>
+              <button class="button secondary" id="refreshReferences" type="button">刷新</button>
+              <label class="button primary" for="referenceFileInput">上传参考资料</label>
+              <input id="referenceFileInput" type="file" accept=".txt,.md,.docx,.xlsx,.csv,.pdf" multiple hidden />
+            </div>
+            <p class="panel-caption" id="referenceUploadNote">支持 .txt / .md / .docx / .xlsx / .csv / .pdf，单文件不超过 20MB。扫描版 PDF 会渲染成图片交给模型识图；进度在任务中心与这里都能看到。</p>
+            <div class="reference-list" id="referenceList"><div class="empty-list">正在读取参考资料……</div></div>
+          </article>
+          <article class="panel" id="referenceDetailPanel" hidden>
+            <div class="panel-head"><div><span class="card-kicker">REFERENCE DETAIL</span><h2 id="referenceDetailTitle">资料详情</h2><p class="panel-caption" id="referenceDetailMeta"></p></div><button class="button ghost small" id="closeReferenceDetail" type="button">关闭</button></div>
+            <div class="reference-detail-actions" id="referenceDetailActions"></div>
+            <div class="reference-chunks" id="referenceChunks"></div>
+          </article>
+        </section>
         <section class="view" id="view-assets">
           <div class="locale-strip" id="assetLocales" aria-label="资产语言"></div>
           <article class="panel asset-list-panel">
@@ -417,8 +420,9 @@
           <div class="learning-scope-bar">
             <div><span class="card-kicker">SKILL SCOPE</span><strong>翻译技能作用域</strong><small>固定为日语→简体中文。这里只决定"看哪个作用域的翻译技能与评测"；风格规范已经改成项目级（每项目一份），不受这里影响。</small></div>
             <label><span>内容语体</span><select id="learningContentType"><option value="general">通用内容</option></select></label>
-            <label><span>业务领域</span><select id="learningDomain"><option value="general">通用</option><option value="game">游戏</option><option value="marketing">市场营销</option><option value="community">社区运营</option></select></label>
+            <label><span>业务领域</span><select id="learningDomain"><option value="general">通用</option><option value="game">游戏</option><option value="marketing">市场营销</option><option value="community">社区运营</option><option value="all">全部领域</option></select></label>
           </div>
+          <div class="learning-scope-hint" id="learningScopeHint" hidden></div>
           <div class="learning-error" id="learningError" role="alert" hidden>
             <div><strong>学习中心暂时无法读取</strong><span id="learningErrorMessage">请稍后重试。</span></div>
             <button class="button ghost small" id="retryLearning" type="button">重新读取</button>
@@ -441,7 +445,7 @@
 
           <article class="panel learning-champion-panel">
             <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">CURRENT CHAMPION</span><h2>当前生产技能</h2><p class="panel-caption">只有冠军版本会影响生产翻译；候选技能始终在隔离评测中运行。</p></div>
+              <div><span class="card-kicker">CURRENT CHAMPION</span><h2>当前生产技能</h2><p class="panel-caption">只有生效版本会影响生产翻译；候选版本始终在隔离评测中运行。</p></div>
               <div class="asset-count" id="learningChampionStatus">未加载</div>
             </div>
             <div id="learningChampion"><div class="empty-list learning-empty">正在读取当前技能……</div></div>
@@ -457,7 +461,7 @@
 
           <article class="panel learning-evaluation-panel">
             <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">EVALUATION BOARD</span><h2>新旧版本评测对比</h2><p class="panel-caption">候选必须在独立样本上优于当前冠军，并通过术语、QA 与退化检查。</p></div>
+              <div><span class="card-kicker">EVALUATION BOARD</span><h2>新旧版本评测对比</h2><p class="panel-caption">候选必须在独立样本上优于当前生效版本，并通过术语、QA 与退化检查。</p></div>
               <div class="learning-legend"><span><i class="positive"></i>提升</span><span><i class="negative"></i>退化</span></div>
             </div>
             <div class="learning-evaluation-matrix" id="learningEvaluationMatrix"><div class="empty-list learning-empty">运行候选评测后展示对比指标</div></div>
@@ -701,25 +705,6 @@
         <div class="dialog-actions"><button class="button ghost" type="button" data-close="termSuggestionDialog">保留当前表达</button><button class="button primary" type="button" id="confirmTermReplace">采用正式译法</button></div>
       </div>
     </dialog>
-    <dialog id="shareLinkDialog">
-      <div class="dialog-card share-link-card">
-        <div class="dialog-head"><div><span class="card-kicker">SHARE FOR REVIEW</span><h2>分享验证链接</h2></div><button class="icon-button" type="button" data-close="shareLinkDialog" aria-label="关闭">×</button></div>
-        <p class="panel-caption">把下面的链接发给同事（需与你的电脑在同一局域网）。同事可查看每段的语素拆解、直译与评分，并逐段提出要求；采纳后沉淀为风格证据。</p>
-        <div class="share-url-list" id="shareUrlList"></div>
-        <p class="share-gloss-note" id="shareGlossNote"></p>
-        <div class="dialog-actions"><button class="button ghost" type="button" data-close="shareLinkDialog">关闭</button></div>
-      </div>
-    </dialog>
-
-    <dialog id="shareFeedbackDialog">
-      <div class="dialog-card share-feedback-card">
-        <div class="dialog-head"><div><span class="card-kicker">COLLEAGUE FEEDBACK</span><h2>同事反馈队列</h2></div><button class="icon-button" type="button" data-close="shareFeedbackDialog" aria-label="关闭">×</button></div>
-        <p class="panel-caption">采纳后写入当前语言、语体与领域的风格证据池，满 8 条自动生成风格草稿（仍需你在风格指导页激活）。</p>
-        <div class="share-feedback-list" id="shareFeedbackList"><div class="empty-list">正在读取反馈……</div></div>
-        <div class="dialog-actions"><button class="button ghost" type="button" data-close="shareFeedbackDialog">关闭</button></div>
-      </div>
-    </dialog>
-
     <div class="toast" id="toast" role="status"></div>
     <script type="module" src="/app.js"></script>
   </body>

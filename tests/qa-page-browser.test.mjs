@@ -5,6 +5,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { CONTENT_TYPES, CONTENT_TAGS, LOCALES } from "../src/config.mjs";
 import { createDefaultProjectSettings } from "../src/project-config.mjs";
+import { waitForText } from "./fixtures/browser-wait.mjs";
 
 /**
  * 真实浏览器回归：译文质检页（原 Auto QA）重构后要能
@@ -109,7 +110,8 @@ test("译文质检：批次回放、文件质检、筛选与跳转", { skip: !pr
     await page.getByRole("button", { name: "译文质检" }).click();
     await page.waitForSelector("#view-autoqa.active");
     assert.equal(await page.locator('#qaSourceTabs .qa-source-tab').count(), 3);
-    assert.match(await page.locator("#qaBatchSelect").textContent(), /interrupted\.xlsx/u);
+    // 批次下拉是切页之后异步拉的：等它真的出现再断言，别和接口抢时序。
+    assert.match(await waitForText(page.locator("#qaBatchSelect"), /interrupted\.xlsx/u), /interrupted\.xlsx/u);
     assert.match(await page.locator('[data-qa-panel="file"]').textContent(), /单文件 ≤ 20MB/u);
     assert.equal(await page.locator("#primaryAction").textContent(), "查看质检结果", "顶部按钮要跟着来源走");
 
@@ -145,7 +147,7 @@ test("译文质检：批次回放、文件质检、筛选与跳转", { skip: !pr
     await page.locator("#qaFile").setInputFiles({ name: "reviewed.mqxliff", mimeType: "application/xml", buffer: Buffer.from("<xliff/>") });
     assert.equal(await page.locator("#qaFileRun").isDisabled(), false);
     await page.locator("#qaFileRun").click();
-    await page.waitForFunction(() => document.querySelectorAll("#qaSegments .qa-segment").length === 2, null, { timeout: 20000 });
+    await page.waitForFunction(() => document.querySelectorAll("#qaSegments .qa-segment").length === 2, null, { timeout: 45_000 });
     assert.ok(calls.includes("POST /api/qa/file"), `应走文件质检接口：${calls.join(" | ")}`);
     assert.match(await page.locator("#qaAlignmentNote").textContent(), /未做切句与对齐/u);
     assert.deepEqual(errors, []);

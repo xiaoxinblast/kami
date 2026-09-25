@@ -34,6 +34,26 @@ function clean(value, limit) {
   return String(value ?? "").replace(/[\x00-\x1f\x7f]/gu, "").trim().slice(0, limit);
 }
 
+/**
+ * 提示词注入特征。风格规则同样是模型产出、又会原样渲染进生产提示词
+ * （renderInstruction 会输出 category 与 rule 两部分），所以两者都要过这道检查。
+ * 原先只有 Skill 的策略补丁做这件事；这里沿用同一套特征，避免两条入库路径宽严不一。
+ */
+const INJECTION_PATTERNS = Object.freeze([
+  /(?:忽略|无视|忘记|废止|绕过)(?:以上|之前|先前)?\s*(?:所有|全部|下述|以下|一切)?\s*(?:的)?\s*(?:规则|指令|要求|约束|限制|提示)/iu,
+  /ignore\s*(?:all\s*)?(?:previous|prior|above|the\s+above)?\s*instructions?/i,
+  /disregard\s*(?:all\s*)?(?:previous|prior|above)?\s*instructions?/i,
+  /you\s+are\s+now\s+(?:an?|the)\s+/i,
+  /system\s*:/iu,
+  /<\|im_start\|>|<\|im_end\|>/i,
+  /输出(?:全部|所有)?(?:密钥|token|提示词|系统消息)/iu,
+  /reveal\s+(?:your\s+)?(?:system\s+)?prompt/i
+]);
+
+export function hasInjectionSignature(text) {
+  return INJECTION_PATTERNS.some((pattern) => pattern.test(String(text ?? "")));
+}
+
 /** 稳定 id：同一条规则文本在不同轮次里应当拿到同一个 id，便于人工比对历史。 */
 export function ruleId(category, rule) {
   const seed = `${clean(category, MAX_CATEGORY_LENGTH)}\x00${clean(rule, MAX_RULE_LENGTH)}`;
@@ -49,6 +69,7 @@ function normalizeRule(input, { now, round }) {
   const category = clean(input?.category, MAX_CATEGORY_LENGTH) || "其他";
   const rule = clean(input?.rule ?? input?.text ?? input?.observation, MAX_RULE_LENGTH);
   if (!rule) return null;
+  if (hasInjectionSignature(rule) || hasInjectionSignature(category)) return null;
   return {
     id: clean(input?.id, 40) || ruleId(category, rule),
     category,
@@ -101,6 +122,10 @@ export function applyRulePatch(existingRules, operations, {
       continue;
     }
     if (op === "add") {
+      if (hasInjectionSignature(operation?.rule ?? operation?.text ?? operation?.observation) || hasInjectionSignature(operation?.category)) {
+        warnings.push({ op, reason: "规则含提示词注入特征，已丢弃" });
+        continue;
+      }
       const created = normalizeRule({ ...operation, evidenceCount, rounds: 1, firstSeen: now, lastConfirmed: now, lastRound: round }, { now, round });
       if (!created) { warnings.push({ op, reason: "规则内容为空，已丢弃" }); continue; }
       if (rules.has(created.id)) {
@@ -133,6 +158,10 @@ export function applyRulePatch(existingRules, operations, {
     if (op === "update") {
       const rule = clean(operation?.rule ?? operation?.text, MAX_RULE_LENGTH);
       if (!rule) { warnings.push({ op, id, reason: "更新内容为空，已丢弃" }); continue; }
+      if (hasInjectionSignature(rule) || hasInjectionSignature(operation?.category)) {
+        warnings.push({ op, id, reason: "更新内容含提示词注入特征，已丢弃" });
+        continue;
+      }
       target.rule = rule;
       if (operation?.category) target.category = clean(operation.category, MAX_CATEGORY_LENGTH);
     }

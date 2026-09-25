@@ -1,6 +1,7 @@
 import { renderTranslationMarkup } from "./term-highlighter.js";
 import { normalizePastedText, shouldRoutePasteToBatch } from "./paste-routing.js";
 import { learningEvaluationResult } from "./learning-utils.js";
+import { styleProfileDiff } from "./style-utils.js";
 import { startWorkbenchSession } from "./session-lifecycle.js";
 import { createProjectSettingsPanel } from "./project-settings.js";
 import { createProjectWizard } from "./project-wizard.js";
@@ -31,12 +32,12 @@ const state = {
   learningLoading: false,
   learningSelectedSkillId: "",
   conflictReport: null,
+  referenceDocuments: [],
+  referenceLibraries: [],
+  referenceStatus: "",
+  referenceSearch: "",
+  referenceDetail: null,
   tasks: [],
-  shareFeedbackScope: null,
-  feedbackPending: [],
-  feedbackLastCount: 0,
-  feedbackAll: [],
-  feedbackStatusFilter: "pending",
   styleData: null,
   memories: [],
   memoryTotal: 0,
@@ -411,8 +412,8 @@ function pageCopy(view) {
   return {
     workbench: ["TRANSLATION", "翻译", "使用日语→简体中文专属术语库，并自动识别语体。"],
     autoqa: ["TRANSLATION QA", "译文质检", "检查已有译文：按文件原生句段（或批次回放）跑硬规则与三层审查；只检查，不改译文。"],
-    feedback: ["FEEDBACK CENTER", "反馈中心", "同事在分享验证页提出的要求：逐条批准入风格或忽略。"],
     tasks: ["TASK CENTER", "任务中心", "查看、恢复、审校并导出日语→简体中文翻译任务。"],
+    references: ["REFERENCE MATERIALS", "参考资料", "角色设定、剧本、故事梗概等；只在模型主动查询时按片段返回，不随每次翻译注入。"],
     import: ["BILINGUAL ASSET INGESTION", "双语资产导入", "先预检文件类型与资产去向，确认后再写入当前项目。"],
     assets: ["TERM ASSETS", "术语库", "查看日语→简体中文的物理隔离术语集合。"],
     memories: ["PROJECT TM", "记忆库 TM", "查看当前项目的主 TM、工作 TM 与参考 TM。"],
@@ -517,15 +518,20 @@ function refreshActions() {
       secondary.hidden = false;
       secondary.textContent = "清空";
     }
-  } else if (state.view === "feedback") {
-    primary.textContent = "刷新反馈";
   }
   if (state.view === "learning") {
     primary.textContent = state.learningLoading ? "正在读取学习轨迹……" : "根据近期轨迹生成候选技能";
     const payload = state.learningData?.data || state.learningData || {};
     const usableCount = state.learningData ? validLearningTrajectories(payload.trajectories || payload.evidence).length : 0;
-    primary.disabled = state.learningLoading || !state.learningData || usableCount === 0;
-    if (!state.learningLoading && usableCount === 0) primary.title = "当前日语→简体中文、语体与领域还没有带最终译文的完成或复核轨迹";
+    // 候选技能必须落到具体范围：全部视图下点按钮会先让你挑一个范围（有轨迹的），而不是禁用。
+    const allScopes = learningAllScopes();
+    const scopesWithTrajectories = allScopes && state.learningData ? learningScopesWithTrajectories().length : 0;
+    primary.disabled = allScopes
+      ? state.learningLoading || !state.learningData || scopesWithTrajectories === 0
+      : state.learningLoading || !state.learningData || usableCount === 0;
+    primary.title = allScopes
+      ? (scopesWithTrajectories ? "先选一个有轨迹的范围，再生成该范围的候选技能" : "本项目还没有可用于学习的轨迹")
+      : (!state.learningLoading && usableCount === 0 ? "当前日语→简体中文、语体与领域还没有带最终译文的完成或复核轨迹" : "");
   }
 }
 
@@ -538,6 +544,11 @@ function setTranslationMode(mode) {
   $$(".translation-mode").forEach((button) => button.classList.toggle("active", button.dataset.translationMode === state.translationMode));
   $("#singleWorkspace").hidden = state.translationMode !== "single";
   $("#batchWorkspace").hidden = state.translationMode !== "batch";
+  // 批次模式下质量档在「分段与翻译策略」面板里，上面的那一行属于单句输入：同时出现
+  // 会让同一个设置看着像两个开关。切模式时把值带过去，隐藏的那一个不会留下别的档位。
+  const tierRow = $("#tierRow");
+  if (tierRow) tierRow.hidden = state.translationMode === "batch";
+  $("#batchQualityTier").value = $("#qualityTier").value;
   $("#viewDescription").textContent = state.translationMode === "batch"
     ? "上传长文或文件，自动分段、逐段审校并合并导出。"
     : "使用日语→简体中文专属术语库，并自动识别语体。";
@@ -559,12 +570,12 @@ function switchView(view) {
   if (view === "memories") updateMemoryLocale(state.memoryLocale);
   if (view === "assets") renderLibraryShell("term");
   if (view === "memories") { renderLibraryShell("tm"); renderLibraryFiles("tm"); }
+  if (view === "references") loadReferences().catch((error) => toast(error.message));
   if (view === "tasks") loadTasks().catch((error) => toast(error.message));
   if (view === "styles") loadStyleGuidance(state.styleLocale).catch((error) => toast(error.message));
   if (view === "workbench") setTranslationMode(state.translationMode);
   if (view === "learning") loadLearning(state.learningLocale);
   if (view === "autoqa") { updateAutoQaLocale(state.autoQaLocale); setQaSource(state.qaSource || "batch"); }
-  if (view === "feedback") loadFeedbackPage().catch((error) => toast(error.message));
   if (view === "logs") { loadLogs().catch((error) => toast(error.message)); startLogAutoRefresh(); } else stopLogAutoRefresh();
   refreshActions();
 }
@@ -639,11 +650,15 @@ function renderQa(result) {
   const humanDecisions = result.aiQa?.humanDecisions?.length ? `<div class="reflection-box"><strong>人工 QA 决定</strong>\n${result.aiQa.humanDecisions.map((item) => `${item.actionLabel || item.action || item.decision || "已处理"} · ${item.issue?.message || item.issue || "QA 意见"}`).map(escapeHtml).join("\n")}</div>` : "";
   const receipt = result.reviewReceipt?.textZh ? `<div class="reflection-box review-receipt"><strong>审阅意见处理回执</strong>\n${escapeHtml(result.reviewReceipt.textZh)}</div>` : "";
   const routing = result.routing ? `<div class="reflection-box"><strong>本段用途与质量档</strong>\n${escapeHtml(`${contentTypeLabel(result.classification?.contentType || "general")} · ${result.qualityTierLabel || "标准"}档${result.qualityTierSource === "manual" ? "（手动指定）" : "（自动判定）"}${result.qualityUpgradeFrom ? ` · 已由${result.qualityUpgradeFrom === "fast" ? "快速" : "标准"}档自动升级` : ""}`)}\n${escapeHtml(result.tierReason || (result.routing.description || ""))}${result.tierStrength ? `\n${escapeHtml(result.tierStrength)}` : ""}</div>` : "";
+  const referenceRefs = result.referenceUsage?.refs || [];
+  const referenceBox = referenceRefs.length
+    ? `<div class="reflection-box"><strong>本次查阅的资料</strong>\n${escapeHtml([...new Set(referenceRefs.map((ref) => [ref.documentName, ref.heading].filter(Boolean).join(" · ")).filter(Boolean))].join("；"))}</div>`
+    : "";
   const qualityRoute = result.qualityRoute ? `<div class="reflection-box"><strong>质量判定</strong>\n${escapeHtml(`${result.qualityRoute.decision || "human_review"} · ${result.qualityRoute.reason || ""}`)}</div>` : "";
   const factSummary = result.factSchema?.facts?.length || result.factSchema?.limits?.length ? `<div class="reflection-box"><strong>事实与交付约束</strong>\n${escapeHtml(`${result.factSchema.facts?.length || 0} 个事实锚点 · ${result.factSchema.limits?.length || 0} 项交付限制`)}</div>` : "";
   $("#qaList").className = "qa-list";
   const fallback = result.aiQa?.fallbackReason ? `<div class="qa-item warning">AIQA 暂未完成：${escapeHtml(result.aiQa.fallbackReason)}</div>` : "";
-  $("#qaList").innerHTML = `${routing}${qualityRoute}${factSummary}${reflection}${retrieval}${qaCases}${humanDecisions}${receipt}${fallback}${issues || (!fallback ? '<div class="qa-item">硬规则与检索式 AIQA 均通过</div>' : '')}`;
+  $("#qaList").innerHTML = `${routing}${qualityRoute}${factSummary}${referenceBox}${reflection}${retrieval}${qaCases}${humanDecisions}${receipt}${fallback}${issues || (!fallback ? '<div class="qa-item">硬规则与检索式 AIQA 均通过</div>' : '')}`;
   $$(".single-qa-action").forEach((button) => button.addEventListener("click", () => resolveSingleQaIssue(Number(button.dataset.issueIndex), button.dataset.action, button)));
 }
 
@@ -844,6 +859,7 @@ function jumpToNextQaSegment() {
 /** 把批次/文件质检结果渲染成统一视图（同时把旧粘贴视图收起来）。 */
 function applyQaResult(payload) {
   state.qaResult = payload;
+  state.autoQaTaskId = payload.taskId || state.autoQaTaskId || "";
   const segments = (payload.segments || []).map((segment, index) => ({
     index: Number(segment.index) || index + 1,
     source: segment.source || "",
@@ -1033,7 +1049,7 @@ function renderAutoQaReport(payload) {
   const alignmentBlock = alignmentIssues.length
     ? `<section class="autoqa-dimension">
         <div class="autoqa-dimension-head"><div><span class="card-kicker">SENTENCE ALIGNMENT</span><h3>整句级问题</h3><small>按语义向量逐句对齐时发现的疑似漏译 / 增译</small></div><span class="asset-count">${alignmentIssues.length} 条</span></div>
-        ${alignmentIssues.map(renderAutoQaIssue).join("")}
+        ${alignmentIssues.map((issue) => renderAutoQaIssue(issue, null)).join("")}
       </section>`
     : "";
   const openByDefault = segments.length <= 6;
@@ -1064,7 +1080,7 @@ function renderAutoQaSegment(segment, open) {
         <div><span>${escapeHtml(translationLabel)}</span><p>${escapeHtml(translation)}</p></div>
       </div>
       ${segmentFailure}
-      ${issues.length ? issues.map(renderAutoQaIssue).join("") : `<div class="qa-item">本句三层检查通过</div>`}
+      ${issues.length ? issues.map((issue) => renderAutoQaIssue(issue, index)).join("") : `<div class="qa-item">本句三层检查通过</div>`}
     </div>`;
   return `<details class="autoqa-segment"${open ? " open" : ""}>
     <summary>
@@ -1077,7 +1093,11 @@ function renderAutoQaSegment(segment, open) {
   </details>`;
 }
 
-function renderAutoQaIssue(issue) {
+function renderAutoQaIssue(issue, segmentIndex = null) {
+  const canDeleteIssue = Boolean(state.autoQaTaskId) && window.isSecureContext && Boolean(globalThis.crypto?.subtle);
+  const deleteButton = canDeleteIssue
+    ? `<button class="button ghost small autoqa-issue-delete" type="button" data-qa-issue-delete="${encodeURIComponent(JSON.stringify({ issue, segmentIndex }))}">删除该意见</button>`
+    : "";
   const severityLabel = issue.severity === "critical" || issue.severity === "error" ? "阻断"
     : issue.severity === "major" ? "主要" : "轻微";
   const spans = issue.sourceSpan || issue.targetSpan
@@ -1088,6 +1108,7 @@ function renderAutoQaIssue(issue) {
     ? `<span class="autoqa-confidence">置信 ${Math.round(Number(issue.confidence) * 100)}%</span>`
     : "";
   return `<div class="autoqa-issue ${issue.severity}">
+    ${deleteButton}
     <div class="autoqa-issue-head"><span class="autoqa-category">${escapeHtml(issue.category || "other")}</span><span class="autoqa-severity ${issue.severity}">${severityLabel}</span>${confidence}</div>
     <p>${escapeHtml(issue.message)}</p>${spans}${suggestion}
   </div>`;
@@ -2093,6 +2114,17 @@ function batchQualityTier() {
   return $("#batchQualityTier")?.value || "auto";
 }
 
+/**
+ * 质量档只有一个设置，两种模式各在自己版面里显示它：单句在上方的质量档行，
+ * 批次在「分段与翻译策略」面板里（上面的行在批次模式下隐藏，避免同一个设置
+ * 在两处同时可选、看着像两个开关）。改任意一处都同步到另一处。
+ */
+function syncQualityTier(value, source) {
+  for (const select of [$("#qualityTier"), $("#batchQualityTier")]) {
+    if (select && select !== source) select.value = value;
+  }
+}
+
 function briefPurposeLabel(purpose) {
   return state.bootstrap?.contentTypes?.[purpose]?.label || purpose || "通用";
 }
@@ -2550,7 +2582,6 @@ function renderTasks() {
   $("#taskSummary").innerHTML = `<span>进行中 ${pending}</span><span>待处理 QA ${review}</span><span>已完成 ${completed}</span><span>共 ${tasks.length} 个任务 · ${unitCount} 个翻译单元</span>`;
   $("#taskList").innerHTML = tasks.length ? tasks.map((task) => {
     if (task.type === "autoqa") return renderQaTaskRow(task);
-    if (task.type === "share") return renderShareTaskRow(task);
     if (task.type === "background") return renderBackgroundTaskRow(task);
     return renderBatchTaskRow(task);
   }).join("") : '<div class="empty-list task-empty">没有符合当前筛选条件的历史任务</div>';
@@ -2559,15 +2590,8 @@ function renderTasks() {
     const action = button.dataset.action;
     if (action === "open-task") openTask(id);
     else if (action === "export-task") exportTaskRow(id, button);
-    else if (action === "share-task") createBatchShare(id, button);
-    else if (action === "share-qa-task") createQaTaskShare(id, button);
-    else if (action === "feedback-task") openShareFeedbackDialog({ batchId: id });
-    else if (action === "feedback-qa-task") openShareFeedbackDialog({ qaTaskId: id });
     else if (action === "open-qa-task") openQaTask(id);
     else if (action === "delete-qa-task") deleteQaTaskRow(id, button);
-    else if (action === "open-share") window.open(`/share/${encodeURIComponent(id)}`, "_blank", "noopener");
-    else if (action === "copy-share") copyShareLink(id);
-    else if (action === "delete-share") deleteShareTaskRow(id, button);
     else if (action === "download-export") downloadBackgroundExport(id, button);
     else if (action === "open-import-review") openImportReview(id, button);
     else if (action === "open-batch") openTask(button.dataset.batchId || "");
@@ -2613,7 +2637,7 @@ function renderBackgroundTaskRow(task) {
   const trajectoryText = summary && summary.trajectoriesLinked != null
     ? ` · 接回轨迹 ${summary.trajectoriesLinked} 条${(Number(summary.trajectoryAmbiguous) || Number(summary.trajectoryUnmatched))
       ? `（歧义 ${summary.trajectoryAmbiguous ?? 0} / 未匹配 ${summary.trajectoryUnmatched ?? 0}）`
-      : ""}`
+      : ""}${Number(summary.trajectoryAlreadyAccepted) ? ` · 此前已采纳跳过 ${Number(summary.trajectoryAlreadyAccepted)} 条` : ""}`
     : "";
   const payloadText = summary
     ? `术语 ${summary.terms ?? 0} · 译例 ${summary.memories ?? 0} · 风格草稿 ${summary.styleProfiles ?? 0} · 跳过 ${summary.skipped ?? 0}${summary.skippedByReason ? `（${Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join("；")}）` : ""}${trajectoryText}`
@@ -2732,7 +2756,12 @@ function importReviewTask(batchId, button) {
 function renderReviewImportDetails(report) {
   const sections = [];
   if (report.details?.unmatched?.length) {
-    sections.push(`<div><strong>未匹配 ${report.unmatched} 条</strong><small>这些原文不在这个批次里，或属于被跳过的段落</small>${report.details.unmatched.map((item) => `<p>${escapeHtml(String(item.source).slice(0, 60))} <em>${escapeHtml(item.reason)}</em></p>`).join("")}</div>`);
+    // 本批解析时跳过的句段（锁定 / 已有译文）不在可回填范围内：把数字写在标题里，
+    // 用户才看得懂为什么这些原文"不在批次里"。
+    const skipped = report.skippedUnits || {};
+    const skipParts = [Number(skipped.locked) ? `锁定 ${Number(skipped.locked)}` : "", Number(skipped.existing) ? `已有译文 ${Number(skipped.existing)}` : ""].filter(Boolean);
+    const skipHint = skipParts.length ? `（本批解析时已跳过：${skipParts.join(" / ")}，它们不在可回填范围）` : "";
+    sections.push(`<div><strong>未匹配 ${report.unmatched} 条</strong><small>这些原文不在这个批次里，或属于被跳过的段落${escapeHtml(skipHint)}</small>${report.details.unmatched.map((item) => `<p>${escapeHtml(String(item.source).slice(0, 60))} <em>${escapeHtml(item.reason)}</em></p>`).join("")}</div>`);
   }
   if (report.details?.ambiguous?.length) {
     sections.push(`<div><strong>有歧义 ${report.ambiguous} 条</strong><small>同一条原文在批次里出现多次，缺少条目 ID 时不敢乱认（没有写入）</small>${report.details.ambiguous.map((item) => `<p>${escapeHtml(String(item.source).slice(0, 60))} <em>${escapeHtml(item.reason)}</em></p>`).join("")}</div>`);
@@ -2754,7 +2783,12 @@ async function submitReviewImport(file) {
     const report = await api(`/api/batch/run/${encodeURIComponent(batchId)}/import-review`, { method: "POST", body: JSON.stringify({
       ...projectPayload(), filename: file.name, base64: await fileToBase64(file)
     }) });
-    $("#reviewImportSummary").textContent = `已回填 ${report.matched} / ${report.total} 条（其中 ${report.changed} 条译文有改动）· 写入主 TM ${report.memoriesWritten} 条 · 接回学习轨迹 ${report.trajectoriesLinked} 条`;
+    // 已采纳过的轨迹不算"新接回"：把这三个数字分开写，否则"接回 0 条"看起来像失败。
+    const linkedParts = [`接回学习轨迹 ${report.trajectoriesLinked} 条`];
+    if (Number(report.trajectoriesUpdated)) linkedParts.push(`更新已采纳轨迹 ${Number(report.trajectoriesUpdated)} 条`);
+    const acceptedSkipped = Number(report.trajectoryAcceptedUnchanged) || Number(report.trajectoryAlreadyAccepted);
+    if (acceptedSkipped) linkedParts.push(`此前已采纳、内容相同跳过 ${acceptedSkipped} 条`);
+    $("#reviewImportSummary").textContent = `已回填 ${report.matched} / ${report.total} 条（其中 ${report.changed} 条译文有改动）· 写入主 TM ${report.memoriesWritten} 条 · ${linkedParts.join(" · ")}`;
     $("#reviewImportDetails").innerHTML = renderReviewImportDetails(report);
     toast(`审校回填完成：匹配 ${report.matched} 条，写入主 TM ${report.memoriesWritten} 条`);
     await loadTasks();
@@ -2883,41 +2917,142 @@ async function deleteBackgroundTaskRow(id, button) {
   }
 }
 
-function renderShareTaskRow(task) {
-  const locale = state.bootstrap.locales[task.locale];
-  const statusLabel = task.status === "in_progress" ? "拆解生成中" : task.status === "needs_attention" ? "生成失败" : task.qaPending ? "有待批准反馈" : "就绪";
-  const statusClass = task.status === "in_progress" ? "warning" : task.status === "needs_attention" ? "error" : task.qaPending ? "warning" : "success";
-  const progress = task.totalSegments ? Math.round(task.completedSegments / task.totalSegments * 100) : 0;
-  const failed = task.status === "needs_attention";
-  return `<article class="task-row" data-task-id="${escapeHtml(task.id)}">
-    <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="task-status ${escapeHtml(statusClass)}">${escapeHtml(statusLabel)}</span><span class="task-type-chip">分享</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small></div>
-    <div class="task-progress"><div><i style="width:${task.status === "in_progress" || failed ? progress : 100}%"></i></div><span>${task.status === "in_progress" ? `拆解 ${task.completedSegments} / ${task.totalSegments}` : failed ? `拆解 ${task.completedSegments} / ${task.totalSegments} · ${task.failedSegments} 失败` : `${task.totalSegments} 段`}</span></div>
-    <div class="task-qa"><strong>${failed ? "拆解待处理" : task.qaPending ? `${task.qaPending} 条待批准反馈` : "暂无反馈"}</strong><small>${failed ? "检查模型配置或余额后重新生成" : "链接长期有效"}</small></div>
-    <div class="task-actions"><button class="button secondary small" data-action="open-share">打开分享页</button><button class="button ghost small" data-action="copy-share">复制链接</button><button class="button ghost small" data-action="delete-share">删除</button></div>
-  </article>`;
+function renderReferenceLibraries() {
+  const select = $("#referenceLibrary");
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = '<option value="">全部资料库</option>' + (state.referenceLibraries || [])
+    .filter((library) => library.kind === "reference")
+    .map((library) => `<option value="${escapeHtml(library.id)}">${escapeHtml(library.name)}${library.enabled === false ? "（已停用）" : ""}</option>`)
+    .join("");
+  select.value = current || select.value;
 }
 
-async function copyShareLink(token) {
-  try {
-    await navigator.clipboard.writeText(`${location.origin}/share/${encodeURIComponent(token)}`);
-    toast("分享链接已复制");
-  } catch (error) {
-    toast("复制失败，请手动从打开页面复制地址");
+async function loadReferences() {
+  const projectId = state.activeProjectId || "";
+  const query = new URLSearchParams({
+    projectId,
+    libraryId: state.referenceLibraryId || "",
+    status: state.referenceStatus || "",
+    search: state.referenceSearch || "",
+    limit: "100"
+  });
+  const payload = await api(`/api/references?${query}`);
+  state.referenceDocuments = payload.items || [];
+  state.referenceLibraries = payload.libraries || [];
+  $("#referenceCount").textContent = `已显示 ${state.referenceDocuments.length} / 共 ${payload.total || 0} 条`;
+  renderReferenceLibraries();
+  renderReferenceList();
+}
+
+function renderReferenceList() {
+  const container = $("#referenceList");
+  const items = state.referenceDocuments || [];
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-list">当前项目还没有参考资料。上传角色设定、剧本或故事梗概后，模型才能在翻译时按需查询。</div>';
+    return;
   }
+  container.innerHTML = items.map((item) => {
+    const statusLabel = { indexing: "索引中", ready: "可用", failed: "失败", disabled: "已停用" }[item.status] || item.status;
+    const scope = [item.contentType ? `语体 ${escapeHtml(contentTypeLabel(item.contentType))}` : "", item.domain ? `领域 ${escapeHtml(item.domain)}` : ""].filter(Boolean).join(" · ") || "全项目通用";
+    return `<article class="reference-row" data-reference-id="${escapeHtml(item.id)}">
+      <div class="reference-main"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.sourceFile || "")} ${item.sourceFormat ? `· ${escapeHtml(item.sourceFormat)}` : ""} · ${scope}</small>
+        ${item.error ? `<small class="reference-error">${escapeHtml(item.error)}</small>` : ""}</div>
+      <div class="reference-metrics"><span class="badge ${item.status === "ready" ? "success" : item.status === "failed" ? "error" : "warning"}">${escapeHtml(statusLabel)}</span><small>${item.characters} 字 · ${item.chunkCount} 片段</small></div>
+      <div class="task-actions">
+        <button class="button secondary small" data-reference-action="detail" data-id="${escapeHtml(item.id)}">查看片段</button>
+        <button class="button ghost small" data-reference-action="reindex" data-id="${escapeHtml(item.id)}">重新索引</button>
+        <button class="button ghost small" data-reference-action="toggle" data-id="${escapeHtml(item.id)}" data-status="${item.status === "disabled" ? "ready" : "disabled"}">${item.status === "disabled" ? "启用" : "停用"}</button>
+        <button class="button ghost small" data-reference-action="delete" data-id="${escapeHtml(item.id)}">删除</button>
+      </div>
+    </article>`;
+  }).join("");
 }
 
-async function deleteShareTaskRow(token, button) {
-  if (!confirm("确认删除这个分享？同事将无法再打开该链接，已收集的反馈会一并删除。")) return;
-  button.disabled = true;
-  button.textContent = "删除中…";
+async function referenceFileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function uploadReferenceFiles(files) {
+  const projectId = state.activeProjectId || "";
+  if (!projectId) return toast("请先选择项目");
+  const list = [...files];
+  if (!list.length) return;
+  $("#referenceUploadNote").textContent = `正在上传 ${list.length} 个文件……`;
+  let accepted = 0;
+  for (const file of list) {
+    try {
+      const base64 = await referenceFileToBase64(file);
+      await api("/api/references", {
+        method: "POST",
+        body: JSON.stringify({ projectId, filename: file.name, name: file.name.replace(/\.[^.]+$/u, ""), base64 })
+      });
+      accepted += 1;
+    } catch (error) {
+      toast(`${file.name}：${error.message}`);
+    }
+  }
+  $("#referenceUploadNote").textContent = accepted
+    ? `已提交 ${accepted} 个文件，正在后台解析与向量化；完成后本页会自动刷新。`
+    : "没有文件被接受，请检查格式与大小（单个不超过 20MB）。";
+  await loadReferences();
+  window.setTimeout(() => loadReferences().catch(() => {}), 4000);
+}
+
+async function openReferenceDetail(id) {
+  const payload = await api(`/api/references/${encodeURIComponent(id)}/chunks?limit=50`);
+  state.referenceDetail = payload;
+  const panel = $("#referenceDetailPanel");
+  panel.hidden = false;
+  $("#referenceDetailTitle").textContent = payload.document?.name || "资料详情";
+  const report = payload.document?.ingestReport || {};
+  $("#referenceDetailMeta").textContent = [
+    `${payload.document?.sourceFile || ""}${payload.document?.sourceFormat ? `（${payload.document.sourceFormat}）` : ""}`,
+    `共 ${payload.total} 个片段`,
+    report.visionPages ? `其中 ${report.visionPages} 页由模型识图` : "",
+    report.riskChunks ? `${report.riskChunks} 个片段被判定含注入特征，默认不参与检索` : ""
+  ].filter(Boolean).join(" · ");
+  $("#referenceDetailActions").innerHTML = `<button class="button ghost small" data-reference-action="reindex" data-id="${escapeHtml(id)}">重新索引</button>`;
+  $("#referenceChunks").innerHTML = (payload.items || []).map((chunk) => `<article class="reference-chunk ${chunk.risk ? "risk" : ""}">
+    <div class="reference-chunk-head"><strong>${escapeHtml(chunk.heading || `片段 ${chunk.ordinal + 1}`)}</strong>
+      <small>${chunk.page ? `位置 ${escapeHtml(chunk.page)} · ` : ""}${chunk.origin === "vision" ? "模型识图" : "原文抽取"} · ${chunk.characters} 字${chunk.id ? ` · ${escapeHtml(chunk.id)}` : ""}</small>
+      ${chunk.risk ? `<span class="badge warning">疑似注入${chunk.allowed ? "（已放行）" : ""}</span><button class="button ghost small" data-reference-action="allow" data-id="${escapeHtml(chunk.id)}" data-allowed="${chunk.allowed ? "false" : "true"}">${chunk.allowed ? "取消放行" : "放行"}</button>` : ""}</div>
+    <p>${escapeHtml(chunk.text)}</p>
+  </article>`).join("") || '<div class="empty-list">这份资料还没有片段。</div>';
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function referenceAction(action, id, button) {
   try {
-    await api(`/api/share/${encodeURIComponent(token)}`, { method: "DELETE" });
-    await loadTasks();
-    toast("已删除分享");
+    if (action === "detail") return await openReferenceDetail(id);
+    if (action === "reindex") {
+      button.disabled = true;
+      button.textContent = "重建中…";
+      await api(`/api/references/${encodeURIComponent(id)}/reindex`, { method: "POST" });
+      toast("已重新生成向量索引");
+    } else if (action === "toggle") {
+      await api(`/api/references/${encodeURIComponent(id)}/status`, { method: "POST", body: JSON.stringify({ status: button.dataset.status }) });
+      toast(button.dataset.status === "disabled" ? "已停用，不再参与检索" : "已启用");
+    } else if (action === "allow") {
+      await api(`/api/reference-chunks/${encodeURIComponent(id)}/allow`, { method: "POST", body: JSON.stringify({ allowed: button.dataset.allowed === "true" }) });
+      toast(button.dataset.allowed === "true" ? "已放行该片段" : "已取消放行");
+    } else if (action === "delete") {
+      if (!confirm("确认删除这份参考资料？它的全部片段会一并删除，模型将再也查不到。")) return;
+      await api(`/api/references/${encodeURIComponent(id)}`, { method: "DELETE" });
+      toast("已删除参考资料");
+      $("#referenceDetailPanel").hidden = true;
+    }
+    await loadReferences();
   } catch (error) {
-    button.disabled = false;
-    button.textContent = "删除";
     toast(error.message);
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 
@@ -2937,7 +3072,7 @@ function renderBatchTaskRow(task) {
     <div class="task-qa">${task.qaPending
       ? `<button class="qa-jump" type="button" data-action="jump-qa" title="打开这条批次并跳到第一条待处理"><strong>${task.qaPending} 条待处理</strong><small>点击定位 →</small></button>`
       : "<strong>QA 已清</strong>"}${task.failedSegments ? `<small>${task.failedSegments} 段失败</small>` : `<small>${task.format || "text"}</small>`}</div>
-    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button ghost small" data-action="share-task">分享验证</button><button class="button ghost small" data-action="feedback-task">反馈</button><button class="button secondary small" data-action="export-task">导出</button><button class="button ghost small" data-action="delete-task">删除</button></div>
+    <div class="task-actions">${runningState ? '<button class="button secondary small" data-action="pause-task">暂停</button>' : ""}${canResume ? '<button class="button secondary small" data-action="continue-task">继续翻译</button>' : ""}${runningState ? '<button class="button ghost small" data-action="cancel-task">中断</button>' : ""}${canImportReview ? '<button class="button ghost small" data-action="import-review">导入审校结果</button>' : ""}<button class="button ghost small" data-action="open-task">打开任务</button><button class="button secondary small" data-action="export-task">导出</button><button class="button ghost small" data-action="delete-task">删除</button></div>
   </article>`;
 }
 
@@ -2948,14 +3083,50 @@ function renderQaTaskRow(task) {
     <div class="task-main"><div class="task-title"><strong>${escapeHtml(task.title)}</strong><span class="badge ${scoreTone}">${task.overallScore == null ? "未评分" : `${task.overallScore} 分`}</span><span class="task-type-chip">Auto QA</span></div><small>${escapeHtml(locale?.label || task.locale)} · ${escapeHtml(contentTypeLabel(task.contentType))} · ${escapeHtml(task.domain)} · ${formatTaskTime(task.updatedAt)}</small></div>
     <div class="task-progress"><div><i style="width:100%"></i></div><span>${task.totalSegments} 句原文</span></div>
     <div class="task-qa"><strong>${task.qaPending ? `${task.qaPending} 个问题` : "未发现问题"}</strong><small>${escapeHtml(task.status === "review" ? "需要复核" : "已通过")}</small></div>
-    <div class="task-actions"><button class="button secondary small" data-action="open-qa-task">查看报告</button><button class="button ghost small" data-action="share-qa-task">分享验证</button><button class="button ghost small" data-action="feedback-qa-task">反馈</button><button class="button ghost small" data-action="delete-qa-task">删除</button></div>
+    <div class="task-actions"><button class="button secondary small" data-action="open-qa-task">查看报告</button><button class="button ghost small" data-action="delete-qa-task">删除</button></div>
   </article>`;
+}
+
+/** 与 server 的 issueFingerprint 保持一致：字段顺序、空白折叠、截断长度都不能变。 */
+async function autoQaIssueFingerprint(issue, segmentIndex) {
+  const clean = (value) => String(value ?? "").replace(/\s+/gu, " ").trim();
+  const parts = [
+    segmentIndex == null ? "" : String(segmentIndex),
+    clean(issue.dimension),
+    clean(issue.severity),
+    clean(issue.category || issue.type),
+    clean(issue.message),
+    clean(issue.sourceSpan),
+    clean(issue.targetSpan || issue.span)
+  ];
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(parts.join("\u0000")));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 32);
+}
+
+async function deleteAutoQaIssue(button) {
+  if (!state.autoQaTaskId) return toast("请先打开一条已保存的质检报告");
+  if (!confirm("删除这条 AI 意见？评分会按剩余意见重算，删除记录会留档。")) return;
+  const payload = JSON.parse(decodeURIComponent(button.dataset.qaIssueDelete));
+  button.disabled = true;
+  try {
+    const fingerprint = await autoQaIssueFingerprint(payload.issue, payload.segmentIndex);
+    const result = await api(`/api/qa-tasks/${encodeURIComponent(state.autoQaTaskId)}/issues/delete`, {
+      method: "POST",
+      body: JSON.stringify({ fingerprint })
+    });
+    toast(`已删除该意见，综合分重算为 ${result.scores?.overall ?? "—"}`);
+    await openQaTask(state.autoQaTaskId);
+  } catch (error) {
+    button.disabled = false;
+    toast(error.message);
+  }
 }
 
 async function openQaTask(id) {
   try {
     const payload = await api(`/api/qa-tasks/${encodeURIComponent(id)}`);
     const { task, report } = payload;
+      state.autoQaTaskId = id;
     // 新版质检（文件/批次来源）的报告是新结构：直接回放到统一段列表，不重新调模型。
     if (report?.sourceKind) {
       switchView("autoqa");
@@ -2988,169 +3159,6 @@ async function deleteQaTaskRow(id, button) {
   } catch (error) {
     button.disabled = false;
     button.textContent = "删除";
-    toast(error.message);
-  }
-}
-
-async function createBatchShare(batchId, button) {
-  button.disabled = true;
-  button.textContent = "生成中…";
-  try {
-    const payload = await api(`/api/tasks/${encodeURIComponent(batchId)}/share`, { method: "POST" });
-    showShareLinkDialog(payload);
-  } catch (error) { toast(error.message); }
-  finally { button.disabled = false; button.textContent = "分享验证"; }
-}
-
-function showShareLinkDialog(payload) {
-  const primary = `${location.origin}${payload.sharePath}`;
-  const urls = [...new Set([primary, ...(payload.shareUrls || [])])];
-  $("#shareUrlList").innerHTML = urls.map((url) => `
-    <div class="share-url-row"><input readonly value="${escapeHtml(url)}" /><button class="button ghost small share-copy" data-url="${escapeHtml(url)}">复制</button></div>`).join("");
-  $("#shareGlossNote").textContent = `链接立即可用。语素拆解与直译正在后台生成（${Math.min(payload.totalSegments, 30)} 段以内），生成进度与分享入口见任务中心「分享验证」类型，刷新或重启都不影响。`;
-  $$(".share-copy").forEach((copyButton) => copyButton.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(copyButton.dataset.url);
-    toast("链接已复制");
-  }));
-  $("#shareLinkDialog").showModal();
-}
-
-async function createQaTaskShare(id, button) {
-  button.disabled = true;
-  button.textContent = "生成中…";
-  try {
-    const payload = await api(`/api/qa-tasks/${encodeURIComponent(id)}/share`, { method: "POST" });
-    showShareLinkDialog(payload);
-  } catch (error) { toast(error.message); }
-  finally { button.disabled = false; button.textContent = "分享验证"; }
-}
-
-async function openShareFeedbackDialog(scope = {}) {
-  state.shareFeedbackScope = scope;
-  $("#shareFeedbackDialog").showModal();
-  $("#shareFeedbackList").innerHTML = '<div class="empty-list">正在读取反馈……</div>';
-  try {
-    const query = new URLSearchParams();
-    if (state.activeProjectId) query.set("projectId", state.activeProjectId);
-    if (scope.batchId) query.set("batchId", scope.batchId);
-    if (scope.qaTaskId) query.set("qaTaskId", scope.qaTaskId);
-    const shares = await api(`/api/shares?${query}`);
-    const feedbacks = shares.flatMap((share) => (share.feedbacks || []).map((feedback) => ({ ...feedback, token: share.token, filename: share.filename })));
-    if (!feedbacks.length) {
-      $("#shareFeedbackList").innerHTML = '<div class="empty-list">该任务还没有同事反馈。生成分享链接发给同事后，反馈会出现在这里。</div>';
-      return;
-    }
-    $("#shareFeedbackList").innerHTML = feedbacks.map((feedback) => {
-      const statusLabel = feedback.status === "adopted" ? "已采纳" : feedback.status === "ignored" ? "已忽略" : "待采纳";
-      const statusClass = feedback.status === "adopted" ? "success" : feedback.status === "ignored" ? "neutral" : "warning";
-      return `<article class="share-feedback-item ${feedback.status}">
-        <div class="share-feedback-head"><span class="badge ${statusClass}">${statusLabel}</span><strong>第 ${feedback.segmentIndex} 段</strong><small>${escapeHtml(feedback.reviewer || "匿名")} · ${formatTaskTime(feedback.createdAt)}</small></div>
-        <p class="share-feedback-request">${escapeHtml(feedback.request)}</p>
-        ${feedback.suggestedTranslation ? `<p class="share-feedback-suggestion">建议译法：${escapeHtml(feedback.suggestedTranslation)}</p>` : ""}
-        ${feedback.status === "pending" ? `<div class="task-actions"><button class="button secondary small" data-feedback-action="adopt" data-token="${escapeHtml(feedback.token)}" data-feedback-id="${escapeHtml(feedback.id)}">采纳 → 风格证据</button><button class="button ghost small" data-feedback-action="ignore" data-token="${escapeHtml(feedback.token)}" data-feedback-id="${escapeHtml(feedback.id)}">忽略</button></div>` : ""}
-      </article>`;
-    }).join("");
-    $$(".share-feedback-item [data-feedback-action]").forEach((button) => button.addEventListener("click", () =>
-      resolveShareFeedback(button.dataset.token, button.dataset.feedbackId, button.dataset.feedbackAction, button)));
-  } catch (error) {
-    $("#shareFeedbackList").innerHTML = `<div class="qa-item error">读取失败：${escapeHtml(error.message)}</div>`;
-  }
-}
-
-async function resolveShareFeedback(token, feedbackId, action, button) {
-  if (action === "adopt" && !confirm("采纳后写入风格证据池（满 8 条会生成风格草稿），确认采纳这条意见？")) return;
-  button.disabled = true;
-  try {
-    await api(`/api/share/${encodeURIComponent(token)}/resolve`, { method: "POST", body: JSON.stringify({ feedbackId, action }) });
-    toast(action === "adopt" ? "已采纳并写入风格证据" : "已忽略该意见");
-    if (state.shareFeedbackScope) await openShareFeedbackDialog(state.shareFeedbackScope);
-    loadTasks().catch(() => {});
-    loadPendingFeedback({ silent: true });
-  } catch (error) {
-    button.disabled = false;
-    toast(error.message);
-  }
-}
-
-// ---------- 右上角反馈铃铛 + 反馈中心整页 ----------
-
-async function loadPendingFeedback({ silent = false } = {}) {
-  try {
-    const pending = await api(`/api/feedback/pending?projectId=${encodeURIComponent(state.activeProjectId)}`);
-    state.feedbackPending = Array.isArray(pending) ? pending : [];
-    const count = state.feedbackPending.length;
-    for (const badge of [$("#feedbackBellBadge"), $("#feedbackNavBadge")]) {
-      if (!badge) continue;
-      badge.textContent = count > 99 ? "99+" : String(count);
-      badge.hidden = count === 0;
-    }
-    if (!silent && count > state.feedbackLastCount) {
-      toast(`收到 ${count - state.feedbackLastCount} 条新同事反馈，点击右上角铃铛处理`);
-      const bell = $("#feedbackBell");
-      bell.classList.add("has-new");
-      setTimeout(() => bell.classList.remove("has-new"), 2500);
-    }
-    state.feedbackLastCount = count;
-  } catch {
-    // 轮询失败保持静默，避免反复打扰
-  }
-}
-
-function startFeedbackPolling() {
-  loadPendingFeedback({ silent: true });
-  setInterval(() => {
-    if (document.visibilityState === "visible") loadPendingFeedback();
-  }, 15_000);
-}
-
-async function loadFeedbackPage() {
-  try {
-    state.feedbackAll = await api(`/api/feedback?projectId=${encodeURIComponent(state.activeProjectId)}`);
-    renderFeedbackPage();
-  } catch (error) {
-    $("#feedbackPageList").innerHTML = `<div class="qa-item error">读取失败：${escapeHtml(error.message)}</div>`;
-  }
-}
-
-function renderFeedbackPage() {
-  const all = state.feedbackAll || [];
-  const filter = state.feedbackStatusFilter;
-  const list = filter === "all" ? all : all.filter((item) => item.status === filter);
-  $("#feedbackPageCount").textContent = `${list.length} 条`;
-  if (!list.length) {
-    $("#feedbackPageList").innerHTML = filter === "pending"
-      ? '<div class="empty-list">暂时没有待批准的反馈。把分享链接发给同事后，新反馈会自动出现在这里。</div>'
-      : '<div class="empty-list">该状态下没有反馈。</div>';
-    return;
-  }
-  $("#feedbackPageList").innerHTML = list.map((feedback) => {
-    const statusLabel = feedback.status === "adopted" ? "已批准入风格" : feedback.status === "ignored" ? "已忽略" : "待批准";
-    const statusClass = feedback.status === "adopted" ? "success" : feedback.status === "ignored" ? "neutral" : "warning";
-    const locale = state.bootstrap.locales[feedback.locale];
-    return `<article class="share-feedback-item ${feedback.status}">
-      <div class="share-feedback-head"><span class="badge ${statusClass}">${statusLabel}</span><strong>${escapeHtml(feedback.filename)} · 第 ${feedback.segmentIndex} 段</strong><small>${escapeHtml(feedback.reviewer)} · ${formatTaskTime(feedback.createdAt)}${feedback.resolvedAt ? ` · 处理于 ${formatTaskTime(feedback.resolvedAt)}` : ""}${locale ? ` · ${escapeHtml(locale.label)}` : ""}</small></div>
-      <div class="feedback-bell-pair">
-        <p><span>原文</span>${escapeHtml(feedback.source)}</p>
-        <p><span>当前译文</span>${escapeHtml(feedback.translation)}</p>
-      </div>
-      <p class="share-feedback-request"><strong>要求：</strong>${escapeHtml(feedback.request)}</p>
-      ${feedback.suggestedTranslation ? `<p class="share-feedback-suggestion">建议译法：${escapeHtml(feedback.suggestedTranslation)}</p>` : ""}
-      ${feedback.status === "pending" ? `<div class="task-actions"><button class="button secondary small" data-bell-action="adopt" data-token="${escapeHtml(feedback.token)}" data-feedback-id="${escapeHtml(feedback.id)}">批准入风格</button><button class="button ghost small" data-bell-action="ignore" data-token="${escapeHtml(feedback.token)}" data-feedback-id="${escapeHtml(feedback.id)}">忽略</button></div>` : ""}
-    </article>`;
-  }).join("");
-  $$("#feedbackPageList [data-bell-action]").forEach((button) => button.addEventListener("click", () =>
-    resolveFeedbackOnPage(button.dataset.token, button.dataset.feedbackId, button.dataset.bellAction, button)));
-}
-
-async function resolveFeedbackOnPage(token, feedbackId, action, button) {
-  if (action === "adopt" && !confirm("批准后进入风格证据池（满 8 条会生成风格草稿），确认批准这条反馈？")) return;
-  button.disabled = true;
-  try {
-    await api(`/api/share/${encodeURIComponent(token)}/resolve`, { method: "POST", body: JSON.stringify({ feedbackId, action }) });
-    toast(action === "adopt" ? "已批准并进入风格证据池" : "已忽略该反馈");
-    await Promise.all([loadFeedbackPage(), loadPendingFeedback({ silent: true })]);
-  } catch (error) {
-    button.disabled = false;
     toast(error.message);
   }
 }
@@ -4092,6 +4100,14 @@ async function loadStyleGuidance(locale = state.styleLocale) {
   renderStyleGuidance();
 }
 
+/** 来源文件清单的展示文本：最多列两个文件，其余写"等 N 个文件"。 */
+function formatEvidenceFiles(files = []) {
+  const list = learningArray(files).filter((item) => item?.name);
+  if (!list.length) return "";
+  const shown = list.slice(0, 2).map((item) => `${item.name}（${Number(item.count) || 0} 条）`).join("、");
+  return list.length > 2 ? `${shown} 等 ${list.length} 个文件` : shown;
+}
+
 function renderStyleGuidance() {
   const profiles = state.styleData?.profiles || { styleProfiles: [], userProfiles: [], evidencePools: [] };
   const pending = state.styleData?.pending || [];
@@ -4125,7 +4141,10 @@ function renderStyleGuidance() {
     const sampledNote = Number(pool.sampled) && Number(pool.sampled) < Number(pool.evidenceCount)
       ? `<small>分析取样：${pool.sampled} 条（改写 / 负例按取样统计）</small>`
       : "";
-    return `<div class="style-pool is-project"><div><strong>项目规范证据池</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}${sources.revised ? ` · 含改写 ${sources.revised}` : ""}${sources.negative ? ` · 反例 ${sources.negative}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 ${pool.threshold} 条直接证据）</small>${sampledNote}</div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
+    // 池子也要说清"证据来自哪些文件"：蒸馏出来的规则才能回溯到具体交付物。
+    const poolFiles = formatEvidenceFiles(pool.files);
+    const filesNote = poolFiles ? `<small class="style-pool-files">来源文件：${escapeHtml(poolFiles)}</small>` : "";
+    return `<div class="style-pool is-project"><div><strong>项目规范证据池</strong><small>直接证据：表格导入 ${sources.tableImport || 0} · 人工采纳 ${sources.humanAccept || 0}${sources.other ? ` · 历史/其他 ${sources.other}` : ""}${sources.revised ? ` · 含改写 ${sources.revised}` : ""}${sources.negative ? ` · 反例 ${sources.negative}` : ""}</small><small>辅助复盘：AIQA 记录 ${sources.qaReview || 0}（不计入 ${pool.threshold} 条直接证据）</small>${filesNote}${sampledNote}</div><div class="style-pool-progress"><i style="width:${percent}%"></i></div><span>${pool.evidenceCount} / ${pool.threshold}</span></div>`;
   }).join("");
   $("#styleEvidencePools").innerHTML = pools.length
     ? `<div class="style-pool-heading"><div><strong>正在积累的项目证据池</strong><small>累计达到 ${poolThreshold} 条才会蒸馏；蒸馏时按语体分层取样，规则会写明适用场景</small></div><button class="button secondary small" type="button" id="styleDistillNow">立即重新蒸馏</button></div>
@@ -4138,6 +4157,11 @@ function renderStyleGuidance() {
   $("#styleGuidanceList").innerHTML = items.length ? items.map((item) => {
     // 蒸馏结果同样是带小节的文档：小节标题单独显示，规则在小节内编号，
     // 标题既不算规则、也不会因为「；」被拆成两条。
+    // 待批准草案与当前生效版本逐字相同的规则占多数：折叠起来只展开变化的部分，
+    // 否则两张卡片并排看就是"同一批规则抄了两遍"。
+    const diff = styleProfileDiff(item, item.status === "active" ? null : (profiles.styleProfiles || []).find((other) => other.id !== item.id && other.status === "active" && (other.contentType || "general") === (item.contentType || "general") && (other.domain || "general") === (item.domain || "general")));
+    const reusedTexts = new Set(diff?.reusedTexts || []);
+    const updatedTexts = new Set(diff?.updatedTexts || []);
     const sections = [];
     for (const block of parseStyleDocument(item.instruction)) {
       if (block.type === "divider") continue;
@@ -4146,15 +4170,31 @@ function renderStyleGuidance() {
       sections.at(-1).rules.push(block.text);
     }
     const ruleCount = sections.reduce((sum, section) => sum + section.rules.length, 0);
+    const reusedCount = sections.reduce((sum, section) => sum + section.rules.filter((rule) => reusedTexts.has(rule)).length, 0);
     const sectionCount = sections.filter((section) => section.title).length;
     const examples = (item.examples || []).slice(0, 4);
     const sourceBatchId = item.sourceBatchId || item.source_batch_id || "";
     const learningSummary = item.learningSummary || item.learning_summary || "";
+    // 这一版规则的取样来自哪些文件：蒸馏结果必须能回溯到具体交付物。
+    const evidenceFiles = formatEvidenceFiles(item.evidenceFiles || item.evidence_files);
+    const missingFiles = Number(item.evidenceFilesMissing ?? item.evidence_files_missing) || 0;
+    const evidenceFilesNote = evidenceFiles
+      ? `<small class="style-evidence-files">来源文件：${escapeHtml(evidenceFiles)}</small>`
+      : (missingFiles ? `<small class="style-evidence-files">来源文件：原证据已不在库中（本版取样 ${missingFiles} 条）</small>` : "");
+    const diffChips = diff
+      ? `<p class="style-rule-diff">对比 v${diff.baselineVersion}：新增 ${diff.added} · 改写 ${diff.updated} · 逐字沿用 ${diff.reused} · 已退休 ${diff.retired}</p>`
+      : "";
+    const ruleRow = (rule, index, { reused = false } = {}) => `<div class="style-rule-row${reused ? " reused" : ""}"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}${updatedTexts.has(rule) ? '<em class="style-rule-tag">本版改写</em>' : ""}</p></div>`;
     return `<article class="style-guidance-card ${escapeHtml(item.status)}" data-profile-id="${escapeHtml(item.id)}">
-      <div class="style-guidance-head"><div><strong>${escapeHtml(item.name)}</strong><small>适用范围：${escapeHtml(state.bootstrap.locales[state.styleLocale].label)} × ${escapeHtml(item.scopeLabel)} · v${item.version}</small><small>生成方式：${escapeHtml(item.name.startsWith("风格指南 · ") ? "人工上传，正文未被改写" : item.name.includes("复盘修订") ? "AIQA 复盘结合已沉淀语料" : "同类双语语料自动精炼")} · ${item.evidenceCount} 条证据${sourceBatchId ? ` · 来源批次 ${escapeHtml(String(sourceBatchId).slice(0, 8))}` : ""}</small></div><span class="style-state ${escapeHtml(item.status)}">${item.status === "active" ? "已启用" : item.status === "draft" ? "待批准" : "已停用"}</span></div>
+      <div class="style-guidance-head"><div><strong>${escapeHtml(item.name)}</strong><small>适用范围：${escapeHtml(state.bootstrap.locales[state.styleLocale].label)} × ${escapeHtml(item.scopeLabel)} · v${item.version}</small><small>生成方式：${escapeHtml(item.name.startsWith("风格指南 · ") ? "人工上传，正文未被改写" : item.name.includes("复盘修订") ? "AIQA 复盘结合已沉淀语料" : "同类双语语料自动精炼")} · ${item.evidenceCount} 条证据${sourceBatchId ? ` · 来源批次 ${escapeHtml(String(sourceBatchId).slice(0, 8))}` : ""}</small>${evidenceFilesNote}</div><span class="style-state ${escapeHtml(item.status)}">${item.status === "active" ? "已启用" : item.status === "draft" ? "待批准" : "已停用"}</span></div>
       ${learningSummary ? `<p class="style-learning-summary">本批浓缩：${escapeHtml(learningSummary)}</p>` : ""}
-      <p class="style-rule-count">${sectionCount ? `${sectionCount} 个小节 · ` : ""}共 ${ruleCount} 条规则</p>
-      <div class="style-rule-list">${ruleCount ? sections.map((section) => `<div class="style-rule-section-group">${section.title ? `<p class="style-rule-section">${escapeHtml(section.title)}</p>` : ""}${section.rules.map((rule, index) => `<div class="style-rule-row"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}</p></div>`).join("")}</div>`).join("") : '<div class="batch-detail-empty">该版本没有可展示的规则条目</div>'}</div>
+      <p class="style-rule-count">${sectionCount ? `${sectionCount} 个小节 · ` : ""}共 ${ruleCount} 条规则${reusedCount ? `（其中 ${reusedCount} 条与 v${diff.baselineVersion} 逐字相同，已折叠）` : ""}</p>
+      ${diffChips}
+      <div class="style-rule-list">${ruleCount ? sections.map((section) => {
+        const changed = section.rules.filter((rule) => !reusedTexts.has(rule));
+        const reused = section.rules.filter((rule) => reusedTexts.has(rule));
+        return `<div class="style-rule-section-group">${section.title ? `<p class="style-rule-section">${escapeHtml(section.title)}</p>` : ""}${changed.map((rule, index) => ruleRow(rule, index)).join("")}${reused.length ? `<details class="style-rule-reused"><summary>沿用 v${diff.baselineVersion} 的 ${reused.length} 条（逐字相同）</summary>${reused.map((rule, index) => ruleRow(rule, index, { reused: true })).join("")}</details>` : ""}</div>`;
+      }).join("") : '<div class="batch-detail-empty">该版本没有可展示的规则条目</div>'}</div>
       ${examples.length ? `<details class="style-examples"><summary>查看 ${examples.length} 个正反例</summary>${examples.map((example) => `<div><strong>${example.type === "negative" ? "反例" : "正例"}</strong><p>${escapeHtml(example.source || "")}</p><p>${escapeHtml(example.target || "")}</p><small>${escapeHtml(example.reason || "")}</small></div>`).join("")}</details>` : ""}
       <div class="style-guidance-actions"><button class="button ${item.status === "active" ? "ghost" : "secondary"} small" data-action="${item.status === "active" ? "disable" : "activate"}">${item.status === "active" ? "停用（保留历史）" : "批准并启用"}</button></div>
     </article>`;
@@ -5656,10 +5696,42 @@ function learningScopeMatches(item = {}) {
   const contentType = item.contentType || item.content_type || item.scope?.contentType || item.scope?.content_type;
   const domain = item.domain || item.scope?.domain;
   const project = item.project || item.scope?.project;
+  // 学习资产是"语言 × 语体 × 领域 × 项目"四层隔离，接口已经按当前项目取过数据了：
+  // 只有历史遗留的 default 作用域和当前项目都算"当前范围"。早先这里只认 default，
+  // 真实项目的轨迹/技能会被整批过滤掉，界面永远显示 0。
+  const activeProject = state.activeProjectId || "default";
   return (!locale || locale === state.learningLocale)
-    && (!contentType || contentType === $("#learningContentType").value)
-    && (!domain || domain === $("#learningDomain").value)
-    && (!project || project === "default");
+    && (!contentType || learningScopeSelected("contentType") === "all" || contentType === $("#learningContentType").value)
+    && (!domain || learningScopeSelected("domain") === "all" || domain === $("#learningDomain").value)
+    && (!project || project === "default" || project === activeProject);
+}
+
+/** 当前下拉选的是"全部"（整维度放开）还是某个具体语体 / 领域。 */
+function learningScopeSelected(dimension) {
+  return dimension === "domain" ? $("#learningDomain").value : $("#learningContentType").value;
+}
+
+/** 任一维度选了"全部"：界面按"跨范围浏览"处理（列全部、逐条标范围、不显示指路提示）。 */
+function learningAllScopes() {
+  return learningScopeSelected("contentType") === "all" || learningScopeSelected("domain") === "all";
+}
+
+/** 范围标签：全部视图下每条资产要能看出自己属于哪个语体 × 领域。 */
+function learningScopeTag(item = {}) {
+  if (!learningAllScopes()) return "";
+  const contentType = item.contentType || item.content_type || item.scope?.contentType || item.scope?.content_type || "general";
+  const domain = item.domain || item.scope?.domain || "general";
+  return `<span class="learning-scope-tag">${escapeHtml(contentTypeLabel(contentType))} × ${escapeHtml(learningDomainLabel(domain))}</span>`;
+}
+
+/** 候选与生效版本配对：全部视图下要用"该候选自己范围"的生效版本做评测基线。 */
+function learningChampionFor(skill, champions = []) {
+  const list = learningArray(champions);
+  if (!skill) return list[0] || null;
+  const contentType = String(skill.contentType || skill.content_type || skill.scope?.contentType || "general");
+  const domain = String(skill.domain || skill.scope?.domain || "general");
+  return list.find((item) => (String(item.contentType || item.content_type || "general") === contentType)
+    && (String(item.domain || item.scope?.domain || "general") === domain)) || list[0] || null;
 }
 
 function validLearningTrajectories(items = []) {
@@ -5676,9 +5748,12 @@ function learningPayload() {
   const explicitCandidates = learningArray(payload.candidates || payload.challengers || payload.candidateSkills || payload.candidate_skills);
   const candidates = explicitCandidates.concat(explicitCandidates.length ? [] : allSkills.filter((skill) => ["draft", "challenger", "candidate", "ready", "evaluated", "evaluating"].includes(String(skill.status || skill.lifecycle || "").toLowerCase())));
   const unique = (items) => [...new Map(items.map((item) => [learningId(item) || JSON.stringify(item), item])).values()];
+  // 一个范围一份生效版本：具体范围取那一份，全部视图把范围内的都列出来（逐张标范围）。
+  const scopedChampions = unique(champions).filter(learningScopeMatches);
   return {
     payload,
-    champion: unique(champions).find(learningScopeMatches) || null,
+    champion: scopedChampions[0] || null,
+    champions: scopedChampions,
     candidates: unique(candidates).filter(learningScopeMatches),
     evaluations: learningArray(payload.evaluations || payload.skillEvaluations || payload.skill_evaluations),
     evidence: learningArray(payload.evidence || payload.trajectories || payload.recentTrajectories || payload.recent_trajectories)
@@ -5687,7 +5762,7 @@ function learningPayload() {
 
 function learningStatusMeta(item = {}) {
   const status = String(item.status || item.lifecycle || item.state || "candidate").toLowerCase();
-  if (["active", "champion"].includes(status)) return ["生产冠军", "active"];
+  if (["active", "champion"].includes(status)) return ["生效中", "active"];
   if (["ready", "passed", "evaluated"].includes(status)) return ["评测通过", "ready"];
   if (["evaluating", "running"].includes(status)) return ["评测中", "running"];
   if (["rejected", "dismissed"].includes(status)) return ["已拒绝", "rejected"];
@@ -5736,13 +5811,34 @@ function learningRules(skill = {}) {
   return [];
 }
 
-function renderLearningChampion(champion) {
+function renderLearningChampion(champions, scopeCounts) {
   const container = $("#learningChampion");
-  if (!champion) {
-    $("#learningChampionStatus").textContent = "尚无冠军";
-    container.innerHTML = '<div class="empty-list learning-empty"><div><strong>这个范围还没有生产技能</strong><span>先根据已积累轨迹生成候选，完成评测并批准后，它才会成为冠军。</span></div></div>';
+  const list = learningArray(champions);
+  if (!list.length) {
+    $("#learningChampionStatus").textContent = "尚无生效版本";
+    container.innerHTML = '<div class="empty-list learning-empty"><div><strong>这个范围还没有生产技能</strong><span>先根据已积累轨迹生成候选，完成评测并批准后，它才会成为这个范围的生效版本。</span></div></div>';
     return;
   }
+  // 全部视图会带上每个范围各一份生效版本，其中多数是还没用过、0 条轨迹的默认策略：
+  // 默认只摆出真有轨迹的范围，其余收进折叠，避免一屏全是空壳。
+  if (!learningAllScopes()) {
+    $("#learningChampionStatus").textContent = `${learningVersion(list[0])} · 已启用`;
+    container.innerHTML = list.map((champion) => renderLearningChampionCard(champion)).join("");
+    return;
+  }
+  const scopeKeyOf = (item) => `${item.contentType || item.content_type || item.scope?.contentType || "general"}\u0000${item.domain || item.scope?.domain || "general"}`;
+  const withTrajectories = new Set(learningArray(scopeCounts).map(scopeKeyOf));
+  const active = list.filter((champion) => withTrajectories.has(scopeKeyOf(champion)));
+  const idle = list.filter((champion) => !withTrajectories.has(scopeKeyOf(champion)));
+  $("#learningChampionStatus").textContent = idle.length
+    ? `${active.length} 个范围有轨迹 · 共 ${list.length} 个`
+    : `${list.length} 个范围已启用`;
+  container.innerHTML = `${active.map((champion) => renderLearningChampionCard(champion)).join("")}${idle.length
+    ? `<details class="learning-champion-rest"${active.length ? "" : " open"}><summary>其它 ${idle.length} 个范围还没有轨迹（默认折叠）</summary>${idle.map((champion) => renderLearningChampionCard(champion)).join("")}</details>`
+    : ""}`;
+}
+
+function renderLearningChampionCard(champion) {
   const rules = learningRules(champion);
   const [statusLabel, statusClass] = learningStatusMeta({ ...champion, status: "active" });
   const evidenceCount = Number(champion.evidenceCount ?? champion.evidence_count ?? champion.trajectoryCount ?? champion.trajectory_count)
@@ -5754,9 +5850,8 @@ function renderLearningChampion(champion) {
       ? `<span class="learning-auto-note error">自动候选生成上次失败：${escapeHtml(autoPropose.lastError)}（新的人工终稿到达后会重试）</span>`
       : `<span class="learning-auto-note">自动候选生成已启用 · ${escapeHtml(String(autoPropose.lastAcceptedCount ?? ""))} 条人工终稿时触发${autoPropose.lastProposedAt ? ` · ${escapeHtml(formatLearningDate(autoPropose.lastProposedAt))}` : ""}</span>`)
     : "";
-  $("#learningChampionStatus").textContent = `${learningVersion(champion)} · 已启用`;
-  container.innerHTML = `<article class="learning-skill-card champion">
-    <div class="learning-skill-head"><div><span class="learning-skill-version">${escapeHtml(learningVersion(champion))}</span><h3>${escapeHtml(learningSkillTitle(champion))}</h3><small>${evidenceCount} 条轨迹支撑${champion.activatedAt || champion.activated_at ? ` · ${escapeHtml(formatLearningDate(champion.activatedAt || champion.activated_at))} 启用` : ""}</small></div><span class="learning-status ${statusClass}">${statusLabel}</span></div>
+  return `<article class="learning-skill-card champion">
+    <div class="learning-skill-head"><div><span class="learning-skill-version">${escapeHtml(learningVersion(champion))}</span><h3>${escapeHtml(learningSkillTitle(champion))}</h3>${learningScopeTag(champion)}<small>${evidenceCount} 条轨迹支撑${champion.activatedAt || champion.activated_at ? ` · ${escapeHtml(formatLearningDate(champion.activatedAt || champion.activated_at))} 启用` : ""}</small></div><span class="learning-status ${statusClass}">${statusLabel}</span></div>
     <p class="learning-skill-summary">${escapeHtml(champion.summary || champion.description || champion.instruction || "当前稳定生产版本。所有新候选都将以此版本作为评测基线。")}</p>
     ${autoProposeNote}
     ${rules.length ? `<div class="learning-rule-grid">${rules.map((rule, index) => `<div><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(rule)}</p></div>`).join("")}</div>` : ""}
@@ -5778,7 +5873,7 @@ function evaluationPassed(evaluation, skill = {}) {
   return ["passed", "ready", "evaluated", "promote", "approved"].includes(gate);
 }
 
-function renderLearningCandidates(candidates, evaluations, champion, validTrajectoryCount) {
+function renderLearningCandidates(candidates, evaluations, champions, validTrajectoryCount) {
   const list = $("#learningCandidateList");
   $("#learningCandidateCount").textContent = `${candidates.length} 个候选`;
   if (!candidates.length) {
@@ -5790,6 +5885,8 @@ function renderLearningCandidates(candidates, evaluations, champion, validTrajec
   if (!candidates.some((item) => learningId(item) === state.learningSelectedSkillId)) state.learningSelectedSkillId = learningId(candidates[0]);
   list.innerHTML = candidates.map((skill) => {
     const id = learningId(skill);
+    // 全部视图下候选来自不同范围：基线必须取它自己范围的生效版本，不能用别的范围的。
+    const champion = learningChampionFor(skill, champions);
     const evaluation = learningEvaluationFor(skill, evaluations);
     const evaluationResult = learningEvaluationResult(evaluation);
     const currentChampionId = learningId(champion);
@@ -5808,22 +5905,24 @@ function renderLearningCandidates(candidates, evaluations, champion, validTrajec
     const rules = learningRules(skill);
     const evidenceCount = Number(skill.evidenceCount ?? skill.evidence_count ?? skill.trajectoryCount ?? skill.trajectory_count) || learningArray(skill.evidence || skill.evidenceIds || skill.evidence_ids).length;
     const canActivate = Boolean(evaluation && baselineCurrent && evaluationPassed(evaluation, skill));
-    const reviewStatus = String(evaluationResult.status || evaluation.decision || "").toLowerCase();
+    // 候选刚生成时还没有任何评测：evaluation 为 null，这里不能直接读它的字段
+    // （曾经因此抛 "Cannot read properties of null (reading 'decision')"，整个学习中心变成读取失败）。
+    const reviewStatus = String(evaluationResult.status || evaluation?.decision || "").toLowerCase();
     const insufficient = evaluation && ["insufficient", "needs_review"].includes(reviewStatus);
     const unstable = evaluation && reviewStatus === "unstable";
     const footerText = !baselineCurrent
-      ? "该候选基于旧冠军生成，不能再晋升；请拒绝它，并从当前冠军重新生成候选。"
+      ? "该候选基于旧的生效版本生成，不能再晋升；请拒绝它，并从当前生效版本重新生成候选。"
       : !evaluation
-        ? "尚未与当前冠军进行隔离评测。"
+        ? "尚未与当前生效版本进行隔离评测。"
         : canActivate
-          ? "已在当前冠军基线上通过完整门槛，可由人工批准启用。"
+          ? "已在当前生效版本基线上通过完整门槛，可由人工批准启用。"
           : unstable
             ? (evaluationResult.conclusion || "重复评测结论互相矛盾，系统已暂停形成优劣结论。")
           : insufficient
             ? (evaluationResult.conclusion || "评测证据不足或执行未完成，当前没有形成优劣结论。")
             : "评测门槛未通过，不能进入生产。";
     return `<article class="learning-skill-card candidate ${selected ? "selected" : ""}" data-learning-select="${escapeHtml(id)}" tabindex="0">
-      <div class="learning-skill-head"><div><span class="learning-skill-version">${escapeHtml(learningVersion(skill))}</span><h3>${escapeHtml(learningSkillTitle(skill))}</h3><small>${evidenceCount} 条来源证据${skill.createdAt || skill.created_at ? ` · ${escapeHtml(formatLearningDate(skill.createdAt || skill.created_at))}` : ""}</small></div><span class="learning-status ${statusClass}">${statusLabel}</span></div>
+      <div class="learning-skill-head"><div><span class="learning-skill-version">${escapeHtml(learningVersion(skill))}</span><h3>${escapeHtml(learningSkillTitle(skill))}</h3>${learningScopeTag(skill)}<small>${evidenceCount} 条来源证据${skill.createdAt || skill.created_at ? ` · ${escapeHtml(formatLearningDate(skill.createdAt || skill.created_at))}` : ""}</small></div><span class="learning-status ${statusClass}">${statusLabel}</span></div>
       <div class="learning-change-reason"><span>为什么提出这次变更</span><p>${escapeHtml(reason)}</p></div>
       ${sanitizationNote}
       ${rules.length ? `<details class="learning-change-details"><summary>查看 ${rules.length} 项候选执行配置</summary>${rules.map((rule) => `<p>${escapeHtml(rule)}</p>`).join("")}</details>` : ""}
@@ -5890,7 +5989,7 @@ function learningMetricDisplay(value, unit) {
 function renderLearningEvaluation(candidate, evaluation, champion) {
   const matrix = $("#learningEvaluationMatrix");
   if (!candidate || !evaluation) {
-    matrix.innerHTML = '<div class="empty-list learning-empty"><div><strong>还没有可对比的评测</strong><span>在候选卡片底部运行评测，结果会在这里与当前冠军逐项比较。</span></div></div>';
+    matrix.innerHTML = '<div class="empty-list learning-empty"><div><strong>还没有可对比的评测</strong><span>在候选卡片底部运行评测，结果会在这里与当前生效版本逐项比较。</span></div></div>';
     return;
   }
   const metrics = normalizeLearningMetrics(evaluation);
@@ -5902,14 +6001,14 @@ function renderLearningEvaluation(candidate, evaluation, champion) {
   const currentChampionId = learningId(champion);
   const evaluatedChampionId = String(evaluation.championSkillId || evaluation.champion_skill_id || result.championId || result.champion_id || "");
   const stale = Boolean(currentChampionId && evaluatedChampionId && currentChampionId !== evaluatedChampionId);
-  const comparisonLabel = stale ? "旧冠军基线评测" : unstable ? "结果不稳定 · 暂不形成优劣结论" : insufficient ? "证据不足 · 暂不形成优劣结论" : "已完成 Champion / Challenger 对比";
+  const comparisonLabel = stale ? "旧生效版本基线评测" : unstable ? "结果不稳定 · 暂不形成优劣结论" : insufficient ? "证据不足 · 暂不形成优劣结论" : "已完成生效版本 / 候选版本对比";
   const gateClass = stale ? "stale" : unstable || insufficient ? "insufficient" : passed ? "passed" : "failed";
   const gateLabel = stale ? "基线已过期" : unstable ? "多轮结论互相矛盾" : insufficient ? "评测未完整完成" : passed ? "通过晋升门槛" : "未通过晋升门槛";
   const evaluationBasis = result.evaluationBasis || "编辑距离与近似通过率均由候选译文相对人工批准终稿自动计算，不代表新增人工投票或主观打分。";
   const conclusion = result.reportZh || (typeof evaluation.report === "string" ? evaluation.report : "") || result.conclusion || result.summary || result.reason || (passed ? "候选通过全部晋升门槛。" : "候选尚未通过全部晋升门槛。将在批准前保持隔离。 ");
   matrix.innerHTML = `<div class="learning-evaluation-title"><div><span>${escapeHtml(comparisonLabel)}</span><strong>${escapeHtml(learningSkillTitle(candidate))} ${escapeHtml(learningVersion(candidate))}</strong></div><span class="learning-gate ${gateClass}">${gateLabel}</span></div>
     <p class="learning-evaluation-basis">${escapeHtml(evaluationBasis)}</p>
-    ${metrics.length ? `<div class="learning-metric-table"><div class="learning-metric-row heading"><span>指标</span><span>当前冠军</span><span>候选版本</span><span>变化</span></div>${metrics.map((metric) => {
+    ${metrics.length ? `<div class="learning-metric-table"><div class="learning-metric-row heading"><span>指标</span><span>当前生效版本</span><span>候选版本</span><span>变化</span></div>${metrics.map((metric) => {
       const rawDelta = Number.isFinite(metric.delta) ? metric.delta : metric.candidate - metric.champion;
       const improved = metric.higher ? rawDelta >= 0 : rawDelta <= 0;
       return `<div class="learning-metric-row"><strong>${escapeHtml(metric.label)}</strong><span>${learningMetricDisplay(metric.champion, metric.unit)}</span><span>${learningMetricDisplay(metric.candidate, metric.unit)}</span><span class="metric-delta ${improved ? "positive" : "negative"}">${rawDelta > 0 ? "+" : ""}${learningMetricDisplay(rawDelta, metric.unit)}</span></div>`;
@@ -5927,6 +6026,10 @@ function renderLearningEvidence(evidence, candidates) {
   $("#learningEvidenceList").innerHTML = rows.length ? rows.map((item) => {
     const accepted = item.humanDecision?.accepted === true || item.human_decision?.accepted === true;
     const typeLabel = accepted ? "人工采纳轨迹" : item.status === "review" ? "待复核轨迹" : "完成轨迹";
+    const referenceRefs = item.referenceUsage?.refs || [];
+    const referenceLine = referenceRefs.length
+      ? `<small class="learning-reference-line">本次查阅资料 ${referenceRefs.length} 段：${escapeHtml([...new Set(referenceRefs.map((ref) => [ref.documentName, ref.heading].filter(Boolean).join(" · ")).filter(Boolean))].slice(0, 3).join("；"))}${referenceRefs.length > 3 ? "…" : ""}</small>`
+      : "";
     const attribution = item.attribution || {};
     const title = item.title || item.reason || item.changeReason || item.change_reason || item.summary
       || ({ improved: "发现正向改进信号", needs_learning: "发现需要继续学习的修订信号", observed: "已记录轨迹，尚不能可靠归因" }[attribution.outcome])
@@ -5936,7 +6039,9 @@ function renderLearningEvidence(evidence, candidates) {
     const target = item.correctedTranslation || item.corrected_translation || item.finalTranslation || item.final_translation || item.translation || item.target || "";
     const ref = item.taskId || item.task_id || item.trajectoryId || item.trajectory_id || item.id || "";
     const linked = selectedEvidenceIds.has(String(item.id || ref));
-    return `<article class="learning-evidence-item ${linked ? "linked" : ""}"><div class="learning-evidence-meta"><span>${escapeHtml(typeLabel)}</span><small>${escapeHtml(ref ? `#${String(ref).slice(0, 12)}` : "可追溯来源")}${linked ? " · 本候选来源" : ""}${item.createdAt || item.created_at ? ` · ${escapeHtml(formatLearningDate(item.createdAt || item.created_at))}` : ""}</small></div><div><strong>${escapeHtml(title)}</strong>${attributionText ? `<p class="learning-evidence-reason">${escapeHtml(attributionText)}</p>` : ""}${source ? `<p>${escapeHtml(source)}</p>` : ""}${target ? `<p class="learning-evidence-target">→ ${escapeHtml(target)}</p>` : ""}</div></article>`;
+    const sourceFile = String(item.sourceFile || item.assetRefs?.sourceFile || "");
+    // 全部视图下每条轨迹要能看出自己属于哪个语体 × 领域，条目本身就是证据。
+    return `<article class="learning-evidence-item ${linked ? "linked" : ""}"><div class="learning-evidence-meta"><span>${escapeHtml(typeLabel)}</span>${learningScopeTag(item)}<small>${escapeHtml(ref ? `#${String(ref).slice(0, 12)}` : "可追溯来源")}${linked ? " · 本候选来源" : ""}${item.createdAt || item.created_at ? ` · ${escapeHtml(formatLearningDate(item.createdAt || item.created_at))}` : ""}</small>${sourceFile ? `<small class="learning-evidence-file" title="${escapeHtml(sourceFile)}">来源：${escapeHtml(sourceFile)}</small>` : ""}</div><div><strong>${escapeHtml(title)}</strong>${attributionText ? `<p class="learning-evidence-reason">${escapeHtml(attributionText)}</p>` : ""}${source ? `<p>${escapeHtml(source)}</p>` : ""}${target ? `<p class="learning-evidence-target">→ ${escapeHtml(target)}</p>` : ""}</div></article>`;
   }).join("") : '<div class="empty-list learning-empty"><div><strong>当前范围还没有学习证据</strong><span>完成翻译、AIQA 修订或人工采纳后，证据会连同轨迹编号出现在这里。</span></div></div>';
 }
 
@@ -6375,23 +6480,75 @@ async function downloadTrainingManifest(runId) {
   }
 }
 
+/** 领域下拉里的中文名：提示条要用用户看得懂的说法，不直接抛 game / marketing。 */
+function learningDomainLabel(domain) {
+  const option = [...($("#learningDomain")?.options || [])].find((item) => item.value === String(domain));
+  return option ? option.textContent.trim() : String(domain || "");
+}
+
+/**
+ * 范围分布常驻面板：每个「语体 × 领域」各有多少条轨迹、来自哪些文件，点一下切过去。
+ *
+ * 以前只在"当前范围没轨迹"时才提示一句，用户在具体范围里看不到别的范围有没有料、
+ * 料来自哪个文件。现在常驻显示：有轨迹的范围按条数排序列出，当前范围高亮。
+ */
+function renderLearningScopeHint(scopeCounts, trajectoryCount) {
+  const container = $("#learningScopeHint");
+  if (!container) return;
+  const scopes = learningArray(scopeCounts)
+    .map((item) => ({
+      contentType: item.contentType || item.content_type || "general",
+      domain: item.domain || "general",
+      count: Number(item.count) || 0,
+      files: learningArray(item.files).map((file) => ({ name: String(file?.name || ""), count: Number(file?.count) || 0 })).filter((file) => file.name)
+    }))
+    .filter((item) => item.count > 0)
+    .sort((left, right) => right.count - left.count);
+  if (!scopes.length) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  const allScopes = learningAllScopes();
+  const currentContentType = learningScopeSelected("contentType");
+  const currentDomain = learningScopeSelected("domain");
+  const total = scopes.reduce((sum, item) => sum + item.count, 0);
+  const emptyNote = !allScopes && trajectoryCount === 0
+    ? `<p class="learning-scope-empty">当前选择（${escapeHtml(contentTypeLabel(currentContentType))} × ${escapeHtml(learningDomainLabel(currentDomain))}）还没有轨迹；挑一个下面有轨迹的范围，或选「全部」一起看。</p>`
+    : "";
+  container.hidden = false;
+  container.innerHTML = `<div class="learning-scope-head"><strong>本项目各范围的轨迹</strong><small>${scopes.length} 个范围有轨迹 · 共 ${total} 条${allScopes ? "" : " · 当前范围已标出，点任一范围可切换"}</small></div>${emptyNote}<div class="learning-scope-rows">${scopes.map((item) => {
+    const current = !allScopes && item.contentType === currentContentType && item.domain === currentDomain;
+    const fileText = item.files.slice(0, 2).map((file) => `${file.name}（${file.count} 条）`).join("、");
+    const moreText = item.files.length > 2 ? ` 等 ${item.files.length} 个文件` : "";
+    return `<button type="button" class="learning-scope-row${current ? " current" : ""}" data-learning-scope-content="${escapeHtml(item.contentType)}" data-learning-scope-domain="${escapeHtml(item.domain)}"><span class="learning-scope-name">${escapeHtml(contentTypeLabel(item.contentType))} × ${escapeHtml(learningDomainLabel(item.domain))}</span><span class="learning-scope-count">${item.count} 条</span><small class="learning-scope-files">${item.files.length ? `来源：${escapeHtml(`${fileText}${moreText}`)}` : "来源文件未记录"}</small></button>`;
+  }).join("")}</div>`;
+  $$("#learningScopeHint [data-learning-scope-content]").forEach((button) => button.addEventListener("click", async () => {
+    $("#learningContentType").value = button.dataset.learningScopeContent;
+    $("#learningDomain").value = button.dataset.learningScopeDomain;
+    await loadLearning(state.learningLocale);
+  }));
+}
+
 function renderLearning() {
   if (!state.learningData) return;
-  const { payload, champion, candidates, evaluations, evidence } = learningPayload();
+  const { payload, champions, candidates, evaluations, evidence } = learningPayload();
   const trajectories = validLearningTrajectories(payload.trajectories || evidence);
   const scopedSkills = learningArray(payload.skills).filter(learningScopeMatches);
   const trajectoryCount = trajectories.length;
-  const skillCount = scopedSkills.length || candidates.length + (champion ? 1 : 0);
+  const skillCount = scopedSkills.length || candidates.length + champions.length;
   const pendingCount = candidates.filter((skill) => !learningEvaluationFor(skill, evaluations)).length;
   $("#learningTrajectoryCount").textContent = trajectoryCount.toLocaleString("zh-CN");
   $("#learningSkillCount").textContent = skillCount.toLocaleString("zh-CN");
   $("#learningPendingCount").textContent = pendingCount.toLocaleString("zh-CN");
-  renderLearningChampion(champion);
-  renderLearningCandidates(candidates, evaluations, champion, trajectoryCount);
+  renderLearningScopeHint(payload.scopeCounts, trajectoryCount);
+  renderLearningChampion(champions, payload.scopeCounts);
+  renderLearningCandidates(candidates, evaluations, champions, trajectoryCount);
   const selected = candidates.find((item) => learningId(item) === state.learningSelectedSkillId) || candidates[0];
-  renderLearningEvaluation(selected, selected ? learningEvaluationFor(selected, evaluations) : null, champion);
+  renderLearningEvaluation(selected, selected ? learningEvaluationFor(selected, evaluations) : null, learningChampionFor(selected, champions));
   renderLearningConflicts(state.conflictReport);
   renderLearningEvidence(evidence, candidates);
+  syncLearningScopeBoundActions();
   bindLearningCardEvents();
   refreshActions();
 }
@@ -6418,9 +6575,14 @@ async function loadLearning(locale = state.learningLocale) {
     state.learningLoading = false;
     state.conflictReport = null;
     renderLearning();
-    loadConflictReport();
-    loadQualityGate();
-    loadTrainingRuns();
+    // 规则冲突、固定质量资产、微调任务都是按「一个范围」结算的：全部视图下不拿
+    // "跨范围"口径去问它们，免得给出看着像结论的混合数字。
+    if (learningAllScopes()) renderLearningScopeBoundNotice();
+    else {
+      loadConflictReport();
+      loadQualityGate();
+      loadTrainingRuns();
+    }
   } catch (error) {
     state.learningData = null;
     state.learningLoading = false;
@@ -6441,6 +6603,41 @@ async function loadLearning(locale = state.learningLocale) {
   }
 }
 
+/** 全部视图下，范围强绑定的三块统一显示"选具体范围后查看"。 */
+function renderLearningScopeBoundNotice() {
+  const notice = '<div class="empty-list learning-empty"><div><strong>先选具体「内容语体 × 业务领域」</strong><span>规则冲突审查、固定质量资产与微调任务都按单个范围结算，不跨范围合并。</span></div></div>';
+  // 先按"尚未扫描"清掉旧结论，再盖上跨范围说明，避免残留上一轮的报告。
+  renderLearningConflicts(null);
+  $("#learningGateStatus").textContent = "需选定范围";
+  $("#learningQualityAssets").innerHTML = notice;
+  $("#learningRegressionCandidates").innerHTML = "";
+  $("#learningTrainingCount").textContent = "需选定范围";
+  $("#learningTrainingList").innerHTML = notice;
+  $("#learningConflictCount").textContent = "需选定范围";
+  $("#learningConflictList").innerHTML = notice;
+  state.qualityAssets = null;
+  state.qualityGate = null;
+  state.trainingRuns = [];
+}
+
+/**
+ * 全部视图下把"按单个范围结算"的动作按钮也一起置灰：
+ * 这些接口会在服务端按作用域校验，传 all 会直接报"不允许使用通配值"。
+ * 按钮标题写清为什么不能点，避免用户点了才看到报错。
+ */
+const LEARNING_SCOPE_BOUND_BUTTONS = ["learningGateRun", "learningGoldSeed", "learningRegressionBuild", "learningExportAudit", "learningExportSft", "learningExportDpo", "trainingCreate", "learningConflictScan"];
+
+function syncLearningScopeBoundActions() {
+  const allScopes = learningAllScopes();
+  for (const id of LEARNING_SCOPE_BOUND_BUTTONS) {
+    const button = document.getElementById(id);
+    if (!button) continue;
+    button.disabled = allScopes;
+    if (allScopes) button.title = "先选具体「语体 × 领域」：这些操作按单个范围结算，不能跨范围执行";
+    else if (button.title.startsWith("先选具体")) button.title = "";
+  }
+}
+
 function learningActionBody() {
   return { locale: state.learningLocale, contentType: $("#learningContentType").value, domain: $("#learningDomain").value, project: state.activeProjectId || "default" };
 }
@@ -6448,13 +6645,13 @@ function learningActionBody() {
 async function runLearningAction(skillId, action, button) {
   if (!skillId) return toast("技能缺少可操作的版本 ID");
   if (action === "evaluate") return runSkillEvaluation(skillId, button);
-  const prompts = { activate: "确认批准这个候选并替换当前生产冠军？原冠军仍可回滚。", reject: "确认拒绝这个候选技能？它会保留在审计记录中。", rollback: "确认回滚到上一已验证版本？当前版本不会被删除。" };
+  const prompts = { activate: "确认批准这个候选并替换当前生效版本？原版本仍可回滚。", reject: "确认拒绝这个候选版本？它会保留在审计记录中。", rollback: "确认回滚到上一已验证版本？当前版本不会被删除。" };
   if (prompts[action] && !confirm(prompts[action])) return;
   const original = button?.textContent;
   if (button) { button.disabled = true; button.textContent = "处理中……"; }
   try {
     await api(`/api/learning/skills/${encodeURIComponent(skillId)}/${action}`, { method: "POST", body: JSON.stringify(learningActionBody()) });
-    toast({ activate: "候选已批准并成为生产冠军", reject: "候选已拒绝", rollback: "已回滚到上一验证版本" }[action] || "操作已完成");
+    toast({ activate: "候选已批准并成为当前生效版本", reject: "候选已拒绝", rollback: "已回滚到上一验证版本" }[action] || "操作已完成");
     await loadLearning(state.learningLocale);
   } catch (error) {
     toast(error.message);
@@ -6519,7 +6716,57 @@ async function watchEvaluationJob(jobId, button, original) {
   toast("评测任务长时间未结束，请稍后在学习中心查看");
 }
 
+/** 全部视图下的可选范围：项目里有轨迹的「语体 × 领域」，按条数排序。 */
+function learningScopesWithTrajectories() {
+  return learningArray(state.learningData?.scopeCounts || state.learningData?.data?.scopeCounts)
+    .map((item) => ({
+      contentType: item.contentType || item.content_type || "general",
+      domain: item.domain || "general",
+      count: Number(item.count) || 0,
+      files: learningArray(item.files).map((file) => String(file?.name || "")).filter(Boolean)
+    }))
+    .filter((item) => item.count > 0)
+    .sort((left, right) => right.count - left.count);
+}
+
+/**
+ * 全部视图下没有"当前范围"：生成候选前必须先落到一个具体范围。
+ * 只有一个有轨迹的范围就直接用；多个则让用户挑（附条数与来源文件）。
+ */
+async function resolveLearningScopeForGeneration() {
+  const scopes = learningScopesWithTrajectories();
+  if (!scopes.length) {
+    toast("当前项目还没有可用于学习的轨迹");
+    return false;
+  }
+  let picked = scopes[0];
+  if (scopes.length > 1) {
+    const choice = await openChoiceDialog({
+      kicker: "PICK SCOPE",
+      title: "先选一个范围生成候选技能",
+      summary: "候选技能按「语言 × 语体 × 领域 × 项目」隔离，必须落到具体范围；下面只列有轨迹的范围。",
+      options: scopes.map((scope) => {
+        const files = scope.files.slice(0, 2).join("、");
+        const more = scope.files.length > 2 ? ` 等 ${scope.files.length} 个文件` : "";
+        return {
+          id: `${scope.contentType}\u0000${scope.domain}`,
+          label: `${contentTypeLabel(scope.contentType)} × ${learningDomainLabel(scope.domain)}`,
+          hint: `${scope.count} 条轨迹${scope.files.length ? ` · 来源：${files}${more}` : ""}`
+        };
+      })
+    });
+    if (!choice) return false;
+    const [contentType, domain] = String(choice).split("\u0000");
+    picked = scopes.find((scope) => scope.contentType === contentType && scope.domain === domain) || picked;
+  }
+  $("#learningContentType").value = picked.contentType;
+  $("#learningDomain").value = picked.domain;
+  await loadLearning(state.learningLocale);
+  return true;
+}
+
 async function generateLearningSkill() {
+  if (learningAllScopes() && !(await resolveLearningScopeForGeneration())) return;
   setBusy(true, "正在提炼候选技能……");
   try {
     const result = await api("/api/learning/skills/generate", { method: "POST", body: JSON.stringify(learningActionBody()) });
@@ -6622,7 +6869,8 @@ async function commitImport() {
 function populateSelects() {
   const contentOptions = Object.entries(state.bootstrap.contentTypes).map(([value, details]) => `<option value="${value}">${details.label}</option>`).join("");
   $("#assetForm select[name=contentType]").innerHTML = contentOptions;
-  $("#learningContentType").innerHTML = contentOptions;
+  // 学习中心可以把语体整维度放开：默认仍是"待分类文本"，最后一项留给"全部语体"。
+  $("#learningContentType").innerHTML = `${contentOptions}<option value="all">全部语体</option>`;
   if ([...$("#learningContentType").options].some((option) => option.value === "general")) $("#learningContentType").value = "general";
   $("#taskLocale").innerHTML = Object.entries(state.bootstrap.locales).map(([locale, details]) => `<option value="${locale}">日语→${details.label}</option>`).join("");
 }
@@ -6660,7 +6908,6 @@ function bindEvents() {
       const task = source === "batch" ? runQaFromBatch() : source === "file" ? runQaFromFile() : runAutoQa();
       Promise.resolve(task).catch((error) => toast(error.message));
     }
-    else if (state.view === "feedback") loadFeedbackPage().catch((error) => toast(error.message));
     else { resetTermDialog(); $("#assetDialog").showModal(); }
   });
   $("#secondaryAction").addEventListener("click", () => {
@@ -6678,8 +6925,13 @@ function bindEvents() {
   $("#reviewImportFile").addEventListener("change", (event) => submitReviewImport(event.target.files?.[0]));
   $("#batchJumpNext").addEventListener("click", () => jumpToNextBatchIssue());
   $("#batchQualityTier")?.addEventListener("change", () => {
+    syncQualityTier($("#batchQualityTier").value, $("#batchQualityTier"));
     if (state.batchPreview) saveBatchProgress();
     toast(`质量档已设为${$("#batchQualityTier").selectedOptions[0]?.textContent || "自动"}，下一段起生效`);
+  });
+  $("#qualityTier")?.addEventListener("change", () => {
+    syncQualityTier($("#qualityTier").value, $("#qualityTier"));
+    if (state.batchPreview) saveBatchProgress();
   });
   $("#batchBriefRerun")?.addEventListener("click", () => rerunBatchBrief());
   $("#batchBriefEditToggle")?.addEventListener("click", () => toggleBatchBriefEdit());
@@ -6983,14 +7235,31 @@ function bindEvents() {
       toast(editingId ? "术语已更新" : `已保存到${state.bootstrap.locales[state.assetLocale].label}术语库`);
     } catch (error) { toast(error.message); }
   });
-  $("#feedbackBell").addEventListener("click", () => {
-    switchView("feedback");
-    loadFeedbackPage().catch((error) => toast(error.message));
+  $("#refreshReferences").addEventListener("click", () => loadReferences().catch((error) => toast(error.message)));
+  $("#referenceStatus").addEventListener("change", (event) => { state.referenceStatus = event.target.value; loadReferences().catch((error) => toast(error.message)); });
+  $("#referenceLibrary").addEventListener("change", (event) => { state.referenceLibraryId = event.target.value; loadReferences().catch((error) => toast(error.message)); });
+  $("#referenceSearch").addEventListener("change", (event) => { state.referenceSearch = event.target.value.trim(); loadReferences().catch((error) => toast(error.message)); });
+  $("#referenceFileInput").addEventListener("change", (event) => {
+    const files = [...(event.target.files || [])];
+    event.target.value = "";
+    uploadReferenceFiles(files).catch((error) => toast(error.message));
   });
-  $("#refreshFeedback").addEventListener("click", () => loadFeedbackPage().catch((error) => toast(error.message)));
-  $("#feedbackStatusFilter").addEventListener("change", () => {
-    state.feedbackStatusFilter = $("#feedbackStatusFilter").value;
-    renderFeedbackPage();
+  $("#closeReferenceDetail").addEventListener("click", () => { $("#referenceDetailPanel").hidden = true; });
+  $("#referenceList").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-reference-action]");
+    if (button) referenceAction(button.dataset.referenceAction, button.dataset.id, button).catch((error) => toast(error.message));
+  });
+  $("#referenceChunks").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-reference-action]");
+    if (button) referenceAction(button.dataset.referenceAction, button.dataset.id, button).catch((error) => toast(error.message));
+  });
+  $("#referenceDetailActions").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-reference-action]");
+    if (button) referenceAction(button.dataset.referenceAction, button.dataset.id, button).catch((error) => toast(error.message));
+  });
+  $("#autoQaIssues").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-qa-issue-delete]");
+    if (button) deleteAutoQaIssue(button).catch((error) => toast(error.message));
   });
   $("#openProvider").addEventListener("click", openProviderSettings);
   $("#confirmTermReplace").addEventListener("click", applyTermSuggestion);
@@ -7049,7 +7318,6 @@ async function initialize() {
     await loadMemories(state.memoryLocale);
     updateWorkbenchLocale(state.workbenchLocale);
     updateAutoQaLocale(state.autoQaLocale);
-    startFeedbackPolling();
     refreshActions();
     await restoreBatchProgress();
   } catch (error) {

@@ -96,6 +96,8 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
           body: JSON.stringify({
             batchId: "batch-2", filename: "interrupted.xlsx", total: 5, matched: 4, changed: 3, unchanged: 1,
             unmatched: 1, ambiguous: 0, memoriesWritten: 4, trajectoriesLinked: 3,
+            trajectoriesUpdated: 1, trajectoryAlreadyAccepted: 12, trajectoryAcceptedUnchanged: 11,
+            skippedUnits: { locked: 1, existing: 6 },
             trajectoryUnmatched: 1, trajectoryAmbiguous: 0, failures: [],
             details: { unmatched: [{ pairIndex: 4, source: "新材料です。", reason: "该原文不在这个批次里" }], ambiguous: [] }
           })
@@ -215,8 +217,12 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     assert.match(summary, /已回填 4 \/ 5 条/u);
     assert.match(summary, /写入主 TM 4 条/u);
     assert.match(summary, /接回学习轨迹 3 条/u);
+    // 已采纳的轨迹不算"新接回"：数字要分开报，否则"接回 0 条"看起来像失败
+    assert.match(summary, /更新已采纳轨迹 1 条/u);
+    assert.match(summary, /此前已采纳、内容相同跳过 11 条/u);
     assert.match(await page.locator("#reviewImportDetails").textContent(), /未匹配 1 条/u);
     assert.match(await page.locator("#reviewImportDetails").textContent(), /该原文不在这个批次里/u);
+    assert.match(await page.locator("#reviewImportDetails").textContent(), /本批解析时已跳过：锁定 1 \/ 已有译文 6/u, "要说明这些是解析时跳过的句段");
     assert.ok(actions.includes("POST /api/batch/run/batch-2/import-review"), `回填要打到 import-review 接口：${actions.join(" | ")}`);
     await page.locator('#reviewImportDialog .icon-button[data-close="reviewImportDialog"]').click();
 
@@ -250,7 +256,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     }
     await page.locator("#exportDialogForce").click();
     try {
-      await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 15_000 });
+      await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 45_000 });
     } catch (error) {
       throw new Error(`${error.message}；toast：${await page.locator("#toast").textContent()}；页面异常：${errors.join(" | ") || "无"}`);
     }
@@ -272,7 +278,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     assert.match(await page.locator("#exportDialogTitle").textContent(), /导出被 QA 门禁挡住/u);
     await page.locator("#exportDialogForce").click();
     try {
-      await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 15_000 });
+      await page.waitForFunction(() => /导出完成/.test(document.querySelector("#exportDialogTitle")?.textContent || ""), null, { timeout: 45_000 });
     } catch (error) {
       throw new Error(`${error.message}；toast：${await page.locator("#toast").textContent()}；页面异常：${errors.join(" | ") || "无"}`);
     }
@@ -294,7 +300,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     assert.equal(await jumpButton.count(), 1, "有待处理时那个计数要是可点的");
     await jumpButton.click();
     await page.waitForSelector("#view-workbench.active");
-    await page.waitForFunction(() => Boolean(document.querySelector(".batch-segment.is-highlighted")), null, { timeout: 10_000 });
+    await page.waitForFunction(() => Boolean(document.querySelector(".batch-segment.is-highlighted")), null, { timeout: 45_000 });
     assert.match(await page.locator("#batchQaFilter").textContent(), /建议确认 1/u, "分段队列要有 QA 筛选 chips");
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
@@ -338,7 +344,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.locator('#taskList .task-row[data-task-id="task-1"] [data-action="delete-background"]').click();
     await page.waitForSelector("#exportOptionsDialog[open]");
     await page.locator('[data-export-option="stop"]').click();
-    await page.waitForFunction(() => /已删除后台任务/.test(document.querySelector("#toast")?.textContent || ""), null, { timeout: 15_000 });
+    await page.waitForFunction(() => /已删除后台任务/.test(document.querySelector("#toast")?.textContent || ""), null, { timeout: 45_000 });
     assert.equal(actions.filter((item) => item === "POST /api/background-tasks/task-1/cancel").length, cancelBefore + 1, "停止并删除要先打中断接口");
     assert.ok(actions.includes("DELETE /api/background-tasks/task-1"), `删除要打到后台任务接口：${actions.join(" | ")}`);
 

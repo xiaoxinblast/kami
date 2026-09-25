@@ -27,6 +27,11 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
 
   const settings = defaultSettings();
   const providerBodies = [];
+  const probeBodies = [];
+  const probeOutcomes = [
+    { ok: false, baseUrl: "http://127.0.0.1:11435/v1", model: "typed-model", latencyMs: 12, error: "模型请求失败 (401)：Unauthorized" },
+    { ok: true, baseUrl: "http://127.0.0.1:11435/v1", model: "typed-model", latencyMs: 123 }
+  ];
   const providerConfig = { baseUrl: "http://localhost:11434/v1", model: "qwen3:14b", fastModel: "", qualityModel: "", mtModel: "", embeddingModel: "", embeddingBaseUrl: "", inputPricePerMTok: "", outputPricePerMTok: "", apiKeyConfigured: false, embeddingApiKeyConfigured: false };
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -55,6 +60,10 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
         Object.assign(providerConfig, body, { apiKeyConfigured: false });
         payload = providerConfig;
       }
+      else if (path === "/api/provider/probe") {
+        probeBodies.push(JSON.parse(request.postData() || "{}"));
+        payload = probeOutcomes.shift() || { ok: true, baseUrl: "http://127.0.0.1:11435/v1", model: "typed-model", latencyMs: 100 };
+      }
       else if (path === "/api/settings" && request.method() === "POST") {
         const body = JSON.parse(request.postData() || "{}");
         if (body.settings) Object.assign(settings, body.settings);
@@ -72,6 +81,20 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
     await page.locator("#openProvider").click();
     await page.waitForSelector("#providerDialog[open]");
     await page.locator('#providerDialog input[name="baseUrl"]').fill("http://127.0.0.1:11435/v1");
+
+    // 连接与鉴权：测试连接先报失败，再报成功；两次都只探针、不保存
+    await page.locator('#providerDialog button[data-provider-probe]').click();
+    await page.waitForFunction(() => /连接失败/.test(document.querySelector('[data-probe-result]')?.textContent || ""));
+    assert.match(await page.locator('#providerDialog [data-probe-result]').textContent(), /401/u, "失败原因要原样给出来");
+    await page.locator('#providerDialog button[data-provider-probe]').click();
+    await page.waitForFunction(() => /连接正常/.test(document.querySelector('[data-probe-result]')?.textContent || ""));
+    assert.match(await page.locator('#providerDialog [data-probe-result]').textContent(), /123 ms/u);
+    assert.deepEqual(probeBodies, [
+      { baseUrl: "http://127.0.0.1:11435/v1", model: "qwen3:14b", apiKey: "" },
+      { baseUrl: "http://127.0.0.1:11435/v1", model: "qwen3:14b", apiKey: "" }
+    ], "探针要带上面板里填的地址/模型，密钥留空表示沿用已保存的");
+    assert.equal(providerBodies.length, 0, "测试连接不能顺手保存配置");
+
     await page.locator('#providerDialog button[data-tab="models"]').click();
     await page.locator('#providerDialog input[name="model"]').fill("typed-model");
     await page.locator('#providerDialog button[data-tab="connection"]').click();
@@ -83,6 +106,10 @@ test("设置面板切分类保留未保存输入，关窗才重置", { skip: !pr
     assert.equal(await page.locator('#providerDialog input[name="mainThinking"]').isChecked(), true, "默认开启思考");
     assert.equal(await page.locator('#providerDialog select[name="mainEffort"]').inputValue(), "high", "默认强度高（DeepSeek 默认值）");
     assert.equal(await page.locator('#providerDialog input[name="fastThinking"]').count(), 1, "每个模型角色都要有思考开关");
+    // 思考开关只占内容宽度：早先 flex:1 会被强度下拉挤成两行大字块
+    const switchBox = await page.locator("#providerDialog .sp-switch").first().boundingBox();
+    assert.ok(switchBox.height <= 34, `思考开关不该这么高：${JSON.stringify(switchBox)}`);
+    assert.equal(await page.locator("#providerDialog .sp-switch").first().evaluate((node) => getComputedStyle(node).whiteSpace), "nowrap", "「思考」两个字不能被压成两行");
     await page.locator('#providerDialog select[name="mainEffort"]').selectOption("max");
     await page.locator('#providerDialog input[name="mainThinking"]').uncheck();
     await page.waitForFunction(() => document.querySelector('#providerDialog select[name="mainEffort"]')?.disabled === true);

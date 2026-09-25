@@ -37,6 +37,12 @@ export const SETTING_SPECS = Object.freeze({
   "quality.penaltyCritical": { min: 10, max: 100, step: 5, default: 35, label: "critical 扣分", hint: "事实层面的丢失或捏造" },
   "quality.penaltyMajor": { min: 1, max: 50, step: 1, default: 12, label: "major 扣分", hint: "语义范围有出入但信息点仍在" },
   "quality.penaltyMinor": { min: 1, max: 20, step: 1, default: 3, label: "minor 扣分", hint: "措辞偏好" },
+  "reference.enabled": { type: "boolean", default: true, label: "翻译与质检按需查询参考资料", hint: "模型在需要时通过工具查询角色设定、剧本等资料；关掉则完全不查，资料不会进入提示词" },
+  "reference.maxResults": { min: 1, max: 10, step: 1, default: 4, label: "参考资料：每次返回片段数", hint: "一次查询最多返回几段资料" },
+  "reference.maxCalls": { min: 1, max: 10, step: 1, default: 3, label: "参考资料：每次翻译最多查询次数", hint: "达到上限后模型必须按已有信息继续" },
+  "reference.maxRounds": { min: 1, max: 4, step: 1, default: 2, label: "参考资料：工具调用轮数", hint: "模型可以连续几轮边查边写" },
+  "reference.maxCharsPerCall": { min: 500, max: 6000, step: 100, default: 2400, label: "参考资料：单次返回字符上限", hint: "一次工具结果最多注入多少字符" },
+  "reference.maxCharsTotal": { min: 1000, max: 20000, step: 500, default: 6000, label: "参考资料：单条句段总字符上限", hint: "一条句段所有查询合计最多注入多少字符" },
   "quality.autoConsistencyCheck": { type: "boolean", default: true, label: "批次结束后自动一致性核对", hint: "整批翻完自动跑跨条目一致性核对与质量报告；关掉可省额度，批次页仍可手动运行" },
 
   "retrieval.translationMemoryLimit": { min: 1, max: 20, step: 1, default: 5, label: "参考译例条数", hint: "每次翻译注入的相似译例上限" },
@@ -47,7 +53,7 @@ export const SETTING_SPECS = Object.freeze({
   "learning.styleDistillThreshold": { min: 3, max: 100, step: 1, default: 8, label: "风格蒸馏阈值", hint: "同作用域证据攒够多少条才蒸馏风格草稿" },
   "learning.styleDistillGrowthWindow": { min: 1, max: 100, step: 1, default: 8, label: "风格蒸馏增长窗口", hint: "上次蒸馏后需再新增多少条，防止草稿泛滥" },
   "learning.translatorProfileThreshold": { min: 3, max: 100, step: 1, default: 3, label: "译者画像阈值", hint: "人工采纳证据攒够多少条才蒸馏画像" },
-  "learning.autoProposeThreshold": { min: 3, max: 200, step: 1, default: 10, label: "自动提议候选阈值", hint: "人工终稿达到多少条自动生成 challenger" },
+  "learning.autoProposeThreshold": { min: 3, max: 200, step: 1, default: 10, label: "自动提议候选阈值", hint: "人工终稿达到多少条自动生成候选版本" },
   "learning.autoProposeGrowthWindow": { min: 1, max: 200, step: 1, default: 10, label: "自动提议增长窗口", hint: "上次提议后需再新增多少条" },
   "learning.styleEvaluationMinSamples": { min: 5, max: 200, step: 1, default: 12, label: "风格评测最小样本", hint: "留出集不足这么多条时拒绝开始评测" },
   "learning.skillEvaluationMinSamples": { min: 5, max: 200, step: 1, default: 20, label: "技能评测最小样本", hint: "少于此数的评测结论不允许晋升" },
@@ -56,8 +62,6 @@ export const SETTING_SPECS = Object.freeze({
   "learning.ruleStaleRounds": { min: 2, max: 20, step: 1, default: 4, label: "规则退休轮数", hint: "连续多少轮蒸馏没被证据确认才退休。设小了退回滚动重写，设大了过时规则赖着不走" },
 
   "learning.conflictScanIntervalMinutes": { min: 0, max: 1440, step: 15, default: 0, label: "规则冲突定时扫描（分钟）", hint: "0 表示只在蒸馏沉淀后扫描，不定时。每次扫描最多送 12 对规则给模型" },
-
-  "share.glossLimit": { min: 5, max: 200, step: 5, default: 30, label: "分享页语素拆解上限", hint: "每个分享链接后台生成的逐句拆解段数" }
 });
 
 /** 作品名括号是风格约定而非语言对错，按语种单独配置。空串表示该语种不做约定检查。 */

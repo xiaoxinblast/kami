@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,6 +48,33 @@ async function waitForTerminal(runner, jobId, timeoutMs = 30_000) {
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
   return runner.get(jobId);
+}
+
+/**
+ * 完成钩子报错后的检查点由 runner 自己补写：等那次写入真的落盘再断言。
+ * 只等"钩子已经跑完"之后的这段毫秒级写入，不跟整轮评测抢时序。
+ */
+function withDeadline(promise, timeoutMs, message) {
+  let timer = null;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); })
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+async function waitForCheckpointWarning(path, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    try {
+      last = JSON.parse(await readFile(path, "utf8"));
+      if (last?.completionHookWarning) return last;
+    } catch { /* 文件可能还在写 */ }
+    // 放慢轮询：读得太勤会和 runner 的"写临时文件 + 改名"撞在 Windows 的文件锁上
+    // （实测会报 EPERM），那时是测试自己制造的抖动，不是评测出错。
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`检查点里始终没有 completionHookWarning：${JSON.stringify(last)}`);
 }
 
 test("后台评测任务完成全流程：双变体重跑、成本采集、保存评测记录", async () => {
@@ -210,4 +237,78 @@ test("表达型 Skill 的重复采样结论相反时标记 unstable 并禁止晋
   assert.equal(finalJob.result.report.reproducibility.stable, false);
   assert.deepEqual(finalJob.result.report.reproducibility.repeatConclusions.map((item) => item.status), ["promote", "reject"]);
   assert.equal(saved.decision, "needs_review");
+});
+
+test("完成钩子失败只记录警告，不把已完成的评测伪装成失败", async () => {
+  const scope = { locale: "ja-JP", contentType: "general", domain: "game", project: "default" };
+  const champion = { id: "hook-champion", ...scope, scope, status: "champion" };
+  const challenger = { id: "hook-challenger", ...scope, scope, status: "challenger", parentId: champion.id };
+  const trajectories = Array.from({ length: 20 }, (_, index) => ({
+    id: `hook-case-${index}`,
+    source: `公告第${index}条说明文案`,
+    finalTranslation: `お知らせ第${index}号`,
+    humanDecision: { accepted: true, finalTranslation: `お知らせ第${index}号` }
+  }));
+  const jobsDirectory = join(dataDir, "learning", "jobs-hook");
+  let hookCalls = 0;
+  // 钩子是"评测落盘之后"才跑的异步收尾，而且只在完成时调用一次：
+  // 用 promise 事件驱动地等它跑完，别再用固定等待窗口跟它抢时序
+  // （全量并行跑时 5 秒窗口会偶发超时，那是测试自身的抖动，不是评测出错）。
+  let resolveHook = () => {};
+  const hookFinished = new Promise((resolve) => { resolveHook = resolve; });
+  const runner = jobsModule.createEvaluationJobRunner({
+    jobsDirectory,
+    concurrency: 4,
+    benchmark: async (skill, trajectory, { repetition }) => ({
+      caseId: `${trajectory.id}#r${repetition + 1}`,
+      sourceCaseId: trajectory.id,
+      repetition,
+      scope,
+      requiredTermHits: 1,
+      requiredTermTotal: 1,
+      hardErrorCount: 0,
+      qaScore: 92,
+      humanEditDistance: 0.1,
+      humanAccepted: true,
+      latencyMs: 10
+    }),
+    onCompleted: async () => {
+      hookCalls += 1;
+      resolveHook();
+      throw new Error("门禁编排失败");
+    },
+    deps: {
+      getSkill: async (id) => id === champion.id ? champion : id === challenger.id ? challenger : null,
+      getCurrentChampion: async () => champion,
+      validatePromotionState: () => ({ valid: true, reasons: [] }),
+      saveEvaluation: async () => ({ id: "hook-evaluation" }),
+      updateSkillMetrics: async () => undefined,
+      buildUiReport: (result) => ({ promotable: result.promotable, status: result.status, conclusion: result.reportZh, gates: result.gates })
+    }
+  });
+  await runner.initialize();
+  const created = await runner.create({ scope, champion, challenger, trajectories, requireCost: false });
+  const finalJob = await waitForTerminal(runner, created.jobId);
+  assert.equal(finalJob.status, "completed", finalJob.error || "评测本身已经完成");
+  // 钩子在状态落盘之后才跑：等它真的结束（事件驱动）再断言。
+  await withDeadline(hookFinished, 30_000, "完成钩子在 30 秒内没有被调用：评测收尾没有走到钩子");
+  // 让 runner 的 catch 先跑完（它在这一拍把警告写进内存态），再读内存与检查点。
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(hookCalls, 1, "钩子只在完成时调用一次");
+  assert.match(runner.get(created.jobId).completionHookWarning, /门禁编排失败/);
+  const checkpoint = await waitForCheckpointWarning(join(jobsDirectory, `${created.jobId}.json`));
+  assert.match(checkpoint.completionHookWarning, /门禁编排失败/, "警告要落盘，重启后仍能解释后续编排为何没跑");
+});
+
+/**
+ * 检查点是"写临时文件 + 改名"落盘的：Windows 上改名会被并发打开的句柄短暂挡住（EPERM）。
+ * 这类抖动不能让整条队列崩掉，更不能把已经有终态的评测降级成失败。
+ */
+test("检查点落盘遇到 Windows 文件锁会退避重试，收尾异常不降级终态", async () => {
+  const source = await readFile(new URL("../src/evaluation-jobs.mjs", import.meta.url), "utf8");
+  assert.match(source, /const TRANSIENT_RENAME_CODES = new Set\(\["EPERM", "EACCES", "EBUSY"\]\);/u);
+  assert.match(source, /async function renameWithRetry\(from, to, attempts = 4\)/u);
+  assert.match(source, /await renameWithRetry\(temporary, path\);/u);
+  assert.match(source, /if \(\[COMPLETED, FAILED\]\.includes\(next\.status\)\) \{/u);
+  assert.match(source, /评测收尾异常（评测结论已落盘，保持原状态）/u);
 });

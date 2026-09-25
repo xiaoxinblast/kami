@@ -40,3 +40,37 @@ test("模型探针为推理输出预留预算，并在长度耗尽时扩大预�
   assert.equal(requests[1].max_tokens, 128);
   assert.equal(requests[0].reasoning_effort, "low");
 });
+
+/**
+ * 「模型设置 → 测试连接」要能试"刚填、还没保存"的地址与密钥：
+ * 显式覆盖时探针必须打覆盖目标，而不是当前生效配置。
+ */
+test("显式覆盖 baseUrl / apiKey / model 时探针打覆盖目标", async () => {
+  const hits = [];
+  const target = http.createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      hits.push({ authorization: req.headers.authorization || "", body: JSON.parse(body || "{}") });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }] }));
+    });
+  });
+  await new Promise((resolve) => target.listen(0, "127.0.0.1", resolve));
+  target.unref();
+  const typedBaseUrl = `http://127.0.0.1:${target.address().port}/v1`;
+  const requestsBefore = requests.length;
+  try {
+    await assert.doesNotReject(() => probeModelAvailability({
+      timeoutMs: 2_000,
+      config: { baseUrl: typedBaseUrl, apiKey: "typed-key", model: "typed-model" }
+    }));
+    assert.equal(hits.length, 1, "探针要打覆盖后的地址");
+    assert.equal(hits[0].authorization, "Bearer typed-key", "面板里填的密钥要带上");
+    assert.equal(hits[0].body.model, "typed-model", "面板里填的模型要带上");
+    assert.equal(requests.length, requestsBefore, "覆盖后不应再打原配置的地址");
+  } finally {
+    await new Promise((resolve) => target.close(resolve));
+  }
+});

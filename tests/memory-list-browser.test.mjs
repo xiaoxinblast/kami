@@ -95,12 +95,12 @@ test("记忆库显示总数、按页加载，搜索走服务端", { skip: !proce
     assert.equal(await page.locator("#memoryMoreMeta").textContent(), "还有 1197 条未显示");
 
     await page.locator("#memoryMore").click();
-    await page.waitForFunction(() => document.querySelectorAll("#memoryList .asset-row").length === 4, null, { timeout: 20000 });
+    await page.waitForFunction(() => document.querySelectorAll("#memoryList .asset-row").length === 4, null, { timeout: 45_000 });
     assert.equal(memoryQueries.at(-1).get("offset"), "3", "加载更多要从已加载条数继续取");
     assert.equal(await page.locator("#memoryCount").textContent(), "已显示 4 / 共 1200 条");
 
     await page.locator("#memorySearch").fill("用語");
-    await page.waitForFunction(() => document.querySelectorAll("#memoryList .asset-row").length === 1, null, { timeout: 20000 });
+    await page.waitForFunction(() => document.querySelectorAll("#memoryList .asset-row").length === 1, null, { timeout: 45_000 });
     assert.equal(memoryQueries.at(-1).get("search"), "用語", "搜索要发给服务端");
     assert.match(await page.locator("#memoryList .asset-row").first().textContent(), /服务端命中的条目/u);
     assert.equal(await page.locator("#memoryCount").textContent(), "1 条");

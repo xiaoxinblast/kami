@@ -25,6 +25,8 @@ const COMPLETED = "completed";
 const FAILED = "failed";
 const TERMINAL_STATUSES = new Set([COMPLETED, FAILED]);
 const RESUMABLE_STATUSES = new Set([QUEUED, INTERRUPTED, FAILED]);
+/** 改名失败里属于"短暂被挡住"的错误码：Windows 上文件被并发打开时常见。 */
+const TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 function cloneJson(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -88,6 +90,7 @@ function publicJob(job) {
     updatedAt: job.updatedAt,
     finishedAt: job.finishedAt || "",
     error: job.error || "",
+    completionHookWarning: String(job.completionHookWarning || ""),
     result: job.result || null,
     reproducibility: {
       policyVersion: job.evaluationProfile?.policyVersion || "legacy",
@@ -107,7 +110,7 @@ function publicJob(job) {
  * @param guardrails  Extra promotion guardrails merged into every conclusion,
  *   e.g. restricting which metrics may justify a style-profile promotion.
  */
-export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jobsDirectory, deps, concurrency = 5, kind = "skill-evaluation", guardrails = {}, now = () => new Date().toISOString() } = {}) {
+export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jobsDirectory, deps, concurrency = 5, kind = "skill-evaluation", guardrails = {}, onCompleted = null, now = () => new Date().toISOString() } = {}) {
   if (typeof benchmark !== "function") throw new TypeError("benchmark 必须是函数");
   for (const name of ["getSkill", "getCurrentChampion", "validatePromotionState", "saveEvaluation", "updateSkillMetrics", "buildUiReport"]) {
     if (typeof deps?.[name] !== "function") throw new TypeError(`evaluation job deps 缺少 ${name}`);
@@ -120,13 +123,30 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     return join(jobsDirectory, `${jobId}.json`);
   }
 
+  /**
+   * 原子写：先写临时文件再改名。Windows 上 rename 覆盖已有文件可能被别的句柄
+   * （杀软 / 索引器 / 恰好同时在读这份检查点的调用方）短暂挡住，报 EPERM/EACCES/EBUSY。
+   * 这类错误是瞬时的，退避重试几次即可，不能让一次写入抖动把整条队列带崩。
+   */
+  async function renameWithRetry(from, to, attempts = 4) {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await rename(from, to);
+        return;
+      } catch (error) {
+        if (!TRANSIENT_RENAME_CODES.has(String(error?.code || "")) || attempt >= attempts) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 30 * attempt));
+      }
+    }
+  }
+
   async function persist(job) {
     await mkdir(dirname(await jobPath(job.jobId)), { recursive: true });
     const path = await jobPath(job.jobId);
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(job, null, 2)}
 `, "utf8");
-    await rename(temporary, path);
+    await renameWithRetry(temporary, path);
   }
 
   function chainPersist(job) {
@@ -158,11 +178,19 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     running = true;
     (async () => {
       try {
-        while (true) {
-          const next = [...jobs.values()].find((job) => job.status === QUEUED);
-          if (!next) break;
-          await execute(next);
-        }
+      while (true) {
+        const next = [...jobs.values()].find((job) => job.status === QUEUED);
+        if (!next) break;
+        // 收尾阶段的意外异常（例如检查点正好被别的句柄挡住）只记日志：
+        // 已经有终态的评测不能被降级成失败，队列也不能因此停摆。
+        await execute(next).catch((error) => {
+          if ([COMPLETED, FAILED].includes(next.status)) {
+            console.error("评测收尾异常（评测结论已落盘，保持原状态）", error);
+            return undefined;
+          }
+          return markFailed(next, String(error?.message || error));
+        });
+      }
       } finally {
         running = false;
       }
@@ -379,12 +407,12 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       result.status = "unstable";
       report.promotable = false;
       report.status = "unstable";
-      report.conclusion = `结果不稳定，暂不形成晋升结论：${withinRunClasses.size > 1 ? "同一次评测的多轮配对采样得出了相反结论" : "相同冻结输入的近期评测结论互相矛盾"}。系统已禁止把这次随机波动当作 Champion / Challenger 的真实优劣。`;
+      report.conclusion = `结果不稳定，暂不形成晋升结论：${withinRunClasses.size > 1 ? "同一次评测的多轮配对采样得出了相反结论" : "相同冻结输入的近期评测结论互相矛盾"}。系统已禁止把这次随机波动当作「生效版本 / 候选版本」的真实优劣。`;
     }
     if (failures.length) {
       report.promotable = false;
       report.status = "insufficient";
-      report.conclusion = `评测未完成：${failures.length} 组 Champion / Challenger 对照在翻译或独立 AIQA 阶段失败。失败样本不会按“零问题”计分，本次结果禁止晋升。`;
+      report.conclusion = `评测未完成：${failures.length} 组「生效版本 / 候选版本」对照在翻译或独立 AIQA 阶段失败。失败样本不会按“零问题”计分，本次结果禁止晋升。`;
     }
 
     // Revalidate after the potentially long benchmark: the champion may have
@@ -416,6 +444,15 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     job.finishedAt = now();
     job.updatedAt = job.finishedAt;
     await persist(job);
+    if (typeof onCompleted === "function") {
+      try {
+        await onCompleted(publicJob(job));
+      } catch (error) {
+        // 评测结论已经可靠持久化；后续门禁编排失败只记警告，不能把已完成的评测伪装成失败。
+        job.completionHookWarning = String(error?.message || error);
+        await persist(job);
+      }
+    }
   }
 
   return {

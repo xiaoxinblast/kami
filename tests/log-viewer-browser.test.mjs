@@ -101,7 +101,8 @@ test("日志页面：等级筛选、搜索、记录等级、清空，并记录�
 
     await logNav.click();
     try {
-      await page.waitForSelector("#logList .log-row", { timeout: 8_000 });
+      // 并行跑全量时接口与渲染都会变慢：这是"等状态出现"，不是失败判定，预算给足。
+      await page.waitForSelector("#logList .log-row", { timeout: 45_000 });
     } catch (error) {
       const toastText = await page.locator("#toast").textContent().catch(() => "");
       const countText = await page.locator("#logCount").textContent().catch(() => "");

@@ -28,6 +28,8 @@ import {
   getDirectusStyleProfile,
   getDirectusProjectStyleProfile,
   getDirectusStyleEvidence,
+  countDirectusStyleEvidenceByFile,
+  listDirectusStyleEvidenceFiles,
   getDirectusQaRuns,
   getDirectusUserProfile,
   saveDirectusUserProfile,
@@ -48,11 +50,6 @@ import {
   getDirectusQaTask,
   listDirectusQaTasks,
   deleteDirectusQaTask,
-  saveDirectusShare,
-  getDirectusShare,
-  listDirectusShares,
-  updateDirectusShare,
-  deleteDirectusShare,
   saveDirectusBackgroundTask,
   getDirectusBackgroundTask,
   listDirectusBackgroundTasks,
@@ -75,6 +72,7 @@ import {
   saveDirectusStyleProfile,
   saveDirectusLearningTrajectory,
   listDirectusLearningTrajectories,
+  countDirectusLearningTrajectoriesByScope,
   getDirectusLearningTrajectory,
   updateDirectusLearningTrajectory,
   saveDirectusTranslationSkill,
@@ -85,6 +83,15 @@ import {
   rollbackDirectusTranslationSkill,
   saveDirectusSkillEvaluation,
   listDirectusSkillEvaluations,
+  saveDirectusReferenceDocument,
+  getDirectusReferenceDocument,
+  listDirectusReferenceDocuments,
+  updateDirectusReferenceDocument,
+  deleteDirectusReferenceDocument,
+  replaceDirectusReferenceChunks,
+  listDirectusReferenceChunks,
+  listDirectusReferenceChunksForProject,
+  updateDirectusReferenceChunk,
   getDirectusSkillEvaluation,
   updateDirectusSkillEvaluation,
   saveDirectusQualityAsset,
@@ -234,7 +241,7 @@ async function purgeJsonProject(id) {
   const project = await getJsonProject(id);
   if (!project) return null;
   let total = 0;
-  for (const directory of ["assets", "memories", "styles", "qa", "batches", "qa-tasks", "shares", "background-tasks", "corpora", "learning"]) {
+  for (const directory of ["assets", "memories", "styles", "qa", "batches", "qa-tasks", "background-tasks", "corpora", "learning"]) {
     for (const file of await listJsonFiles(join(ROOT, directory))) {
       let data;
       try { data = JSON.parse(await readFile(file, "utf8")); } catch { continue; }
@@ -393,6 +400,40 @@ async function getJsonStyleProfile(locale, contentType, domain = "general", { pr
   }
   const candidates = profiles.filter((item) => item.status === "active" && item.contentType === contentType && String(item.projectId || "") === String(projectId || "")).sort((a, b) => b.version - a.version);
   return candidates.find((item) => item.domain === domain) || candidates.find((item) => item.domain === "general") || candidates[0] || null;
+}
+
+/** JSON 存储下的风格证据来源文件统计（与 Directus 口径一致：按来源文件计数）。 */
+async function countJsonStyleEvidenceByFile(locale, { projectId = "" } = {}) {
+  const items = await readJson(join(ROOT, "styles", "evidence.json"), []);
+  const counts = new Map();
+  for (const item of items) {
+    if (item.locale !== assertLocale(locale)) continue;
+    if (projectId && item.projectId !== projectId) continue;
+    const name = String(item.sourceFile || "").trim();
+    if (!name) continue;
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+}
+
+/** JSON 存储下按证据 id 取来源文件。 */
+async function listJsonStyleEvidenceFiles(locale, { ids = [] } = {}) {
+  const wanted = new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "")).filter(Boolean));
+  if (!wanted.size) return [];
+  const items = await readJson(join(ROOT, "styles", "evidence.json"), []);
+  return items
+    .filter((item) => item.locale === assertLocale(locale) && wanted.has(String(item.id || "")))
+    .map((item) => ({ id: String(item.id || ""), sourceFile: String(item.sourceFile || "").trim() }));
+}
+
+export async function countStyleEvidenceFiles(locale, options) {
+  return usesDirectus() ? countDirectusStyleEvidenceByFile(locale, options) : countJsonStyleEvidenceByFile(locale, options);
+}
+
+export async function listStyleEvidenceFiles(locale, options) {
+  return usesDirectus() ? listDirectusStyleEvidenceFiles(locale, options) : listJsonStyleEvidenceFiles(locale, options);
 }
 
 async function getJsonStyleEvidence(locale, options = {}) {
@@ -1069,61 +1110,6 @@ async function deleteJsonQaTask(id) {
   }
 }
 
-async function saveJsonShare(input) {
-  const token = String(input.token || randomUUID().replace(/-/g, ""));
-  const existing = await readJson(join(ROOT, "shares", `${token}.json`), null);
-  const now = new Date().toISOString();
-  const item = {
-    token,
-    projectId: String(input.projectId || existing?.projectId || ""),
-    batchId: String(input.batchId || ""),
-    qaTaskId: String(input.qaTaskId || ""),
-    filename: String(input.filename || "未命名分享"),
-    locale: assertLocale(input.locale),
-    contentType: String(input.contentType || "general"),
-    domain: String(input.domain || "general"),
-    meta: input.meta ?? null,
-    segments: Array.isArray(input.segments) ? input.segments.slice(0, 2_000) : [],
-    feedbacks: Array.isArray(existing?.feedbacks) ? existing.feedbacks : [],
-    status: String(input.status || existing?.status || "ready"),
-    glossedSegments: Number(input.glossedSegments ?? existing?.glossedSegments) || 0,
-    totalSegments: Number(input.totalSegments ?? existing?.totalSegments) || (Array.isArray(input.segments) ? input.segments.length : existing?.segments?.length || 0),
-    createdAt: existing?.createdAt || now,
-    updatedAt: now
-  };
-  await writeJsonAtomic(join(ROOT, "shares", `${token}.json`), item);
-  return item;
-}
-
-async function getJsonShare(token) {
-  return readJson(join(ROOT, "shares", `${String(token)}.json`), null);
-}
-
-async function listJsonShares({ projectId = "", batchId = "", qaTaskId = "", limit = 100 } = {}) {
-  let files = [];
-  try { files = await readdir(join(ROOT, "shares")); } catch (error) { if (error.code !== "ENOENT") throw error; }
-  const shares = (await Promise.all(files.filter((file) => file.endsWith(".json")).map((file) => readJson(join(ROOT, "shares", file), null)))).filter(Boolean);
-  return shares.filter((share) => (!projectId || share.projectId === projectId) && (!batchId || share.batchId === batchId) && (!qaTaskId || share.qaTaskId === qaTaskId)).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
-}
-
-async function updateJsonShare(token, updater) {
-  const path = join(ROOT, "shares", `${String(token)}.json`);
-  const item = await readJson(path, null);
-  if (!item) return null;
-  const next = typeof updater === "function" ? updater(item) : { ...item, ...updater };
-  const updated = { ...next, updatedAt: new Date().toISOString() };
-  await writeJsonAtomic(path, updated);
-  return updated;
-}
-
-async function deleteJsonShare(token) {
-  const path = join(ROOT, "shares", `${String(token)}.json`);
-  const existing = await readJson(path, null);
-  if (!existing) return false;
-  await rm(path, { force: true });
-  return true;
-}
-
 async function saveJsonBackgroundTask(input) {
   const id = String(input.id || randomUUID());
   const existing = await readJson(join(ROOT, "background-tasks", `${id}.json`), null);
@@ -1331,6 +1317,31 @@ async function listJsonLearningTrajectories(filters = {}) {
     && (!filters.status || item.status === filters.status))
     .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
     .slice(0, normalizedLimit(filters.limit));
+}
+
+/** JSON 存储下的同口径聚合：completed / review 且有最终译文，按语体 × 领域计数并带上来源文件。 */
+async function countJsonLearningTrajectoriesByScope({ locale, project = "" } = {}) {
+  const items = await readJson(learningPath("trajectories.json"), []);
+  const counts = new Map();
+  for (const item of items) {
+    if (locale && item.locale !== locale) continue;
+    if (project && (item.project || "default") !== project) continue;
+    if (!["completed", "review"].includes(String(item.status || ""))) continue;
+    if (!String(item.finalTranslation || "").trim()) continue;
+    const contentType = item.contentType || "general";
+    const domain = item.domain || "general";
+    const key = `${contentType}\u0000${domain}`;
+    const entry = counts.get(key) || { contentType, domain, count: 0, files: [] };
+    entry.count += 1;
+    const file = String(item.assetRefs?.sourceFile || "").trim();
+    if (file) {
+      const existing = entry.files.find((row) => row.name === file);
+      if (existing) existing.count += 1;
+      else entry.files.push({ name: file, count: 1 });
+    }
+    counts.set(key, entry);
+  }
+  return [...counts.values()].filter((item) => item.count > 0);
 }
 
 async function getJsonLearningTrajectory(id) {
@@ -1968,26 +1979,6 @@ export async function deleteQaTask(id) {
   return usesDirectus() ? deleteDirectusQaTask(id) : deleteJsonQaTask(id);
 }
 
-export async function saveShare(input) {
-  return usesDirectus() ? saveDirectusShare(input) : saveJsonShare(input);
-}
-
-export async function getShare(token) {
-  return usesDirectus() ? getDirectusShare(token) : getJsonShare(token);
-}
-
-export async function listShares(options) {
-  return usesDirectus() ? listDirectusShares(options) : listJsonShares(options);
-}
-
-export async function updateShare(token, updater) {
-  return usesDirectus() ? updateDirectusShare(token, updater) : updateJsonShare(token, updater);
-}
-
-export async function deleteShare(token) {
-  return usesDirectus() ? deleteDirectusShare(token) : deleteJsonShare(token);
-}
-
 export async function saveBackgroundTask(input) {
   return usesDirectus() ? saveDirectusBackgroundTask(input) : saveJsonBackgroundTask(input);
 }
@@ -2053,6 +2044,10 @@ export async function saveLearningTrajectory(input) {
 
 export async function listLearningTrajectories(filters) {
   return usesDirectus() ? listDirectusLearningTrajectories(filters) : listJsonLearningTrajectories(filters);
+}
+
+export async function countLearningTrajectoriesByScope(filters) {
+  return usesDirectus() ? countDirectusLearningTrajectoriesByScope(filters) : countJsonLearningTrajectoriesByScope(filters);
 }
 
 export async function getLearningTrajectory(id) {
@@ -2137,6 +2132,187 @@ export async function getSkillEvaluation(id) {
 
 export async function updateSkillEvaluation(id, patch) {
   return usesDirectus() ? updateDirectusSkillEvaluation(id, patch) : updateJsonSkillEvaluation(id, patch);
+}
+
+// ---------------------------------------------------------------------------
+// 参考资料：文档 + 片段。参考资料不参与每次翻译的提示词注入，只在模型主动
+// 查询时按片段返回，因此存储层只需要提供"按项目取全部片段"给检索索引使用。
+// ---------------------------------------------------------------------------
+
+const REFERENCE_KIND_VALUES = new Set(["character", "script", "synopsis", "setting", "other"]);
+const REFERENCE_STATUS_VALUES = new Set(["indexing", "ready", "failed", "disabled"]);
+
+function referenceDocumentRecord(input = {}, existing = null) {
+  const now = new Date().toISOString();
+  return {
+    id: String(input.id ?? existing?.id ?? randomUUID()),
+    projectId: String(input.projectId ?? existing?.projectId ?? "").trim(),
+    libraryId: String(input.libraryId ?? existing?.libraryId ?? "").trim(),
+    name: String(input.name ?? existing?.name ?? "未命名资料").trim().slice(0, 200) || "未命名资料",
+    kind: REFERENCE_KIND_VALUES.has(input.kind) ? input.kind : (existing?.kind || "other"),
+    contentType: String(input.contentType ?? existing?.contentType ?? "").trim(),
+    domain: String(input.domain ?? existing?.domain ?? "").trim(),
+    sourceFile: String(input.sourceFile ?? existing?.sourceFile ?? "").trim().slice(0, 200),
+    sourceFormat: String(input.sourceFormat ?? existing?.sourceFormat ?? "").trim(),
+    characters: Math.max(0, Math.trunc(Number(input.characters ?? existing?.characters) || 0)),
+    chunkCount: Math.max(0, Math.trunc(Number(input.chunkCount ?? existing?.chunkCount) || 0)),
+    status: REFERENCE_STATUS_VALUES.has(input.status) ? input.status : (existing?.status || "indexing"),
+    error: String(input.error ?? existing?.error ?? "").slice(0, 1_000),
+    ingestReport: input.ingestReport ?? existing?.ingestReport ?? null,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now
+  };
+}
+
+function referenceChunkRecord(input = {}, documentId, projectId, ordinal) {
+  const text = String(input.text ?? "").trim();
+  return {
+    id: String(input.id ?? randomUUID()),
+    documentId: String(input.documentId ?? documentId),
+    projectId: String(input.projectId ?? projectId ?? ""),
+    ordinal: Number.isInteger(input.ordinal) ? input.ordinal : ordinal,
+    heading: String(input.heading ?? "").slice(0, 200),
+    page: String(input.page ?? "").slice(0, 40),
+    origin: input.origin === "vision" ? "vision" : "text",
+    text,
+    characters: Math.max(0, Math.trunc(Number(input.characters) || [...text].length)),
+    risk: input.risk === true,
+    allowed: input.allowed === true,
+    embedding: input.embedding ?? null,
+    createdAt: input.createdAt || new Date().toISOString()
+  };
+}
+
+async function saveJsonReferenceDocument(input) {
+  const path = join(ROOT, "references", "documents.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const id = String(input.id ?? "");
+    const existing = id ? items.find((item) => item.id === id) : null;
+    const record = referenceDocumentRecord(input, existing);
+    if (existing) items[items.indexOf(existing)] = record;
+    else items.unshift(record);
+    await writeJsonAtomic(path, items);
+    return record;
+  });
+}
+
+async function getJsonReferenceDocument(id) {
+  const items = await readJson(join(ROOT, "references", "documents.json"), []);
+  return items.find((item) => item.id === String(id)) || null;
+}
+
+async function listJsonReferenceDocuments({ projectId = "", libraryId = "", status = "", search = "", offset = 0, limit = 50 } = {}) {
+  const items = await readJson(join(ROOT, "references", "documents.json"), []);
+  const keyword = String(search || "").trim().toLowerCase();
+  const filtered = items
+    .filter((item) => (!projectId || item.projectId === projectId)
+      && (!libraryId || item.libraryId === libraryId)
+      && (!status || item.status === status)
+      && (!keyword || String(item.name || "").toLowerCase().includes(keyword) || String(item.sourceFile || "").toLowerCase().includes(keyword)))
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  return { total: filtered.length, items: filtered.slice(Math.max(0, offset), Math.max(0, offset) + Math.max(1, limit)) };
+}
+
+async function updateJsonReferenceDocument(id, patch = {}) {
+  const path = join(ROOT, "references", "documents.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const index = items.findIndex((item) => item.id === String(id));
+    if (index < 0) return null;
+    const record = referenceDocumentRecord({ ...patch, id: items[index].id }, items[index]);
+    items[index] = record;
+    await writeJsonAtomic(path, items);
+    return record;
+  });
+}
+
+async function deleteJsonReferenceDocument(id) {
+  const documentId = String(id);
+  const path = join(ROOT, "references", "documents.json");
+  const removed = await withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const next = items.filter((item) => item.id !== documentId);
+    if (next.length === items.length) return false;
+    await writeJsonAtomic(path, next);
+    return true;
+  });
+  if (!removed) return false;
+  await replaceJsonReferenceChunks(documentId, { chunks: [] });
+  return true;
+}
+
+async function replaceJsonReferenceChunks(documentId, { projectId = "", chunks = [] } = {}) {
+  const path = join(ROOT, "references", "chunks.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const kept = items.filter((item) => item.documentId !== String(documentId));
+    const created = (Array.isArray(chunks) ? chunks : []).map((chunk, index) => referenceChunkRecord(chunk, documentId, projectId, index));
+    await writeJsonAtomic(path, [...kept, ...created]);
+    return created.length;
+  });
+}
+
+async function listJsonReferenceChunks({ documentId = "", projectId = "", offset = 0, limit = 200 } = {}) {
+  const items = await readJson(join(ROOT, "references", "chunks.json"), []);
+  const filtered = items
+    .filter((item) => (!documentId || item.documentId === String(documentId)) && (!projectId || item.projectId === projectId))
+    .sort((a, b) => (a.documentId === b.documentId ? a.ordinal - b.ordinal : String(a.documentId).localeCompare(String(b.documentId))));
+  return { total: filtered.length, items: filtered.slice(Math.max(0, offset), Math.max(0, offset) + Math.max(1, limit)) };
+}
+
+async function listJsonReferenceChunksForProject(projectId, { limit = 5_000 } = {}) {
+  const items = await readJson(join(ROOT, "references", "chunks.json"), []);
+  return items.filter((item) => item.projectId === String(projectId)).slice(0, Math.max(1, limit));
+}
+
+async function updateJsonReferenceChunk(id, patch = {}) {
+  const path = join(ROOT, "references", "chunks.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const index = items.findIndex((item) => item.id === String(id));
+    if (index < 0) return null;
+    const updated = { ...items[index], ...patch, id: items[index].id };
+    items[index] = updated;
+    await writeJsonAtomic(path, items);
+    return updated;
+  });
+}
+
+export async function saveReferenceDocument(input) {
+  return usesDirectus() ? saveDirectusReferenceDocument(input) : saveJsonReferenceDocument(input);
+}
+
+export async function getReferenceDocument(id) {
+  return usesDirectus() ? getDirectusReferenceDocument(id) : getJsonReferenceDocument(id);
+}
+
+export async function listReferenceDocuments(options) {
+  return usesDirectus() ? listDirectusReferenceDocuments(options) : listJsonReferenceDocuments(options);
+}
+
+export async function updateReferenceDocument(id, patch) {
+  return usesDirectus() ? updateDirectusReferenceDocument(id, patch) : updateJsonReferenceDocument(id, patch);
+}
+
+export async function deleteReferenceDocument(id) {
+  return usesDirectus() ? deleteDirectusReferenceDocument(id) : deleteJsonReferenceDocument(id);
+}
+
+export async function replaceReferenceChunks(documentId, input) {
+  return usesDirectus() ? replaceDirectusReferenceChunks(documentId, input) : replaceJsonReferenceChunks(documentId, input);
+}
+
+export async function listReferenceChunks(options) {
+  return usesDirectus() ? listDirectusReferenceChunks(options) : listJsonReferenceChunks(options);
+}
+
+export async function listReferenceChunksForProject(projectId, options) {
+  return usesDirectus() ? listDirectusReferenceChunksForProject(projectId, options) : listJsonReferenceChunksForProject(projectId, options);
+}
+
+export async function updateReferenceChunk(id, patch) {
+  return usesDirectus() ? updateDirectusReferenceChunk(id, patch) : updateJsonReferenceChunk(id, patch);
 }
 
 export function getStoreMetadata() {

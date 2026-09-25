@@ -13,14 +13,17 @@
     "directus:backfill-memory-hash": "node --env-file=directus/.env scripts/backfill-memory-hash.mjs",
     "directus:dedupe-memory": "node --env-file=directus/.env scripts/dedupe-memory.mjs",
     "taxonomy:migrate": "node --env-file=directus/.env scripts/migrate-content-taxonomy.mjs",
+    "directus:drop-shares": "node --env-file=directus/.env scripts/cleanup-shares-collection.mjs",
     "directus:snapshot": "docker compose --env-file directus/.env -f directus/docker-compose.yml exec -T directus node /directus/cli.js schema snapshot --yes /directus/schema/snapshot.yaml"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.9",
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",
+    "pdfjs-dist": "^6.3.289",
     "saxes": "5.0.1"
   },
   "overrides": {

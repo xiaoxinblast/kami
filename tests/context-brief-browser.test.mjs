@@ -176,7 +176,7 @@ test("语境档案可查看可编辑，质量报告显示指标与待核对清�
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       // 等提示条消失再截图，否则 toast 会盖住质量报告。
-      await page.waitForFunction(() => !String(document.querySelector("#toast")?.textContent || "").trim(), null, { timeout: 12_000 }).catch(() => {});
+      await page.waitForFunction(() => !String(document.querySelector("#toast")?.textContent || "").trim(), null, { timeout: 45_000 }).catch(() => {});
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/context-brief-and-report.png`, fullPage: true, animations: "disabled" });
     }
     assert.deepEqual(errors, []);

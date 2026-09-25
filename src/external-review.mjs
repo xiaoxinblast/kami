@@ -81,6 +81,7 @@ export function linkExternalReviewTrajectories(candidates = [], trajectories = [
   }
 
   const links = [];
+  const acceptedLinks = [];
   const unmatched = [];
   const ambiguous = [];
   const alreadyAccepted = [];
@@ -92,7 +93,10 @@ export function linkExternalReviewTrajectories(candidates = [], trajectories = [
     if (group.candidates.length === 1 && group.trajectories.length === 1) {
       const [{ index }] = group.candidates;
       const [trajectory] = group.trajectories;
-      if (trajectory.humanDecision?.accepted === true) alreadyAccepted.push(index);
+      if (trajectory.humanDecision?.accepted === true) {
+        alreadyAccepted.push(index);
+        acceptedLinks.push({ candidateIndex: index, trajectory, method: "unique_source", score: 1 });
+      }
       else links.push({ candidateIndex: index, trajectory, method: "unique_source", score: 1 });
       continue;
     }
@@ -116,12 +120,18 @@ export function linkExternalReviewTrajectories(candidates = [], trajectories = [
         continue;
       }
       claimed.add(proposal.trajectory.id);
-      if (proposal.trajectory.humanDecision?.accepted === true) alreadyAccepted.push(proposal.candidateIndex);
+      if (proposal.trajectory.humanDecision?.accepted === true) {
+        alreadyAccepted.push(proposal.candidateIndex);
+        acceptedLinks.push(proposal);
+      }
       else links.push(proposal);
     }
   }
   return {
     links,
+    // 已经人工采纳过的轨迹：不算新链接（不重复记事件），但调用方仍要能定位它们，
+    // 才能在再次回填终稿有变化时更新学习语料，而不是只更新 TM。
+    acceptedLinks,
     unmatched: [...new Set(unmatched)],
     ambiguous: [...new Set(ambiguous)],
     alreadyAccepted: [...new Set(alreadyAccepted)]
@@ -198,18 +208,26 @@ export function matchReviewPairsToSegments(segments = [], pairs = []) {
 
 export function externalReviewTrajectoryPatch({ trajectory, target, sourceFile = "", sourceRow = null, matchMethod = "" } = {}) {
   const finalTranslation = text(target);
-  const machineTranslation = text(trajectory?.finalTranslation || trajectory?.initialTranslation);
+  const previousDecision = trajectory?.humanDecision && typeof trajectory.humanDecision === "object" ? trajectory.humanDecision : {};
+  // 机器稿基准：首次回填时人工改的是当时的 finalTranslation（机器终稿）；再次回填时
+  // finalTranslation 已经变成上一版人工终稿，必须沿用首次记下的基准，否则"编辑距离"
+  // 会从"机器稿 → 人工终稿"悄悄变成"两版人工终稿之差"，归因结论跟着漂。
+  const machineTranslation = text(previousDecision.machineTranslation)
+    || text(trajectory?.finalTranslation || trajectory?.initialTranslation);
+  const previousFinalTranslation = previousDecision.accepted === true ? text(previousDecision.finalTranslation) : "";
   if (!trajectory?.id || !finalTranslation || !machineTranslation) throw new Error("外部审校轨迹缺少机器稿或人工终稿");
   const decidedAt = new Date().toISOString();
   const humanDecision = {
     accepted: true,
     finalTranslation,
+    machineTranslation,
     editDistance: normalizedEditDistance(machineTranslation, finalTranslation),
     decidedAt,
     source: "external-review-import",
     sourceFile: text(sourceFile),
     sourceRow: Number(sourceRow) || null,
-    matchMethod: text(matchMethod)
+    matchMethod: text(matchMethod),
+    ...(previousFinalTranslation ? { previousFinalTranslation } : {})
   };
   return {
     finalTranslation,
@@ -221,7 +239,8 @@ export function externalReviewTrajectoryPatch({ trajectory, target, sourceFile =
       sourceFile: humanDecision.sourceFile,
       sourceRow: humanDecision.sourceRow,
       editDistance: humanDecision.editDistance,
-      matchMethod: humanDecision.matchMethod
+      matchMethod: humanDecision.matchMethod,
+      ...(previousFinalTranslation ? { previousFinalTranslation } : {})
     }]
   };
 }

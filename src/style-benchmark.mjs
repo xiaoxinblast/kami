@@ -85,7 +85,7 @@ export function styleVariant({ id, scope, skill, profile, qaProfile }) {
  * order and all-or-nothing pair admission are reused unchanged.
  */
 export async function benchmarkStyleVariant(variant, trajectory, options = {}) {
-  if (!variant?.skill) throw new TypeError("风格评测变体缺少当前 champion 技能");
+  if (!variant?.skill) throw new TypeError("风格评测变体缺少当前生效版本技能");
   const sample = await benchmarkTranslationSkill(variant.skill, trajectory, {
     styleProfileOverride: variant.styleProfile,
     qaStyleProfile: variant.qaStyleProfile,

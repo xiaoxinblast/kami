@@ -170,7 +170,7 @@ export function sanitizeStrategyPatch(patch) {
       if (!isPlainObject(value)) { warn(warnings, section, "retrieval 必须是对象，已丢弃"); continue; }
       const retrieval = {};
       for (const key of Object.keys(value)) {
-        if (["requiredTerms", "translationMemory", "qaCases", "styleProfile"].includes(key)) {
+        if (["requiredTerms", "translationMemory", "qaCases", "styleProfile", "referenceMaterials"].includes(key)) {
           const item = sanitizeRetrievalItem(value[key], key, `retrieval.${key}`, warnings);
           if (item) retrieval[key] = item;
         } else {

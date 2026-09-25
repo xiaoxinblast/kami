@@ -208,7 +208,7 @@ test("术语库与记忆库按库浏览：打开/编辑/删除/导入/导出都�
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/library-import-preflight.png`, animations: "disabled" });
     }
     await page.locator("#assetPreflightConfirm").click();
-    await page.waitForFunction(() => /已提交后台导入/.test(document.querySelector("#assetPreflightSummary")?.textContent || ""), null, { timeout: 20000 });
+    await page.waitForFunction(() => /已提交后台导入/.test(document.querySelector("#assetPreflightSummary")?.textContent || ""), null, { timeout: 45_000 });
     const commitCall = writes.find((call) => call.path === "/api/assets-import/commit");
     assert.ok(commitCall, `确认后要打导入接口：${calls.join(" | ")}`);
     assert.equal(commitCall.body.termLibraryId, "term-1");

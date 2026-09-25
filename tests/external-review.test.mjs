@@ -87,6 +87,37 @@ test("已经有人工决定的轨迹不会被外部文件静默覆盖", () => {
   );
   assert.equal(result.links.length, 0);
   assert.deepEqual(result.alreadyAccepted, [0]);
+  // 不算新链接，但仍要能定位到轨迹：再次回填终稿变了要更新学习语料，只跳过内容相同的。
+  assert.equal(result.acceptedLinks.length, 1);
+  assert.equal(result.acceptedLinks[0].candidateIndex, 0);
+  assert.equal(result.acceptedLinks[0].trajectory.id, "t-1");
+});
+
+test("再次回填：编辑距离沿用首次的机器稿基准，并记下上一版终稿", () => {
+  const first = externalReviewTrajectoryPatch({
+    trajectory: trajectory("t-1", "開始", { finalTranslation: "开始。", events: [] }),
+    target: "正式开始。",
+    sourceFile: "memoQ-reviewed.mqxliff",
+    matchMethod: "entry_key"
+  });
+  assert.equal(first.humanDecision.machineTranslation, "开始。", "首次回填要记下机器稿基准");
+  assert.equal(first.humanDecision.previousFinalTranslation, undefined, "首次没有上一版人工终稿");
+
+  const second = externalReviewTrajectoryPatch({
+    trajectory: {
+      ...trajectory("t-1", "開始", { events: first.events }),
+      finalTranslation: first.finalTranslation,
+      humanDecision: first.humanDecision
+    },
+    target: "现在正式开始。",
+    sourceFile: "memoQ-reviewed-v2.mqxliff",
+    matchMethod: "entry_key"
+  });
+  assert.equal(second.humanDecision.machineTranslation, "开始。", "再次回填不能把基准换成上一版人工终稿");
+  assert.equal(second.humanDecision.previousFinalTranslation, "正式开始。", "要留下上一版终稿以便审计");
+  assert.equal(second.finalTranslation, "现在正式开始。");
+  assert.equal(second.events.at(-1).previousFinalTranslation, "正式开始。");
+  assert.equal(second.events.at(-1).sourceFile, "memoQ-reviewed-v2.mqxliff");
 });
 
 test("接回后生成可用于技能学习和训练导出的人工决定", () => {

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { stratifyEvidence } from "../src/style-delta.mjs";
+import { readFile } from "node:fs/promises";
 
 const dataDir = mkdtempSync(join(tmpdir(), "kami-style-project-"));
 process.env.KAMI_DATA_DIR = dataDir;
@@ -14,8 +15,10 @@ const {
   initializeStore,
   activateStyleProfile,
   countStyleEvidence,
+  countStyleEvidenceFiles,
   getProjectStyleProfile,
   getStyleEvidence,
+  listStyleEvidenceFiles,
   saveStyleEvidence,
   saveStyleProfile
 } = await import("../src/store.mjs");
@@ -114,4 +117,47 @@ test("同条目 ID 换了语体：证据只留一条并更新标签", async () =
   const rows = (await getStyleEvidence("zh-CN", { projectId })).filter((item) => item.entryKey === "K-1");
   assert.equal(rows.length, 1, "语体不再参与判重，改判用途只更新同一条");
   assert.equal(rows[0].contentType, "ui");
+});
+
+/**
+ * 蒸馏出来的规则要能回溯到具体交付物：证据池按来源文件计数，某个版本再按它自己的
+ * 取样 id 回溯"这一版是从哪些文件学出来的"。
+ */
+test("风格证据的来源文件：池子按文件计数，版本按取样 id 回溯", async () => {
+  const projectId = "style-files-project";
+  const saved = [];
+  for (const [file, count] of [["Asia_Batch15_new.xlsx_zho-CN.mqxliff", 3], ["Trophy.xlsx_zho-CN.mqxliff", 2]]) {
+    for (let index = 0; index < count; index += 1) {
+      // 原文/译文按文件区分：同一个 (原文, 译文) 会被当成重复证据去重，那不是本用例要验的东西。
+      saved.push(await saveStyleEvidence({
+        ...evidence(index, "general", "table-import", projectId),
+        source: `原文-${file}-${index}`,
+        target: `译文-${file}-${index}`,
+        sourceFile: file
+      }));
+    }
+  }
+  assert.deepEqual(await countStyleEvidenceFiles("zh-CN", { projectId }), [
+    { name: "Asia_Batch15_new.xlsx_zho-CN.mqxliff", count: 3 },
+    { name: "Trophy.xlsx_zho-CN.mqxliff", count: 2 }
+  ]);
+  const firstFileIds = saved.filter((item) => item.sourceFile === "Asia_Batch15_new.xlsx_zho-CN.mqxliff").map((item) => item.id);
+  const rows = await listStyleEvidenceFiles("zh-CN", { ids: firstFileIds });
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((row) => row.sourceFile === "Asia_Batch15_new.xlsx_zho-CN.mqxliff"));
+  assert.deepEqual(await listStyleEvidenceFiles("zh-CN", { ids: [] }), [], "没有取样 id 时不发多余查询");
+});
+
+test("界面把来源文件写在证据池与蒸馏版本上，老版本证据被清掉时说明原因", async () => {
+  const [app, server] = await Promise.all([
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../server.mjs", import.meta.url), "utf8")
+  ]);
+  assert.match(app, /function formatEvidenceFiles\(files = \[\]\)/u);
+  assert.match(app, /来源文件：\$\{escapeHtml\(evidenceFiles\)\}/u);
+  assert.match(app, /来源文件：原证据已不在库中（本版取样/u);
+  assert.match(app, /const poolFiles = formatEvidenceFiles\(pool\.files\);/u);
+  assert.match(server, /const poolFiles = await countStyleEvidenceFiles\(locale, \{ projectId \}\)\.catch\(\(\) => \[\]\);/u);
+  assert.match(server, /const styleProfiles = profiles\.styleProfiles\.map\(\(item\) => \{/u);
+  assert.match(server, /evidenceFilesMissing: ids\.length/u);
 });

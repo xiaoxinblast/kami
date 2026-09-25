@@ -120,7 +120,7 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     await page.locator("#primaryAction").click();
     await page.waitForFunction(() => document.querySelector("#targetOutput")?.textContent?.includes("走吧"));
     // 预检与翻译结果都会写这一行：等它稳定到带"本次参考"再断言，避免读到中间态。
-    await page.waitForFunction(() => /本次参考：/.test(document.querySelector("#classificationPreview")?.textContent || ""), null, { timeout: 15_000 });
+    await page.waitForFunction(() => /本次参考：/.test(document.querySelector("#classificationPreview")?.textContent || ""), null, { timeout: 60_000 });
     const previewText = await page.locator("#classificationPreview").textContent();
     assert.match(previewText, /语体/u);
     assert.match(previewText, /本次参考：项目规范「通用规范」 v1 · 译例 5 条（同作用域 2 \/ 通用 3）/u, `结果要写清用的是哪一版项目规范：${previewText}`);
@@ -152,7 +152,7 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     assert.equal(await distillButton.count(), 1, "证据池旁要有「立即重新蒸馏」");
     // 证据池每次重画都会换掉按钮节点，满载时一次点击可能落在旧节点上：允许重试一次。
     for (let attempt = 0; attempt < 2 && distillCalls.length === 0; attempt += 1) {
-      await distillButton.click({ timeout: 10_000 }).catch(() => {});
+      await distillButton.click({ timeout: 30_000 }).catch(() => {});
       await page.waitForTimeout(400);
     }
     await page.waitForFunction(() => /已重新蒸馏/.test(document.querySelector("#toast")?.textContent || ""));

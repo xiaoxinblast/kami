@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isolateBenchmarkAssets, isSelfDerived, SELF_REFERENCE_SIMILARITY_THRESHOLD } from "../src/benchmark-isolation.mjs";
+import { similarity } from "../src/text.mjs";
 
 const CASE_SOURCE = "登录后即可领取每日奖励，请及时查收。";
 
@@ -106,6 +107,31 @@ test("空输入与空原文安全，不做任何剔除", () => {
   assert.equal(none.isolation.totalExcluded, 0);
 });
 
+test("与留出原文同源的资料片段同样被剔除", () => {
+  const source = "登录后即可领取每日奖励";
+  const result = isolateBenchmarkAssets({
+    source,
+    referenceChunks: [
+      { id: "chunk-self", text: source + "。" },
+      { id: "chunk-other", text: "购买月卡可获得每日钻石" }
+    ]
+  });
+  assert.deepEqual(result.referenceChunks.map((item) => item.id), ["chunk-other"]);
+  assert.equal(result.isolation.excludedReferenceChunks, 1);
+  assert.equal(result.isolation.totalExcluded, 1);
+});
+
 test("阈值常量保持在合理区间", () => {
   assert.ok(SELF_REFERENCE_SIMILARITY_THRESHOLD > 0.9 && SELF_REFERENCE_SIMILARITY_THRESHOLD < 1);
+});
+
+test("只差标点的短句同样算自引用——0.95 阈值对短句欠捕获", () => {
+  const source = "登录后即可领取每日奖励";
+  const punctuated = `${source}。`;
+  // 先钉住"为什么要看骨架"：短句多一个句号时字面相似度够不到阈值，改标点就能同时进学习集和考试集。
+  assert.ok(similarity(source, punctuated) < SELF_REFERENCE_SIMILARITY_THRESHOLD);
+  assert.equal(isSelfDerived(source, punctuated), true);
+  const result = isolateBenchmarkAssets({ source, memories: [memory("punct", punctuated), memory("other", "购买月卡可获得每日钻石")] });
+  assert.deepEqual(result.memories.map((item) => item.id), ["other"]);
+  assert.equal(result.isolation.excludedMemories, 1);
 });

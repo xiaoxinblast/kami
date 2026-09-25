@@ -40,10 +40,6 @@ test("风格、QA、任务、分享和后台记录按项目隔离", async () => 
   await store.saveQaTask({ projectId: b, locale: "zh-CN", title: "B QA", sourceText: "B", translationText: "B" });
   assert.deepEqual((await store.listQaTasks({ projectId: a })).map((item) => item.id), [taskA.id]);
 
-  const shareA = await store.saveShare({ projectId: a, locale: "zh-CN", filename: "A", segments: [] });
-  await store.saveShare({ projectId: b, locale: "zh-CN", filename: "B", segments: [] });
-  assert.deepEqual((await store.listShares({ projectId: a })).map((item) => item.token), [shareA.token]);
-
   const backgroundA = await store.saveBackgroundTask({ projectId: a, type: "batch_export", title: "A 后台" });
   await store.saveBackgroundTask({ projectId: b, type: "batch_export", title: "B 后台" });
   assert.deepEqual((await store.listBackgroundTasks({ projectId: a })).map((item) => item.id), [backgroundA.id]);

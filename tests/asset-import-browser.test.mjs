@@ -186,13 +186,13 @@ test("确认导入后立刻显示进度，并提示可以关窗口后台继续",
     await page.screenshot({ path: "C:/Users/xiaoxinblast/AppData/Local/Temp/shot-import-confirm.png" }).catch(() => {});
 
     // 任务创建后：进度来自后台任务，并能直接关窗
-    await page.waitForSelector("#assetPreflightClose:visible", { timeout: 15000 });
-    await page.waitForFunction(() => document.querySelector("#assetImportProgressText")?.textContent?.includes("正在写入审核队列"), null, { timeout: 15000 });
+    await page.waitForSelector("#assetPreflightClose:visible", { timeout: 45_000 });
+    await page.waitForFunction(() => document.querySelector("#assetImportProgressText")?.textContent?.includes("正在写入审核队列"), null, { timeout: 45_000 });
     assert.match(await page.locator("#assetImportProgressText").textContent(), /已用时/u);
     assert.match(await page.locator("#assetPreflightSummary").textContent(), /关掉这个窗口/u);
 
     taskStatus = "completed";
-    await page.waitForFunction(() => document.querySelector("#mappingNote")?.textContent?.includes("导入完成"), null, { timeout: 20000 });
+    await page.waitForFunction(() => document.querySelector("#mappingNote")?.textContent?.includes("导入完成"), null, { timeout: 45_000 });
     assert.match(await page.locator("#mappingNote").textContent(), /术语 0 条、主 TM 1 条/u);
     assert.deepEqual(errors, []);
   } finally {

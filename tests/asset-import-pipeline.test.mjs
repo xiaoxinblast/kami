@@ -157,8 +157,14 @@ test("按原文查重改走哈希，长句不再把查询串撑爆（431）", as
   // 旧写法把整句原文/译文塞进 URL，几百字的句段直接触发 431 并让候选被跳过。
   assert.doesNotMatch(directus, /params\.set\("filter\[source\]\[_eq\]"/u);
   assert.doesNotMatch(directus, /params\.set\("filter\[target\]\[_eq\]"/u);
-  assert.match(directus, /pairParams\.set\("filter\[source_hash\]\[_eq\]", memorySourceHash\(attempt\.source\)\)/u);
-  assert.match(directus, /params\.set\("filter\[source_hash\]\[_eq\]", memorySourceHash\(source\)\)/u);
+  // 空哈希（原文归一化后为空，例如整段只有内联标签占位符）必须走 `_empty`：
+  // 空串进 `_eq` 会被 Directus 判 400，整条候选被跳过。
+  assert.match(directus, /const sourceHash = memorySourceHash\(attempt\.source\);/u);
+  assert.match(directus, /if \(sourceHash\) pairParams\.set\("filter\[source_hash\]\[_eq\]", sourceHash\);/u);
+  assert.match(directus, /else pairParams\.set\("filter\[source_hash\]\[_empty\]", "true"\);/u);
+  assert.match(directus, /const sourceHash = memorySourceHash\(source\);/u);
+  assert.match(directus, /if \(sourceHash\) params\.set\("filter\[source_hash\]\[_eq\]", sourceHash\);/u);
+  assert.doesNotMatch(directus, /\[_eq\]", memorySourceHash\(/u);
   assert.match(directus, /source_hash: memorySourceHash\(source\),/u);
   const memory = await read("../src/translation-memory.mjs");
   assert.match(memory, /export function memorySourceHash\(source = ""\)/u);

@@ -51,7 +51,7 @@ export function createAutoProposer({ deps, threshold = AUTO_PROPOSE_THRESHOLD, g
 
   async function runCheck(scope) {
     const champion = await deps.getCurrentChampion(scope);
-    if (!champion) return { proposed: false, reason: "作用域尚无 Champion，跳过" };
+    if (!champion) return { proposed: false, reason: "作用域尚无生效版本，跳过" };
     const [activeCandidates, acceptedCount, trajectories] = await Promise.all([
       deps.listActiveCandidates(scope),
       deps.countAcceptedTrajectories(scope),

@@ -8,7 +8,7 @@
 
 import { assertLocale } from "./config.mjs";
 import { classifyContent } from "./classifier.mjs";
-import { getAssets, getMemories, getProjectStyleProfile, getQaCases, getUserProfile } from "./store.mjs";
+import { getAssets, getMemories, getProjectStyleProfile, getQaCases, getUserProfile, listReferenceChunksForProject } from "./store.mjs";
 import { matchTerms } from "./matcher.mjs";
 import { embedSource } from "./embedding.mjs";
 import { rankQaCases, rankTranslationMemories, splitReferenceAuthority } from "./translation-memory.mjs";
@@ -17,7 +17,11 @@ import { createUsageCollector, estimateUsageCost, evaluateTranslationWithModel, 
 import { calculateQaScore, runQa } from "./qa.mjs";
 import { normalizedEditDistance } from "./learning-engine.mjs";
 import { isolateBenchmarkAssets } from "./benchmark-isolation.mjs";
+import { buildReferenceToolRunner, createProjectReferenceIndex } from "./reference-context.mjs";
 import { benchmarkSnapshotFingerprint } from "./evaluation-policy.mjs";
+
+/** 与生产共用同一个按项目缓存的参考资料索引。 */
+const referenceIndex = createProjectReferenceIndex();
 
 function benchmarkScope(skill) {
   const source = skill?.scope && skill.scope.locale ? skill.scope : skill;
@@ -123,6 +127,18 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
   // stay invisible to both variants or the benchmark measures copying, not skill.
   const translationStyleProfile = styleProfileOverride === undefined ? styleProfile : styleProfileOverride;
   const isolated = isolateBenchmarkAssets({ source, memories, qaCases, styleProfile: translationStyleProfile, userProfile });
+  // 参考资料同样要过考试隔离：只允许与留出原文不同源的片段进入检索，否则
+  // 上传过的旧译稿会变成"标准答案"喂给两个变体。
+  const projectReferenceChunks = await listReferenceChunksForProject(scope.project, { limit: 1_000 }).catch(() => []);
+  const referenceRunner = projectReferenceChunks.length
+    ? buildReferenceToolRunner({
+      index: referenceIndex,
+      projectId: scope.project,
+      settings: { enabled: true },
+      skill,
+      onlyChunkIds: new Set(isolateBenchmarkAssets({ source, referenceChunks: projectReferenceChunks }).referenceChunks.map((chunk) => chunk.id))
+    })
+    : null;
   const memoryLimit = Math.min(10, Math.max(1, Number(skill.strategy?.retrieval?.translationMemory?.limit) || 5));
   const qaCaseLimit = Math.min(10, Math.max(1, Number(skill.strategy?.retrieval?.qaCases?.limit) || 3));
   const translationReferences = rankTranslationMemories(source, isolated.memories, { limit: memoryLimit, queryEmbedding, contentTags: classification.contentTags || [] });
@@ -153,7 +169,8 @@ export async function benchmarkTranslationSkill(skill, trajectory, {
     onUsage: usage.onUsage,
     temperature: evaluationProfile?.translationTemperature,
     seed,
-    onSeedUnsupported
+    onSeedUnsupported,
+    toolRunner: referenceRunner
   });
   const hardIssues = runQa({ source, translation: translated.translation, matches, locale: scope.locale });
   // 评测里的裁判同样不能把机器译例当标准，否则两个变体都在向系统自己的历史输出收敛。

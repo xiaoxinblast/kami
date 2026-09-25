@@ -32,7 +32,9 @@ const DEFAULT_STRATEGY_TEMPLATE = {
     requiredTerms: { enabled: true, limit: 100 },
     translationMemory: { enabled: true, limit: 5 },
     qaCases: { enabled: true, limit: 3 },
-    styleProfile: { enabled: true, limit: 1 }
+    styleProfile: { enabled: true, limit: 1 },
+    // 参考资料按需查询：出厂值听参数设置；技能里的值一旦偏离出厂值（评测晋升的结果）就以技能为准。
+    referenceMaterials: { enabled: true, limit: 4 }
   },
   terminology: {
     enforceRequired: true,
@@ -156,24 +158,24 @@ export function validateCandidatePromotionState({ candidate, currentChampion, ev
   const reasons = [];
   let scope = null;
   if (!isPlainObject(candidate)) reasons.push("候选技能不存在");
-  if (!isPlainObject(currentChampion)) reasons.push("当前 Champion 不存在");
+  if (!isPlainObject(currentChampion)) reasons.push("当前生效版本不存在");
   if (isPlainObject(candidate)) {
     try { scope = normalizeLearningScope(candidate.scope || candidate); } catch (error) { reasons.push(`候选作用域无效：${error.message}`); }
     if (!["challenger", "draft"].includes(candidate.status)) reasons.push(`候选状态必须是 challenger 或 draft，当前为 ${candidate.status || "未知"}`);
   }
   if (isPlainObject(currentChampion)) {
-    if (currentChampion.status !== "champion") reasons.push(`当前基准状态不是 champion：${currentChampion.status || "未知"}`);
-    if (scope && !scopesEqual(scope, currentChampion.scope || currentChampion)) reasons.push("候选与当前 Champion 作用域不一致");
+    if (currentChampion.status !== "champion") reasons.push(`当前基准状态不是生效版本：${currentChampion.status || "未知"}`);
+    if (scope && !scopesEqual(scope, currentChampion.scope || currentChampion)) reasons.push("候选与当前生效版本作用域不一致");
   }
   if (isPlainObject(candidate) && isPlainObject(currentChampion) && String(candidate.parentId || "") !== String(currentChampion.id || "")) {
-    reasons.push("候选父版本已不是当前 Champion");
+    reasons.push("候选父版本已不是当前生效版本");
   }
   if (requireEvaluation || evaluation) {
     if (!isPlainObject(evaluation)) {
       reasons.push("缺少最新晋升评测");
     } else {
       if (scope && !scopesEqual(scope, evaluation.scope || evaluation)) reasons.push("晋升评测作用域与候选不一致");
-      if (String(evaluation.championSkillId || "") !== String(currentChampion?.id || "")) reasons.push("晋升评测对应的 Champion 已过期");
+      if (String(evaluation.championSkillId || "") !== String(currentChampion?.id || "")) reasons.push("晋升评测对应的生效版本已过期");
       if (String(evaluation.challengerSkillId || "") !== String(candidate?.id || "")) reasons.push("晋升评测不属于当前候选");
       if (evaluation.decision !== "promote" || evaluation.report?.promotable !== true) reasons.push("最新评测未通过完整晋升门禁");
     }
@@ -477,7 +479,7 @@ function sameCaseSet(championSamples, challengerSamples) {
 
 export function buildChinesePromotionReport(result) {
   const conclusion = result.status === "promote"
-    ? "建议晋升 Challenger"
+    ? "建议晋升候选版本"
     : result.status === "insufficient"
       ? "证据不足，暂不晋升"
       : "门禁未通过，拒绝晋升";
@@ -486,7 +488,7 @@ export function buildChinesePromotionReport(result) {
   const lines = [
     `结论：${conclusion}`,
     `范围：${result.scope.locale} × ${result.scope.contentType} × ${result.scope.domain} × ${result.scope.project}`,
-    `样本：Champion ${champion.sampleSize} 条；Challenger ${challenger.sampleSize} 条；最低 ${champion.minimumSampleSize} 条。`,
+    `样本：生效版本 ${champion.sampleSize} 条；候选版本 ${challenger.sampleSize} 条；最低 ${champion.minimumSampleSize} 条。`,
     `强制术语正确率：${percent(champion.mandatoryTermAccuracy)} → ${percent(challenger.mandatoryTermAccuracy)}`,
     `硬错误：${fixed(champion.hardErrorCount, 0)} → ${fixed(challenger.hardErrorCount, 0)}；无硬错误率 ${percent(champion.hardErrorFreeRate)} → ${percent(challenger.hardErrorFreeRate)}`,
     `QA 平均分：${fixed(champion.qaScore, 1)} → ${fixed(challenger.qaScore, 1)}`,
@@ -517,8 +519,8 @@ export function evaluateSkillPromotion({
   const normalizedScope = normalizeLearningScope(scope);
   if (!isPlainObject(champion) || !Array.isArray(champion.samples)) throw new TypeError("champion.samples 必须是数组");
   if (!isPlainObject(challenger) || !Array.isArray(challenger.samples)) throw new TypeError("challenger.samples 必须是数组");
-  assertExactLearningScope(normalizedScope, champion.scope ?? champion.skill?.scope, "Champion ");
-  assertExactLearningScope(normalizedScope, challenger.scope ?? challenger.skill?.scope, "Challenger ");
+  assertExactLearningScope(normalizedScope, champion.scope ?? champion.skill?.scope, "生效版本 ");
+  assertExactLearningScope(normalizedScope, challenger.scope ?? challenger.skill?.scope, "候选版本 ");
   const championMetrics = calculateSkillEvaluationMetrics(champion.samples, { scope: normalizedScope, minSamples });
   const challengerMetrics = calculateSkillEvaluationMetrics(challenger.samples, { scope: normalizedScope, minSamples });
   const requiredCoverage = clamp(finiteNumber(minimumCoverage) ?? 0.8, 0, 1);
@@ -646,7 +648,7 @@ export function evaluateSkillPromotion({
   result.gates.push(gate("material_gain", "至少有一项实质收益", "promotion", materialImprovement,
     materialImprovement
       ? `质量或效率达到最小改进幅度（${achieved.join("、")}）`
-      : `与 Champion 持平，尚无晋升价值${restricted ? `（本次只认可 ${allowedGainKeys.join("、")}）` : ""}`));
+      : `与生效版本持平，尚无晋升价值${restricted ? `（本次只认可 ${allowedGainKeys.join("、")}）` : ""}`));
 
   result.promotable = result.gates.every((item) => item.passed);
   result.status = result.promotable ? "promote" : "reject";

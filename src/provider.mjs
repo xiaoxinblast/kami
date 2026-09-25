@@ -10,6 +10,8 @@ const THINKING_VALUES = new Set(["enabled", "disabled"]);
 const EFFORT_VALUES = new Set(["low", "high", "max"]);
 /** 上游明确拒绝思考参数后不再重复尝试，避免每次调用都先失败一次。 */
 let thinkingUnsupported = false;
+/** 上游不认 tools 时记住，后续调用直接按无工具模式发，避免每次先撞一次 400。 */
+let toolsUnsupported = false;
 
 const baseRuntimeConfig = {
   baseUrl: process.env.LLM_BASE_URL || loadedProvider.config.baseUrl || "http://localhost:11434/v1",
@@ -109,6 +111,7 @@ export function updateProviderConfig(input = {}) {
   }
   // 换了服务商就重新试一次思考参数：上一个上游不支持不代表这一个也不支持。
   thinkingUnsupported = false;
+  toolsUnsupported = false;
   if (input.persist !== false) persistence = saveProviderConfig(nextConfig);
   runtimeConfig = withMainThinking(nextConfig);
   return getProviderConfig();
@@ -475,6 +478,7 @@ async function chat(messages, config = runtimeConfig, options = {}) {
         ...(seed === undefined ? {} : { seed }),
         ...(maxTokens ? { max_tokens: maxTokens } : {}),
         ...(normalizedOptions.responseFormat ? { response_format: normalizedOptions.responseFormat } : {}),
+        ...(!toolsUnsupported && normalizedOptions.tools?.length ? { tools: normalizedOptions.tools, tool_choice: "auto" } : {}),
         ...thinkingBody
       })
     }, { timeoutMs, label: requestLabel, retries: 1 });
@@ -496,6 +500,14 @@ async function chat(messages, config = runtimeConfig, options = {}) {
         thinkingUnsupported = true;
         thinkingBody = {};
         normalizedOptions.onThinkingUnsupported?.(`${requestLabel} 上游不支持思考设置，已按默认思考模式重试`);
+        continue;
+      }
+      // 不是每个 OpenAI 兼容端点都认 tools：拒绝就退回无工具模式（参考资料改为不查），
+      // 但翻译本身必须继续，不能因为一个可选能力把整批任务打断。
+      if (!toolsUnsupported && normalizedOptions.tools?.length && response.status === 400
+        && /tool/i.test(text || "") && /unknown|unsupported|extra_forbidden|not permitted|not allowed|invalid/i.test(text || "")) {
+        toolsUnsupported = true;
+        normalizedOptions.onToolsUnsupported?.(`${requestLabel} 上游不支持工具调用，已按无工具模式重试`);
         continue;
       }
       throw new Error(`模型请求失败 (${response.status})：${(text || "").slice(0, 500)}`);
@@ -523,9 +535,51 @@ async function chat(messages, config = runtimeConfig, options = {}) {
       maxTokens = maxTokens ? Math.min(8000, Math.ceil(maxTokens * 2)) : 4000;
       continue;
     }
+    if (normalizedOptions.returnMessage === true) {
+      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.filter((call) => call?.function?.name) : [];
+      return { content, toolCalls };
+    }
     return content;
   }
+  if (normalizedOptions.returnMessage === true) return { content: "", toolCalls: [] };
   return "";
+}
+
+/**
+ * 带工具的多轮对话：模型请求工具就执行、把结果回灌，直到它给出最终文本或到达轮次上限。
+ * usage 由 chat 逐轮回调，调用方自行累加。
+ */
+export async function chatWithTools(messages, config = runtimeConfig, {
+  tools = [],
+  executeTool,
+  maxRounds = 2,
+  onActivity = null,
+  onToolsUnsupported = null,
+  ...options
+} = {}) {
+  if (typeof executeTool !== "function" || !tools.length) {
+    return { content: await chat(messages, config, options), toolResults: [] };
+  }
+  const conversation = [...messages];
+  const toolResults = [];
+  let content = "";
+  for (let round = 0; round <= Math.max(0, maxRounds); round += 1) {
+    const message = await chat(conversation, config, { ...options, tools, tool_choice: "auto", returnMessage: true, onToolsUnsupported });
+    const calls = message.toolCalls || [];
+    if (!calls.length) {
+      content = message.content || "";
+      break;
+    }
+    conversation.push({ role: "assistant", content: message.content || "", tool_calls: calls });
+    for (const call of calls) {
+      const result = await executeTool({ name: call.function.name, arguments: call.function.arguments });
+      toolResults.push(result);
+      conversation.push({ role: "tool", tool_call_id: call.id || call.function.name, content: String(result?.text || "") });
+      onActivity?.({ tool: call.function.name, refs: result?.refs?.length ?? 0 });
+    }
+    content = message.content || content;
+  }
+  return { content, toolResults };
 }
 
 export function isEmbeddingConfigured() {
@@ -944,7 +998,7 @@ export async function evaluateTranslationWithModel({ contextPack, translation, r
  * Auto QA 三层模型审校：basic 基本检查、fidelity 语义忠实性（着重）、nuance 细微一致性。
  * 单次调用返回带 dimension 的问题列表；解析失败走行式降级，最终失败抛错由调用方记录。
  */
-export async function evaluateAutoQaWithModel({ source, translation, locale, contentType = "general", domain = "general", styleProfile = null, references = [], machineDrafts = [], qaCases = [], evidence = [], onUsage = null }) {
+export async function evaluateAutoQaWithModel({ source, translation, locale, contentType = "general", domain = "general", styleProfile = null, references = [], machineDrafts = [], qaCases = [], evidence = [], onUsage = null, toolRunner = null }) {
   const evidencePayload = {
     source, translation, locale, contentType, domain,
     multiSentence: String(source).includes("\n"),
@@ -981,7 +1035,17 @@ severity 只能是 critical、major、minor；dimension 只能是 basic、fideli
     },
     { role: "user", content: JSON.stringify(evidencePayload) }
   ];
-  let content = await chat(messages, runtimeConfig, { temperature: 0.1, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "Auto QA", responseFormat: { type: "json_object" }, onUsage });
+  const qaOptions = { temperature: 0.1, timeoutMs: 75_000, maxTokens: 1800, requestLabel: "Auto QA", responseFormat: { type: "json_object" }, onUsage };
+  // 质检也可以按需查资料（核对角色名、设定、剧情一致性），但只给一轮工具调用。
+  let content = toolRunner?.tools?.length
+    ? (await chatWithTools(messages, runtimeConfig, {
+      ...qaOptions,
+      tools: toolRunner.tools,
+      maxRounds: 1,
+      executeTool: toolRunner.execute,
+      onActivity: toolRunner.onActivity
+    })).content
+    : await chat(messages, runtimeConfig, qaOptions);
   let payload;
   let lastFormatError = "";
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1242,12 +1306,18 @@ export function parseGrammarLineResponse(content) {
   }];
 }
 
-/** 用一个极小请求验证模型服务、鉴权和余额，避免每个分享段落重复撞同一故障。 */
-export async function probeModelAvailability({ timeoutMs = 20_000, onUsage = null } = {}) {
+/**
+ * 用一个极小请求验证模型服务、鉴权和余额，避免每个分享段落重复撞同一故障。
+ *
+ * `config` 用于「模型设置 → 测试连接」：面板里刚改、还没保存的地址/密钥也要能试，
+ * 所以允许显式覆盖 baseUrl / apiKey / model；不传就测当前生效配置。
+ */
+export async function probeModelAvailability({ timeoutMs = 20_000, onUsage = null, config = null } = {}) {
+  const target = config ? withMainThinking({ ...runtimeConfig, ...config }) : runtimeConfig;
   const content = await chat([
     { role: "system", content: "这是服务可用性检查。不要解释，只回复 OK。" },
     { role: "user", content: "ping" }
-  ], runtimeConfig, {
+  ], target, {
     temperature: 0,
     timeoutMs: Math.max(5_000, Math.min(60_000, Number(timeoutMs) || 20_000)),
     // 推理模型可能先消耗少量 reasoning token；8 token 会偶发在输出 OK 前耗尽。
@@ -1266,6 +1336,25 @@ export async function probeModelAvailability({ timeoutMs = 20_000, onUsage = nul
  * 词块 surface 必须完整覆盖译文（由调用方用 validateGlossTokens 校验的版本在这里直接校验），
  * 失败返回 null，由调用方降级为“无拆解”。
  */
+/**
+ * 扫描页识图：把 PDF 渲染出的页面图片交给模型逐字转录。
+ * 只做转录，不做翻译——参考资料要保持原文，检索与引用都以原文为准。
+ */
+export async function extractTextFromImageWithModel({ base64, onUsage = null, detail = "low", timeoutMs = 120_000 } = {}) {
+  const content = String(base64 || "").trim();
+  if (!content) return "";
+  return await chat([
+    { role: "system", content: "你是资料转录助手。逐字转录图片中的全部文字，保留标题、段落与编号；只输出转录结果，不要解释、不要翻译、不要总结。" },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "转录这一页的全部文字。" },
+        { type: "image_url", image_url: { url: `data:image/png;base64,${content}`, detail } }
+      ]
+    }
+  ], configForRole("main"), { temperature: 0, timeoutMs, requestLabel: "资料识图", onUsage });
+}
+
 export async function glossTranslationWithModel({ translation, locale, onUsage = null }) {
   const language = LOCALE_NAMES[locale] || locale;
   const messages = [
@@ -1624,13 +1713,24 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
   }
 }
 
-export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "", modelRole = "main" } = {}) {
+export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "", modelRole = "main", toolRunner = null } = {}) {
   const rhymeLike = contextPack?.rhymeLike === true;
   const batchVerse = contextPack?.batchVerse?.active === true;
   const callConfig = configForRole(modelRole, model);
   // 温度：普通文本 0.6 给地道表达留空间，韵文/批排比 0.85 给节奏与韵脚再创作。
   const translationTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : (rhymeLike || batchVerse ? 0.85 : 0.6);
-  const initial = await chat([{ role: "user", content: packPrompt(contextPack) }], callConfig, { timeoutMs: 75_000, requestLabel: "翻译", temperature: translationTemperature, seed, onSeedUnsupported, onUsage });
+  const initialMessages = [{ role: "user", content: packPrompt(contextPack) }];
+  const initialOptions = { timeoutMs: 75_000, requestLabel: "翻译", temperature: translationTemperature, seed, onSeedUnsupported, onUsage };
+  // 参考资料按需查询：只挂在初译这一步，自检与修订不重复查询，避免成本失控。
+  const initial = toolRunner?.tools?.length
+    ? (await chatWithTools(initialMessages, callConfig, {
+      ...initialOptions,
+      tools: toolRunner.tools,
+      maxRounds: Number(toolRunner.maxRounds) || 2,
+      executeTool: toolRunner.execute,
+      onActivity: toolRunner.onActivity
+    })).content
+    : await chat(initialMessages, callConfig, initialOptions);
   if (!reflect && !rhymeLike) return { initial, translation: initial, reflection: "" };
   if (rhymeLike) {
     // 韵文本地化专用通道：初译只作参考，要求模型以目标语言玩家视角再创作，
@@ -1683,7 +1783,7 @@ async function chooseTranslationCandidate(contextPack, candidates, config, onUsa
  * 执行由服务端风险路由器选定的翻译路线。routePlan 由服务端生成，浏览器
  * 只能请求策略名称，不能把任意模型或密钥注入模型调用。
  */
-export async function translateWithRoute(contextPack, { routePlan = null, reflect = true, onUsage = null } = {}) {
+export async function translateWithRoute(contextPack, { routePlan = null, reflect = true, onUsage = null, toolRunner = null } = {}) {
   const plan = routePlan || { route: "reflective", candidateCount: 1, model: runtimeConfig.model, modelRole: "main" };
   const selectedModel = String(plan.model || runtimeConfig.model);
   const selectedConfig = configForRole(plan.modelRole, selectedModel);
@@ -1738,7 +1838,7 @@ export async function translateWithRoute(contextPack, { routePlan = null, reflec
   }
 
   const forceReflection = plan.route === "fact_guarded" ? true : (plan.route === "direct" ? false : reflect);
-  const result = await translateWithReflection(contextPack, { reflect: forceReflection, onUsage, model: selectedModel, modelRole: plan.modelRole });
+  const result = await translateWithReflection(contextPack, { reflect: forceReflection, onUsage, model: selectedModel, modelRole: plan.modelRole, toolRunner });
   return {
     ...result,
     candidates: [{ index: 0, translation: result.translation, recommended: true, reason: plan.label || "系统推荐" }],

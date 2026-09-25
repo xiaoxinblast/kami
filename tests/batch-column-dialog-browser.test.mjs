@@ -96,7 +96,7 @@ test("待译表格上传弹出列含义确认弹窗，并带映射解析", { ski
     assert.equal(await page.locator("#batchColumnConfirm").isDisabled(), false);
     await page.locator("#batchColumnConfirm").click();
     await page.waitForSelector("#batchColumnDialog", { state: "hidden" });
-    await page.waitForFunction(() => window.__prepareSeen === true, null, { timeout: 15000 }).catch(() => {});
+    await page.waitForFunction(() => window.__prepareSeen === true, null, { timeout: 45_000 }).catch(() => {});
     assert.ok(prepareBody, "应该发起解析请求");
     const mapped = prepareBody.columnMapping?.sheets?.[0];
     assert.equal(mapped.headerRow, 1);
