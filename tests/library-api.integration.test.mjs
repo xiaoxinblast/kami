@@ -174,6 +174,34 @@ test("库页面能用：条目按库过滤、条目编辑删除、库导出、�
       body: JSON.stringify({ projectId, batchId: randomUUID(), purpose: "term", termLibraryId: randomUUID(), candidates: [{ source: "a", target: "b", locale: "zh-CN", selected: true }] })
     });
     assert.equal(crossProject.status, 400, "不属于本项目的库不能作为目标");
+
+    // 6) 选中的目标库必须是真正落库的那个：选参考 TM 不能悄悄写进主 TM
+    const referenceTm = (await request(`${appUrl}/api/projects/${encodeURIComponent(projectId)}/libraries`, {
+      method: "POST",
+      body: JSON.stringify({ name: "参考 TM", kind: "translation_memory", role: "reference", priority: 3, enabled: true })
+    })).library;
+    const referenceImport = await request(`${appUrl}/api/assets-import/commit`, {
+      method: "POST",
+      body: JSON.stringify({
+        projectId, batchId: randomUUID(), filename: "参考库导入.xlsx", purpose: "tm",
+        styleEvidence: false, tmLibraryId: referenceTm.id,
+        candidates: [{ source: "参考ライブラリはこちらです。", target: "参考库在这边。", locale: "zh-CN", selected: true }]
+      })
+    });
+    const referenceDeadline = Date.now() + 60_000;
+    let referenceTask = null;
+    while (Date.now() < referenceDeadline) {
+      referenceTask = await request(`${appUrl}/api/background-tasks/${encodeURIComponent(referenceImport.taskId)}`);
+      if (["completed", "failed"].includes(referenceTask.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    assert.equal(referenceTask?.status, "completed", `选中库的导入要跑完：${JSON.stringify(referenceTask?.progress || {})}`);
+    const referenceEntries = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(referenceTm.id)}&limit=50`);
+    assert.equal(referenceEntries.total, 1, "条目要落进选中的参考 TM");
+    assert.equal(referenceEntries.items[0].libraryId, referenceTm.id);
+    const masterAfterReference = await request(`${appUrl}/api/library-entries?locale=zh-CN&kind=tm&projectId=${encodeURIComponent(projectId)}&libraryId=${encodeURIComponent(masterTm.id)}&limit=50`);
+    assert.ok(!masterAfterReference.items.some((item) => item.source === "参考ライブラリはこちらです。"), "选了参考 TM 就不该写进主 TM");
+    await request(`${appUrl}/api/background-tasks/${encodeURIComponent(referenceImport.taskId)}`, { method: "DELETE" });
   } finally {
     await request(`${appUrl}/api/projects/${encodeURIComponent(projectId)}?purge=1`, { method: "DELETE" });
   }

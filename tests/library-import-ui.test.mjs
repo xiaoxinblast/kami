@@ -121,6 +121,10 @@ test("预检弹窗里能直接改去向，关掉后还能重新打开", async ()
   assert.match(script, /function renderAssetPreflightDestination\(\)/u);
   assert.match(script, /function fillLibrarySelect\(select, libraries, preferredId, preferMaster = false\)/u);
   assert.match(script, /state\.importTermLibraryId = fillLibrarySelect\(\$\("#assetPreflightTermLibrary"\), state\.assetLibraries, state\.importTermLibraryId\)/u);
+  // 去向要写选中库的名字：写死"写入人工主 TM"会让选了参考 TM 的用户以为选择没生效。
+  assert.match(script, /function importDestinationLabel\(purpose = state\.assetImportPurpose\)/u);
+  assert.match(script, /人工终稿 → 「\$\{tmName\}」/u);
+  assert.doesNotMatch(script, /写入人工主 TM/u);
   // 人工 TM 是整批进 TM：页面与弹窗里的"术语写入库"都要收起。
   assert.match(script, /const termRow = \$\("#importTermLibraryRow"\);\s*\n\s*if \(termRow\) termRow\.hidden = purpose !== "term";/u);
   assert.match(script, /const termRow = \$\("#assetPreflightTermLibraryRow"\);\s*\n\s*if \(termRow\) termRow\.hidden = purpose !== "term";/u);
@@ -132,6 +136,12 @@ test("预检弹窗里能直接改去向，关掉后还能重新打开", async ()
   assert.match(script, /function renderImportResume\(\)/u);
   assert.match(script, /function closeAssetPreflightDialog\(\) \{[\s\S]{0,200}?refreshActions\(\);/u);
   assert.match(script, /\$\("#assetPreflightDialog"\)\.addEventListener\("close", \(\) => \{ resolveAssetPreflight\(\); refreshActions\(\); \}\)/u);
+  // 提示条上要能直接放弃这次导入：清掉预检与已选文件，拖入区回到初始状态。
+  assert.match(html, /id="importPreflightCancel"/u);
+  assert.match(script, /function cancelAssetImport\(\)/u);
+  assert.match(script, /state\.assetPreflight = null;[\s\S]{0,500}?\$\("#filePrompt"\)\.textContent = "拖入或点击选择双语资产文件";/u);
+  assert.match(script, /\$\("#importPreflightCancel"\)\.hidden = submitted;/u);
+  assert.match(script, /\$\("#importPreflightCancel"\)\?\.addEventListener\("click", \(\) => cancelAssetImport\(\)\)/u);
 });
 
 test("术语库、记忆库与导入页都能直接新增库，优先级也能在列表里调", async () => {

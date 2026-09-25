@@ -41,7 +41,8 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
         libraries: [
           { id: "term-1", name: "术语库", kind: "term_base", role: "reference", enabled: true, priority: 1 },
           { id: "term-2", name: "角色术语", kind: "term_base", role: "reference", enabled: true, priority: 2 },
-          { id: "tm-master", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1 }
+          { id: "tm-master", name: "主 TM", kind: "translation_memory", role: "master", enabled: true, priority: 1 },
+          { id: "tm-reference", name: "参考 TM", kind: "translation_memory", role: "reference", enabled: true, priority: 2 }
         ]
       };
       else if (path === "/api/memories") payload = { memories: [] };
@@ -73,7 +74,28 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     // 类型在上传前已选定，弹窗只展示去向，并保留 AI 清洗 / 风格证据的最终开关。
     assert.equal(await page.locator("#assetPreflightAiRow").isHidden(), false);
     assert.equal(await page.locator("#assetPreflightAiCleaning").isChecked(), false);
-    assert.match(await page.locator("#assetPreflightSummary").textContent(), /按表直接导入/u);
+    assert.match(await page.locator("#assetPreflightSummary").textContent(), /按本地规则分流/u);
+    // 预检还没确认时可以先放弃：关掉弹窗后导入页那条提示里要能直接取消这次导入。
+    await page.locator('[data-close="assetPreflightDialog"]').first().click();
+    await page.waitForFunction(() => document.querySelector("#assetPreflightDialog")?.open === false);
+    await page.getByRole("button", { name: "双语资产导入" }).click();
+    await page.waitForSelector("#importPreflightResume:not([hidden])");
+    assert.match(await page.locator("#importPreflightResumeTitle").textContent(), /预检结果还没确认：1 个文件、2 条双语条目/u);
+    assert.match(await page.locator("#importPreflightResumeMeta").textContent(), /短词条写入「术语库」，完整句段写入「主 TM」/u);
+    assert.equal(await page.locator("#importPreflightCancel").isHidden(), false);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/import-resume-cancel.png`, animations: "disabled" });
+    }
+    await page.locator("#importPreflightCancel").click();
+    await page.waitForFunction(() => document.querySelector("#importPreflightResume")?.hidden === true);
+    assert.equal(await page.locator("#filePrompt").textContent(), "拖入或点击选择双语资产文件", "取消后拖入区要回到没选文件的样子");
+    assert.equal(await page.locator("#importFileList").isHidden(), true);
+    assert.equal(await page.locator("#dropZone").evaluate((node) => node.classList.contains("has-file")), false);
+    assert.match(await page.locator("#fileMeta").textContent(), /先本地预检，再确认导入/u);
+    // 重新选同一个文件 → 重新预检 → 继续验证弹窗里的去向选择。
+    await page.locator("#termLibraryFile").setInputFiles({ name: "terms.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: Buffer.from("test") });
+    await page.locator("#assetPreflightDialog").waitFor({ state: "visible" });
     // 弹窗里就能改去向：切到人工 TM 后术语库那一栏要收起，目标库跟着换成主 TM。
     assert.equal(await page.locator("#assetPreflightTermLibraryRow").isHidden(), false);
     assert.equal(await page.locator("#assetPreflightTermLibrary").inputValue(), "term-1");
@@ -81,11 +103,22 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     await page.locator('label.import-purpose-option:has(input[name="assetPreflightPurpose"][value="tm"])').click();
     assert.equal(await page.locator("#assetPreflightTermLibraryRow").isHidden(), true, "人工 TM 不该再让人选术语库");
     assert.match(await page.locator("#assetPreflightTarget").textContent(), /人工 TM → 主 TM/u);
+    // 去向文案必须跟着选中的库走：选了参考 TM 就不能还写"写入人工主 TM"。
+    await page.locator("#assetPreflightTmLibrary").selectOption("tm-reference");
+    const destinationCell = page.locator("#assetPreflightBody tr").first().locator("td").nth(3);
+    assert.match(await destinationCell.textContent(), /人工终稿 → 「参考 TM」/u);
+    assert.match(await page.locator("#assetPreflightSummary").textContent(), /去向：人工终稿 → 「参考 TM」/u);
+    assert.doesNotMatch(await destinationCell.textContent(), /主 TM/u, "选中参考 TM 时不该再说写入主 TM");
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/asset-preflight-library-copy.png`, animations: "disabled" });
+    }
     // 这里选的库就是提交时带上的库：换一个术语库再切回来。
     await page.locator('label.import-purpose-option:has(input[name="assetPreflightPurpose"][value="term"])').click();
     assert.equal(await page.locator("#assetPreflightTermLibraryRow").isHidden(), false);
     await page.locator("#assetPreflightTermLibrary").selectOption("term-2");
     assert.match(await page.locator("#assetPreflightTarget").textContent(), /术语 → 角色术语/u);
+    assert.match(await destinationCell.textContent(), /短词条 → 「角色术语」；句段 → 「参考 TM」/u);
     await page.locator("#assetPreflightConfirm").click();
     await page.waitForFunction(() => /已提交后台导入/.test(document.querySelector("#assetPreflightSummary")?.textContent || ""));
     assert.equal(commitBody?.purpose, "term");
@@ -101,6 +134,7 @@ test("术语表与风格指南可从各自页面进入完整导入流程", { ski
     await page.waitForSelector("#importPreflightResume:not([hidden])");
     assert.match(await page.locator("#importPreflightResumeTitle").textContent(), /已提交后台导入：1 个文件、2 条双语条目/u);
     assert.equal(await page.locator("#importPreflightResumeReset").isHidden(), true, "已提交后不该再提供重新预检");
+    assert.equal(await page.locator("#importPreflightCancel").isHidden(), true, "已提交的导入要去任务中心中断，不能在这里取消");
     await page.locator("#importPreflightResumeOpen").click();
     await page.waitForSelector("#assetPreflightDialog[open]");
     if (process.env.KAMI_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/asset-preflight-destination.png`, animations: "disabled" });

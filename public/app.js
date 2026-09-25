@@ -4570,7 +4570,7 @@ function renderAssetPreflight() {
   if (aiRow) aiRow.hidden = state.assetImportPurpose !== "term";
   if ($("#assetPreflightAiCleaning")) $("#assetPreflightAiCleaning").checked = state.assetImportAiCleaning;
   if ($("#assetPreflightStyleEvidence")) $("#assetPreflightStyleEvidence").checked = state.assetImportStyleEvidence;
-  const purposeLabel = state.assetImportPurpose === "tm" ? "写入人工主 TM" : state.assetImportAiCleaning ? "AI 清洗后分库写入" : "按表直接导入（本地规则分流）";
+  const purposeLabel = importDestinationLabel();
   $("#assetPreflightBody").innerHTML = (preview.files || []).map((file) => {
     const duplicates = file.duplicates || {};
     const duplicateBadges = [
@@ -4615,6 +4615,24 @@ function renderAssetPreflightDestination() {
 }
 
 /**
+ * 预检里的"去向"必须写清写进哪个库：选了参考 TM 却按角色笼统写成"主 TM"，
+ * 那是在描述另一件事——用户会以为选择没生效。
+ */
+function importDestinationNames() {
+  return {
+    termName: libraryById("term", state.importTermLibraryId)?.name || "默认术语库",
+    tmName: libraryById("tm", state.importTmLibraryId)?.name || "主 TM"
+  };
+}
+
+function importDestinationLabel(purpose = state.assetImportPurpose) {
+  const { termName, tmName } = importDestinationNames();
+  return purpose === "tm"
+    ? `人工终稿 → 「${tmName}」`
+    : `短词条 → 「${termName}」；句段 → 「${tmName}」`;
+}
+
+/**
  * 预检关掉之后的续入口：一个文件已经预检过，页面就得留一条"还没确认"的提示，
  * 而不是只在顶部主按钮上换个文案。
  */
@@ -4628,14 +4646,17 @@ function renderImportResume() {
   const submitted = assetPreflightOutcome?.submitted === true;
   const files = preview.files?.length || 0;
   const entries = preview.statistics?.entries || 0;
+  const { termName, tmName } = importDestinationNames();
   $("#importPreflightResumeTitle").textContent = submitted
     ? `已提交后台导入：${files} 个文件、${entries} 条双语条目`
     : `预检结果还没确认：${files} 个文件、${entries} 条双语条目`;
   $("#importPreflightResumeMeta").textContent = submitted
     ? "进度与结果在任务中心可查；这里可以再看一眼这次的去向与跳过明细。"
-    : (state.assetImportPurpose === "tm" ? "确认后会整批作为人工确认译文写入人工 TM。" : "确认后按表导入：短词条入术语库、完整句段入主 TM。");
+    : state.assetImportPurpose === "tm" ? `确认后整批写入「${tmName}」。` : `确认后短词条写入「${termName}」，完整句段写入「${tmName}」。`;
   $("#importPreflightResumeOpen").textContent = submitted ? "查看预检结果" : "打开导入预检";
   $("#importPreflightResumeReset").hidden = submitted;
+  // 已经提交到后台的导入不能从这里"取消"（任务在服务端跑，去任务中心中断）；未确认的才可以放弃。
+  $("#importPreflightCancel").hidden = submitted;
 }
 
 function reopenAssetPreflight() {
@@ -4643,6 +4664,30 @@ function reopenAssetPreflight() {
   if (!dialog || !state.assetPreflight) return;
   if (!dialog.open) dialog.showModal();
   renderImportResume();
+}
+
+/**
+ * 放弃这次导入：预检结果、已选文件与进度都清掉，拖入区回到能重新选文件的状态。
+ * 只处理"还没提交"的情况——已经进了后台任务的导入要去任务中心中断。
+ */
+function cancelAssetImport() {
+  if (state.assetImportTaskId && assetPreflightOutcome?.submitted === true) return;
+  state.assetPreflight = null;
+  state.assetImportProgress = null;
+  state.assetImportTaskId = "";
+  assetPreflightOutcome = null;
+  state.importFiles = [];
+  state.importFile = null;
+  state.importPreview = null;
+  state.importCompleted = false;
+  $("#filePrompt").textContent = "拖入或点击选择双语资产文件";
+  $("#fileMeta").textContent = `支持多选 .xlsx / .csv / .xliff / .mqxliff，单个文件不超过 ${UPLOAD_FILE_LABEL}；先本地预检，再确认导入`;
+  $("#dropZone").classList.remove("has-file");
+  $("#importFileList").hidden = true;
+  $("#importFileList").innerHTML = "";
+  resetAssetImportProgress();
+  refreshActions();
+  toast("已取消这次导入，可以重新选文件");
 }
 
 async function confirmAssetPreflight() {
@@ -4694,7 +4739,7 @@ async function confirmAssetPreflight() {
     toast(`已开始后台导入 ${accepted} 条；可以关掉这个窗口继续下一步`);
     if (returnView) {
       $("#assetPreflightTableWrap").hidden = true;
-      $("#assetPreflightSummary").textContent = `已提交后台导入：${state.importFiles?.length || 0} 个文件、${accepted} 条双语条目。${aiCleaning ? "先做 AI 清洗再入库。" : "按本地规则分流写入。"}可以关掉这个窗口，向导会继续下一步，进度与结果在任务中心可查。`;
+      $("#assetPreflightSummary").textContent = `已提交后台导入：${state.importFiles?.length || 0} 个文件、${accepted} 条双语条目。去向：${importDestinationLabel()}；${aiCleaning ? "先做 AI 清洗再入库。" : "按本地规则分流写入。"}可以关掉这个窗口，向导会继续下一步，进度与结果在任务中心可查。`;
     }
     watchAssetImportTask(state.assetImportTaskId, { returnView }).catch(() => {});
   } catch (error) {
@@ -7009,6 +7054,7 @@ function bindEvents() {
   $("#assetPreflightClose").addEventListener("click", () => closeAssetPreflightDialog());
   $("#importPreflightResumeOpen")?.addEventListener("click", () => reopenAssetPreflight());
   $("#importPreflightResumeReset")?.addEventListener("click", () => { if (state.importFiles.length) setImportFiles(state.importFiles); });
+  $("#importPreflightCancel")?.addEventListener("click", () => cancelAssetImport());
   // 预检弹窗里的去向：类型与目标库都能直接改，改完立刻回写到页面上那一组控件。
   $$('input[name="assetPreflightPurpose"]').forEach((input) => input.addEventListener("change", () => {
     state.assetImportPurpose = input.value === "tm" ? "tm" : "term";
