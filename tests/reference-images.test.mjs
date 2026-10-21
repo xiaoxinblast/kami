@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 
-import { extractReferenceFile, MAX_VISION_IMAGES_PER_DOCUMENT } from "../src/reference-materials.mjs";
+import { extractReferenceFile, planReferenceExtraction, REFERENCE_VISION_CONFIRM_THRESHOLD } from "../src/reference-materials.mjs";
 
 /**
  * 文档里的图片也是资料：截图、示意图、界面标注这些内容正文里根本没有，
@@ -181,7 +181,7 @@ test("PDF 有文字层的页面里嵌的图片也要单独取出来识图", asyn
   assert.equal(textOnly.visionImages, 0, "纯文字页不做任何识图，不白花 token");
 });
 
-test("图标级小图跳过并计数，超出限额的图片记为超额", async () => {
+test("图标与矢量图跳过并计数；图片不设上限，多的会先走预扫确认", async () => {
   const archive = new JSZip();
   archive.file("word/document.xml", `<?xml version="1.0"?><w:document xmlns:w="x"><w:body><w:p><w:r><w:t>正文</w:t></w:r></w:p></w:body></w:document>`);
   archive.file("word/media/icon.png", await pngBuffer(16));
@@ -193,15 +193,25 @@ test("图标级小图跳过并计数，超出限额的图片记为超额", async
   assert.equal(parsed.skippedImages, 1, "16px 的图标不送去识图，矢量图不认");
   assert.equal(blind.calls.length, 0);
 
+  // 全量识图：不再有"每份最多 40 张"的上限，41 张就识 41 张。
   const many = new JSZip();
   many.file("word/document.xml", `<?xml version="1.0"?><w:document xmlns:w="x"><w:body><w:p><w:r><w:t>正文</w:t></w:r></w:p></w:body></w:document>`);
   const png = await pngBuffer();
-  const total = MAX_VISION_IMAGES_PER_DOCUMENT + 2;
+  const total = REFERENCE_VISION_CONFIRM_THRESHOLD + 21;
   for (let index = 1; index <= total; index += 1) many.file(`word/media/image${index}.png`, png);
   const big = await many.generateAsync({ type: "nodebuffer" });
-  const capped = visionStub();
-  const parsedMany = await extractReferenceFile({ filename: "many.docx", base64: big.toString("base64"), onScannedPage: capped.hook });
-  assert.equal(parsedMany.visionImages, MAX_VISION_IMAGES_PER_DOCUMENT);
-  assert.equal(parsedMany.cappedImages, 2);
-  assert.equal(capped.calls.length, MAX_VISION_IMAGES_PER_DOCUMENT);
+  const fullVision = visionStub();
+  const parsedMany = await extractReferenceFile({ filename: "many.docx", base64: big.toString("base64"), onScannedPage: fullVision.hook });
+  assert.equal(parsedMany.visionImages, total, "图片数量不设上限");
+  assert.equal(fullVision.calls.length, total);
+  // 预扫只数张数（不调模型）：界面据此先问用户"要识 N 张图"。
+  const plan = await planReferenceExtraction({ filename: "many.docx", base64: big.toString("base64") });
+  assert.equal(plan.images, total);
+  assert.equal(plan.estimatedVisionCalls, total);
+  assert.ok(plan.estimatedVisionCalls > REFERENCE_VISION_CONFIRM_THRESHOLD, "超过阈值才需要确认");
+  // 用户选「只读文字」：图片一张都不识，但计数要如实写进报告。
+  const parsedTextOnly = await extractReferenceFile({ filename: "many.docx", base64: big.toString("base64"), vision: false, onScannedPage: fullVision.hook });
+  assert.equal(parsedTextOnly.visionImages, 0);
+  assert.equal(parsedTextOnly.visionSkippedByUser, total);
+  assert.equal(fullVision.calls.length, total, "只读文字模式不应新增识图调用");
 });

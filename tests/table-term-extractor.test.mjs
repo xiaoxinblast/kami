@@ -23,6 +23,22 @@ test("自动识别同表中的日语源列与简体中文目标列", async () =>
   assert.equal(result.sheets[0].targetColumns["zh-CN"], 2);
 });
 
+test("统计里报出整表行数与截断标记：单表上限不再是静默行为", async () => {
+  // 旧实现把上限写成 10_000 行且不报错：一份 8.8 万行的过往译文只读进 9,791 条，
+  // 界面却显示"识别 9,791 条"。上限可以存在，但必须能被看见。
+  const base64 = await workbookBase64([
+    ["日语", "简体中文"],
+    ["プレミアムパス", "高级通行证"],
+    ["メンテナンス", "维护"]
+  ]);
+  const result = await extractTermPairs({ filename: "日中术语.xlsx", base64, locale: "zh-CN" });
+  assert.equal(result.statistics.truncated, false);
+  assert.equal(result.statistics.rowLimit, 200_000);
+  assert.equal(result.statistics.totalRows, 3);
+  assert.equal(result.statistics.rowsScanned, 2);
+  assert.equal(result.sheets[0].truncated, false);
+});
+
 test("重复术语对照合并，完整句子自动分流到翻译记忆", async () => {
   const base64 = await workbookBase64([
     ["日语", "简体中文"],

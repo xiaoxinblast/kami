@@ -182,6 +182,10 @@ export function evaluateRegressionCase(regressionCase, result = {}) {
     regressionSuiteId: text(regressionCase.regressionSuiteId),
     regressionSuiteVersion: regressionCase.regressionSuiteVersion ?? null,
     sourceQaCaseId: text(regressionCase.sourceQaCaseId),
+    // 复盘与留档要能回到人：来源类型/来源引用跟着判定结果一起带出去。
+    sourceKind: text(regressionCase.sourceKind),
+    sourceRef: regressionCase.sourceRef && typeof regressionCase.sourceRef === "object" ? regressionCase.sourceRef : {},
+    editDistance: Number.isFinite(Number(regressionCase.editDistance)) ? Number(regressionCase.editDistance) : null,
     source: text(regressionCase.source),
     translation,
     failingTranslation: text(regressionCase.failingTranslation),
@@ -278,18 +282,29 @@ export function decideReleaseGate({ regression = null, gold = null, thresholds =
     if (limits.minimumRegressionCases > 0) blocking.push({ code: "regression_missing", message });
     else warnings.push({ code: "regression_missing", message });
   } else {
-    if (regression.missing?.length) {
-      blocking.push({ code: "regression_incomplete", message: `有 ${regression.missing.length} 个回归案例未执行` });
-    }
-    if (regression.total < limits.minimumRegressionCases) {
-      blocking.push({ code: "regression_too_small", message: `回归案例数 ${regression.total} 少于要求的 ${limits.minimumRegressionCases}` });
-    }
-    const passRate = regression.passRate ?? 0;
-    if (passRate < limits.regressionPassRate) {
+    const missing = regression.missing?.length || 0;
+    const executed = Math.max(0, regression.total - missing);
+    if (!executed) {
+      // 一条都没跑成时，"通过率 0%"只是除法的产物，写出来会让人以为历史失败全复发了。
       blocking.push({
-        code: "regression_failed",
-        message: `回归通过率 ${(passRate * 100).toFixed(1)}% 低于门槛 ${(limits.regressionPassRate * 100).toFixed(1)}%，${regression.failed} 个历史失败复发`
+        code: "regression_not_executed",
+        message: `回归案例 ${regression.total} 条一条都没执行（本次执行多半被中断），无法判断历史失败是否复发`
       });
+    } else {
+      if (missing) {
+        blocking.push({ code: "regression_incomplete", message: `有 ${missing} 个回归案例未执行（共 ${regression.total} 条，已执行 ${executed} 条）` });
+      }
+      if (regression.total < limits.minimumRegressionCases) {
+        blocking.push({ code: "regression_too_small", message: `回归案例数 ${regression.total} 少于要求的 ${limits.minimumRegressionCases}` });
+      }
+      // 只有样本全跑完才给通过率结论：样本缺一半时的"通过率"没有意义。
+      const passRate = regression.passRate ?? 0;
+      if (!missing && passRate < limits.regressionPassRate) {
+        blocking.push({
+          code: "regression_failed",
+          message: `回归通过率 ${(passRate * 100).toFixed(1)}% 低于门槛 ${(limits.regressionPassRate * 100).toFixed(1)}%，${regression.failed} 个历史失败复发`
+        });
+      }
     }
   }
 
@@ -298,8 +313,15 @@ export function decideReleaseGate({ regression = null, gold = null, thresholds =
     if (limits.allowMissingGold) warnings.push({ code: "gold_missing", message });
     else blocking.push({ code: "gold_missing", message });
   } else {
+    const missing = gold.missing?.length || 0;
+    const executed = Math.max(0, gold.total - missing);
     if (gold.missing?.length) {
-      blocking.push({ code: "gold_incomplete", message: `有 ${gold.missing.length} 个 Gold 样本未执行` });
+      blocking.push({
+        code: "gold_incomplete",
+        message: executed
+          ? `有 ${missing} 个 Gold 样本未执行（共 ${gold.total} 条，已执行 ${executed} 条）`
+          : `Gold 样本 ${gold.total} 条一条都没执行（本次执行多半被中断）`
+      });
     }
     if (gold.evaluated < limits.minimumGoldSamples) {
       warnings.push({ code: "gold_too_small", message: `Gold 样本数 ${gold.evaluated} 少于建议的 ${limits.minimumGoldSamples}，结论不稳定` });
@@ -341,4 +363,89 @@ export function resolveGateAssets({ goldSets = [], regressionSuites = [], scope 
     goldSetVersions: [...new Set(samples.map((sample) => `${sample.goldSeriesId}@v${sample.goldSetVersion}`))],
     regressionSuiteVersions: [...new Set(cases.map((item) => `${item.regressionSeriesId}@v${item.regressionSuiteVersion}`))]
   };
+}
+
+/**
+ * 一次门禁最多跑多少条回归案例：按归一化编辑距离降序取，改动最大的先跑。
+ * 案例会随每次审校回填持续累积，不封顶的话每跑一次门禁就是几十上百次模型调用。
+ * limit <= 0 表示不限。
+ */
+export function selectGateCases(cases = [], limit = 0) {
+  const sorted = (Array.isArray(cases) ? cases : []).slice().sort((left, right) => {
+    const leftDistance = Number.isFinite(Number(left?.editDistance)) ? Number(left.editDistance) : -1;
+    const rightDistance = Number.isFinite(Number(right?.editDistance)) ? Number(right.editDistance) : -1;
+    if (leftDistance !== rightDistance) return rightDistance - leftDistance;
+    return String(left?.id || "").localeCompare(String(right?.id || ""));
+  });
+  const cap = Number(limit);
+  return Number.isFinite(cap) && cap > 0 ? sorted.slice(0, cap) : sorted;
+}
+
+/**
+ * 待测清单：把 Gold 样本与回归案例按归一化原文合并成"一条原文只翻一次"的执行项，
+ * 每项带齐它要过的全部规则（Gold 规则 + 回归规则）。
+ *
+ * 去重只减少**执行次数**，不减少判定：同一条原文的每个样本/案例仍然各自按自己的
+ * 规则判，结论与逐条跑完全一致（差别只是不再为同一条原文掷两次骰子）。
+ */
+export function buildGateQueue({ samples = [], cases = [], dedupe = true } = {}) {
+  const sourceOf = (item) => String(item?.source ?? "");
+  if (!dedupe) {
+    return [
+      ...(Array.isArray(samples) ? samples : []).map((item) => ({ key: `gold:${item.id}`, source: sourceOf(item), gold: [item], regression: [] })),
+      ...(Array.isArray(cases) ? cases : []).map((item) => ({ key: `regression:${item.id}`, source: sourceOf(item), gold: [], regression: [item] }))
+    ];
+  }
+  const bySource = new Map();
+  const push = (slot, item) => {
+    const normalized = normalizeSource(sourceOf(item));
+    const key = normalized || `${slot}:${item?.id ?? bySource.size}`;
+    const entry = bySource.get(key) || { key, source: sourceOf(item), gold: [], regression: [] };
+    entry[slot].push(item);
+    bySource.set(key, entry);
+  };
+  for (const sample of Array.isArray(samples) ? samples : []) push("gold", sample);
+  for (const item of Array.isArray(cases) ? cases : []) push("regression", item);
+  return [...bySource.values()];
+}
+
+/**
+ * 门禁结论是否还覆盖当前资产：Gold Set 或回归集出了新版本，旧 pass 就不能再当证据，
+ * 否则"回归集更新后仍拿旧结论放行"会让门禁形同虚设。
+ */
+export function gateRunCoversAssets(run, assets = {}) {
+  const sameSet = (left = [], right = []) => {
+    const a = new Set((Array.isArray(left) ? left : []).map(String));
+    const b = new Set((Array.isArray(right) ? right : []).map(String));
+    if (a.size !== b.size) return false;
+    for (const value of a) if (!b.has(value)) return false;
+    return true;
+  };
+  return sameSet(run?.assetVersions?.goldSets || [], assets.goldSetVersions || [])
+    && sameSet(run?.assetVersions?.regressionSuites || [], assets.regressionSuiteVersions || []);
+}
+
+/**
+ * 门禁要测哪个技能：只认最新版本的候选（challenger 优先于 draft，版本号大的优先）。
+ * 生效版本不是发版对象，没有候选时不该拿它空跑一轮门禁。
+ */
+export function selectGateTargetSkill(skills = []) {
+  const candidates = (Array.isArray(skills) ? skills : []).filter((item) => ["challenger", "draft"].includes(String(item?.status || "")));
+  const rank = (item) => (String(item?.status) === "challenger" ? 1_000_000 : 0) + (Number(item?.version) || 0);
+  return candidates.sort((left, right) => rank(right) - rank(left))[0] || null;
+}
+
+/**
+ * 自动门禁的触发判定。抽成纯函数是为了让"什么时候该跑、什么时候必须跳过"可被断言，
+ * 而不是埋在一串 async 里靠观察日志猜。
+ */
+export function gateRefreshDecision({ enabled = true, skills = [], assets = null, latestRun = null, inFlight = false } = {}) {
+  if (!enabled) return { run: false, reason: "auto_gate_disabled" };
+  const skill = selectGateTargetSkill(skills);
+  if (!skill) return { run: false, reason: "no_candidate", skill: null };
+  if (inFlight) return { run: false, reason: "already_running", skill };
+  const hasAssets = Boolean(assets?.samples?.length || assets?.cases?.length);
+  if (!hasAssets) return { run: false, reason: "no_assets", skill };
+  if (latestRun && gateRunCoversAssets(latestRun, assets)) return { run: false, reason: "already_covered", skill };
+  return { run: true, reason: "stale_or_missing", skill };
 }

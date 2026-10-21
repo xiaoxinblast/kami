@@ -13,6 +13,12 @@ export const DEFAULT_MIN_EVALUATION_SAMPLES = 20;
 export const DEFAULT_MAXIMUM_EDIT_DISTANCE_REGRESSION = 0.005;
 
 const SCOPE_FIELDS = ["locale", "contentType", "domain", "project"];
+/**
+ * 作用域身份只由「语言 × 项目」决定：语体与领域已经降级为参考标签，
+ * 不再参与隔离（旧数据里它们仍然照原样保留与展示）。
+ */
+const SCOPE_IDENTITY_FIELDS = ["locale", "project"];
+const SCOPE_LABEL_DEFAULT = "general";
 const UNSAFE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const ALLOWED_PATCH_KEYS = new Set(["scope", "name", "description", "strategy", "changeReason", "metadata"]);
 
@@ -91,22 +97,36 @@ function requireScopePart(value, field) {
   return normalized;
 }
 
-/** Normalize and validate the required locale × contentType × domain × project scope. */
+/** 语体/领域是标签：缺省、空串或 "auto" 一律回落 general，不再当作必填项。 */
+function scopeLabel(value, field) {
+  if (typeof value !== "string" || !value.trim()) return SCOPE_LABEL_DEFAULT;
+  const normalized = value.trim();
+  if (["*", "all", "any", "auto"].includes(normalized.toLowerCase())) return SCOPE_LABEL_DEFAULT;
+  return requireScopePart(normalized, field);
+}
+
+/**
+ * Normalize the learning scope. 身份维度是 locale × project；contentType 与 domain
+ * 仍然保留在返回对象里（供展示、排序加权与写入标签用），但不参与相等判断。
+ */
 export function normalizeLearningScope(scope) {
   if (!isPlainObject(scope)) throw new TypeError("学习作用域必须是对象");
-  return Object.freeze(Object.fromEntries(SCOPE_FIELDS.map((field) => [field, requireScopePart(scope[field], field)])));
+  return Object.freeze(Object.fromEntries(SCOPE_FIELDS.map((field) => [
+    field,
+    SCOPE_IDENTITY_FIELDS.includes(field) ? requireScopePart(scope[field], field) : scopeLabel(scope[field], field)
+  ])));
 }
 
 export function learningScopeKey(scope) {
   const normalized = normalizeLearningScope(scope);
-  return SCOPE_FIELDS.map((field) => encodeURIComponent(normalized[field])).join("::");
+  return SCOPE_IDENTITY_FIELDS.map((field) => encodeURIComponent(normalized[field])).join("::");
 }
 
 export function scopesEqual(left, right) {
   try {
     const a = normalizeLearningScope(left);
     const b = normalizeLearningScope(right);
-    return SCOPE_FIELDS.every((field) => a[field] === b[field]);
+    return SCOPE_IDENTITY_FIELDS.every((field) => a[field] === b[field]);
   } catch {
     return false;
   }
@@ -115,7 +135,7 @@ export function scopesEqual(left, right) {
 export function assertExactLearningScope(expected, actual, label = "数据") {
   const expectedScope = normalizeLearningScope(expected);
   const actualScope = normalizeLearningScope(actual);
-  if (!SCOPE_FIELDS.every((field) => expectedScope[field] === actualScope[field])) {
+  if (!SCOPE_IDENTITY_FIELDS.every((field) => expectedScope[field] === actualScope[field])) {
     throw new RangeError(`${label}作用域不一致：期望 ${learningScopeKey(expectedScope)}，实际 ${learningScopeKey(actualScope)}`);
   }
   return actualScope;

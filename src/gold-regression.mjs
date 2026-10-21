@@ -10,6 +10,11 @@ export const QUALITY_ASSET_SCHEMA_VERSION = 1;
 export const GOLD_SET_STATUSES = Object.freeze(["draft", "active", "retired"]);
 export const REGRESSION_CANDIDATE_STATUSES = Object.freeze(["pending", "approved", "rejected", "retired"]);
 export const REGRESSION_SUITE_STATUSES = Object.freeze(["draft", "active", "retired"]);
+/**
+ * 回归案例的两个来源：人工批准的 QA 失败案例，以及外部审校回填时人工改动过的段落。
+ * 两者都来自人工终稿，机器自评通过的结果没有资格进回归集。
+ */
+export const REGRESSION_SOURCE_KINDS = Object.freeze(["qa_case", "external_review"]);
 
 const UNSAFE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const ISSUE_SEVERITIES = new Set(["critical", "major", "minor", "warning", "info"]);
@@ -69,6 +74,25 @@ function normalizeStringList(values, label) {
   if (values === undefined || values === null) return [];
   if (!Array.isArray(values)) throw new TypeError(`${label}必须是数组`);
   return [...new Set(values.map((value, index) => requiredText(value, `${label}第 ${index + 1} 项`)))];
+}
+
+/** null 与不可解析值保持 null：0 是合法数值，不能被当成"没数据"。 */
+function nullableNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/**
+ * 回归案例的来源键：同一个来源永远只允许存在一条案例，重建回归集时按它去重。
+ * QA 案例用 qa:<案例 ID>；外部审校用 external:<批次 ID>:<段落 ID>。
+ */
+export function regressionSourceKey(input = {}) {
+  const kind = optionalText(input.sourceKind) || (optionalText(input.sourceQaCaseId) ? "qa_case" : "external_review");
+  if (!REGRESSION_SOURCE_KINDS.includes(kind)) throw new TypeError(`回归案例来源类型无效：${kind || "空"}`);
+  if (kind === "qa_case") return `qa:${requiredText(input.sourceQaCaseId, "回归候选 sourceQaCaseId")}`;
+  const ref = isPlainObject(input.sourceRef) ? input.sourceRef : {};
+  return `external:${requiredText(ref.batchId, "外部审校案例 sourceRef.batchId")}:${requiredText(ref.segmentId, "外部审校案例 sourceRef.segmentId")}`;
 }
 
 function normalizeRequiredTerm(term, index) {
@@ -252,6 +276,8 @@ export function createRegressionCandidateFromQaCase(qaCase = {}, options = {}) {
     kind: "regression_candidate",
     id: optionalText(options.id) || `regression-candidate:${qaCaseId}`,
     status: "pending",
+    sourceKind: "qa_case",
+    sourceRef: { qaCaseId },
     scope: cloneJson(scope),
     scopeKey: learningScopeKey(scope),
     sourceQaCaseId: qaCaseId,
@@ -269,6 +295,7 @@ export function createRegressionCandidateFromQaCase(qaCase = {}, options = {}) {
     approval: null,
     metadata: cloneJson(isPlainObject(options.metadata) ? options.metadata : {})
   };
+  normalized.sourceKey = regressionSourceKey(normalized);
   normalized.fingerprint = fingerprint({
     scope: normalized.scope,
     sourceQaCaseId: normalized.sourceQaCaseId,
@@ -287,32 +314,47 @@ export function normalizeRegressionCandidate(input = {}) {
   const status = optionalText(input.status).toLowerCase();
   if (!REGRESSION_CANDIDATE_STATUSES.includes(status)) throw new TypeError(`回归候选状态无效：${status || "空"}`);
   const scope = normalizeLearningScope(input.scope || input);
+  const sourceKind = optionalText(input.sourceKind) || (optionalText(input.sourceQaCaseId) ? "qa_case" : "external_review");
+  if (!REGRESSION_SOURCE_KINDS.includes(sourceKind)) throw new TypeError(`回归候选来源类型无效：${sourceKind || "空"}`);
   const normalized = {
     ...cloneJson(input),
     schemaVersion: QUALITY_ASSET_SCHEMA_VERSION,
     kind: "regression_candidate",
     id: requiredText(input.id, "回归候选 id"),
     status,
+    sourceKind,
+    sourceRef: cloneJson(isPlainObject(input.sourceRef) ? input.sourceRef : {}),
     scope: cloneJson(scope),
     scopeKey: learningScopeKey(scope),
-    sourceQaCaseId: requiredText(input.sourceQaCaseId, "回归候选 sourceQaCaseId"),
+    // 外部审校回填没有 QA 案例 ID：来源身份由 sourceKind + sourceRef 承担。
+    sourceQaCaseId: sourceKind === "qa_case"
+      ? requiredText(input.sourceQaCaseId, "回归候选 sourceQaCaseId")
+      : optionalText(input.sourceQaCaseId),
     source: requiredText(input.source, "回归候选 source"),
     failingTranslation: requiredText(input.failingTranslation, "回归候选 failingTranslation"),
     expectedTranslation: requiredText(input.expectedTranslation, "回归候选 expectedTranslation"),
+    editDistance: nullableNumber(input.editDistance),
     issues: (input.issues || []).map(normalizeIssue),
     requiredTerms: (input.requiredTerms || []).map(normalizeRequiredTerm),
     facts: (input.facts || []).map(normalizeFact),
     approval: input.approval ? cloneJson(input.approval) : null
   };
+  normalized.sourceKey = optionalText(input.sourceKey) || regressionSourceKey(normalized);
   if (normalized.failingTranslation === normalized.expectedTranslation) throw new RangeError("回归候选错误译文与期望译文不能相同");
   if (["approved", "rejected"].includes(status)) {
-    if (!isPlainObject(normalized.approval)) throw new TypeError(`${status} 回归候选缺少人工审批记录`);
-    requiredText(normalized.approval.reviewer, "回归候选审批人");
+    // 审批记录保留决定与时间；署名是可选项，不再强制。
+    if (!isPlainObject(normalized.approval)) throw new TypeError(`${status} 回归候选缺少审批记录`);
+    normalized.approval = {
+      ...normalized.approval,
+      reviewer: optionalText(normalized.approval.reviewer),
+      note: optionalText(normalized.approval.note)
+    };
     const expectedDecision = status === "approved" ? "approve" : "reject";
     if (normalized.approval.decision !== expectedDecision) throw new RangeError(`回归候选状态与审批决定不一致：${status}`);
   }
   normalized.fingerprint = optionalText(input.fingerprint) || fingerprint({
     scope: normalized.scope,
+    sourceKey: normalized.sourceKey,
     sourceQaCaseId: normalized.sourceQaCaseId,
     source: normalized.source,
     failingTranslation: normalized.failingTranslation,
@@ -337,7 +379,7 @@ export function decideRegressionCandidate(input, { decision, reviewer, decidedAt
     status: normalizedDecision === "approve" ? "approved" : "rejected",
     approval: {
       decision: normalizedDecision,
-      reviewer: requiredText(reviewer, "回归候选审批人"),
+      reviewer: optionalText(reviewer),
       decidedAt: optionalText(decidedAt),
       note: normalizedNote
     }
@@ -348,10 +390,14 @@ function regressionCaseFromCandidate(candidate) {
   return {
     id: candidate.id,
     scope: cloneJson(candidate.scope),
+    sourceKind: candidate.sourceKind,
+    sourceKey: candidate.sourceKey,
+    sourceRef: cloneJson(candidate.sourceRef),
     sourceQaCaseId: candidate.sourceQaCaseId,
     source: candidate.source,
     failingTranslation: candidate.failingTranslation,
     expectedTranslation: candidate.expectedTranslation,
+    editDistance: candidate.editDistance ?? null,
     issues: cloneJson(candidate.issues),
     requiredTerms: cloneJson(candidate.requiredTerms),
     facts: cloneJson(candidate.facts),
@@ -376,8 +422,9 @@ export function normalizeRegressionSuite(input = {}) {
     assertExactLearningScope(scope, candidate.scope, `回归候选 ${candidate.id} `);
     if (candidate.status !== "approved") throw new RangeError(`回归候选 ${candidate.id} 尚未人工批准，不能进入 Regression Suite`);
   }
-  const qaIds = candidates.map((candidate) => candidate.sourceQaCaseId);
-  if (new Set(qaIds).size !== qaIds.length) throw new RangeError("Regression Suite 内存在重复 QA 案例");
+  // 去重按来源键：QA 案例与外部审校回填各有自己的身份，同一来源只能进一条案例。
+  const sourceKeys = candidates.map((candidate) => candidate.sourceKey);
+  if (new Set(sourceKeys).size !== sourceKeys.length) throw new RangeError("Regression Suite 内存在重复来源案例");
   if (lifecycle.status === "active" && !candidates.length) throw new RangeError("active Regression Suite 不能是空集");
   const cases = candidates.map(regressionCaseFromCandidate);
   const normalized = {

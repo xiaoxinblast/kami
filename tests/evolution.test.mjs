@@ -114,7 +114,7 @@ test("蒸馏产物固定写项目级，按项目能取到、按语体不再分�
   assert.equal(distilled.distilled.contentType, "general", "无论来源是什么语体，规范都写 general×general");
   assert.equal(distilled.distilled.domain, "general");
   const scoped = await listStyleProfiles("ja-JP", null, { projectId, contentType: "dialogue", domain: "game" });
-  assert.equal(scoped.styleProfiles.length, 0, "项目级规范不会挂在某个语体下");
+  assert.ok(scoped.styleProfiles.length >= 1, "传语体/领域也只是参考，不再把项目级规范挡在外面");
   const byProject = await listStyleProfiles("ja-JP", null, { projectId });
   assert.ok(byProject.styleProfiles.length >= 1, "按项目能取到这份规范");
 });

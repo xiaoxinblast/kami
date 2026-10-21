@@ -42,7 +42,7 @@ test("导入时存档、导出时补存档：服务端两条路径都接上了",
   assert.match(server, /if \(run && !run\.runnerOptions\?\.originalFile\) \{/u);
   // 前端：任务中心与翻译界面用同一套选择（缺存档时都给"选择原文件并写回"）
   const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.equal((app.match(/id: "pick-source"/gu) || []).length, 2, "翻译界面与任务中心都要有这个兜底选项");
+  assert.equal((app.match(/id: "pick-source"/gu) || []).length, 1, "所有入口共用同一个缺原文件兜底选项");
 });
 
 test("任务可完整删除：批次先中断再删，关联记录一起清理", async () => {

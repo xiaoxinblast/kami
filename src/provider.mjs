@@ -3,6 +3,8 @@ import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES } from "./config.mjs";
 import { glossCoverage, isGlossDumpLiteral, validateGlossTokens } from "./auto-qa.mjs";
 import { contextBriefMessages, parseContextBriefPart } from "./context-brief.mjs";
 import { consistencyMessages, parseConsistencyFindings } from "./consistency-check.mjs";
+import { parseTermAlign, parseTermSurvey, termAlignMessages, termSurveyMessages } from "./term-survey.mjs";
+import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
 
 const loadedProvider = loadProviderConfig();
 let persistence = loadedProvider.persistence;
@@ -874,7 +876,9 @@ export async function chatWithTools(messages, config = runtimeConfig, {
   const conversation = [...messages];
   const toolResults = [];
   let content = "";
-  for (let round = 0; round <= Math.max(0, maxRounds); round += 1) {
+  const lastRound = Math.max(0, maxRounds);
+  let exhausted = false;
+  for (let round = 0; round <= lastRound; round += 1) {
     const message = await chat(conversation, config, { ...options, tools, tool_choice: "auto", returnMessage: true, onToolsUnsupported });
     const calls = message.toolCalls || [];
     if (!calls.length) {
@@ -889,8 +893,11 @@ export async function chatWithTools(messages, config = runtimeConfig, {
       onActivity?.({ tool: call.function.name, refs: result?.refs?.length ?? 0 });
     }
     content = message.content || content;
+    // 轮次用尽时最后一轮仍在要工具：把这件事报给调用方。
+    // 以前这种情况只会返回空 content，调用方分不清"模型给了空译文"和"根本没答"。
+    if (round === lastRound) exhausted = true;
   }
-  return { content, toolResults };
+  return { content, toolResults, exhausted };
 }
 
 export function isEmbeddingConfigured() {
@@ -1239,6 +1246,65 @@ export async function proposeTranslationSkillWithModel({ locale, contentType, do
     reason: String(payload.reason || "根据近期翻译轨迹提出的增量改进").slice(0, 2_000),
     strategyPatch: payload.strategyPatch,
     evidenceIds: [...new Set(payload.evidenceIds)].slice(0, 100)
+  };
+}
+
+/**
+ * 门禁复盘驱动的技能改写：输入是复盘报告 + 失败案例（含人工终稿），
+ * 输出与「生成候选技能」完全同形状的策略补丁，之后走同一条净化与评测链路。
+ */
+export async function proposeSkillPatchFromGateReview({ locale, contentType = "general", domain = "general", project = "default", champion = null, review = {}, cases = [] }) {
+  const compact = (Array.isArray(cases) ? cases : []).slice(0, 40).map((item) => ({
+    caseId: item.caseId,
+    kind: item.kind,
+    source: String(item.source || "").slice(0, 300),
+    candidateTranslation: String(item.candidateTranslation || "").slice(0, 300),
+    expectedTranslation: String(item.expectedTranslation || "").slice(0, 300),
+    reason: String(item.reason || "").slice(0, 200)
+  }));
+  if (!compact.length) throw new Error("这次门禁没有失败样本，没有可用于改写的依据");
+  const patterns = (Array.isArray(review?.patterns) ? review.patterns : []).map((pattern) => ({
+    id: pattern.id, label: pattern.label, kind: pattern.kind, caseIds: pattern.caseIds,
+    reason: pattern.reason, suggestion: pattern.suggestion, proposedRule: pattern.proposedRule
+  }));
+  const messages = [
+    {
+      role: "system",
+      content: `你是本地化翻译流程改进员。这次给你的不是普通轨迹，而是一次**发版门禁的失败复盘**：候选技能在这些固定样本上仍然犯错，被人工终稿否决。你要据此提出一份保守、可评测的“候选翻译技能补丁”。不得更改目标语言，不得把个别术语硬编码进技能（术语由术语库负责），不得发明复盘里没有依据的规则。优先把复盘里的 proposedRule 变成可执行、可判定的规则。输出严格 JSON：{"name":"候选技能名","reason":"为什么提出该补丁","strategyPatch":{"prompting":{"additionalInstruction":"整体执行指导","additionalRules":["可执行规则"]},"retrieval":{"translationMemory":{"limit":5},"qaCases":{"limit":3}},"qa":{"minimumScore":90,"maximumRevisionAttempts":2},"context":{"includePreviousSegments":2,"includeNextSegments":1}},"evidenceIds":["失败案例的 caseId"]}`
+    },
+    { role: "user", content: JSON.stringify({ locale, contentType, domain, project, champion, review: { summary: review?.summary || "", patterns }, failures: compact }) }
+  ];
+  let content = await chat(messages, runtimeConfig, { temperature: 0.1, timeoutMs: 90_000, maxTokens: 4_000, requestLabel: "门禁复盘改写技能", responseFormat: { type: "json_object" } });
+  let payload = null;
+  let formatError = "";
+  const validCaseIds = new Set(compact.map((item) => String(item.caseId)));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const extracted = extractJsonObject(content);
+      if (!extracted) throw new Error(describeJsonFailure(content));
+      const parsed = JSON.parse(extracted);
+      if (!parsed.strategyPatch || typeof parsed.strategyPatch !== "object") throw new Error(`缺少 strategyPatch：${describeJsonFailure(content)}`);
+      const cited = (Array.isArray(parsed.evidenceIds) ? parsed.evidenceIds : []).map(String).filter((id) => validCaseIds.has(id));
+      // 没有引用任何一条真实失败案例的补丁等于凭空提案，按格式失败处理。
+      if (!cited.length) throw new Error("补丁没有引用任何一条失败案例（疑似把提示词里的示例抄了回来）");
+      payload = { ...parsed, evidenceIds: cited };
+      break;
+    } catch (error) {
+      formatError = error.message;
+      if (attempt === 1) break;
+      content = await chat([
+        ...messages,
+        { role: "assistant", content: String(content || "").slice(0, 4_000) },
+        { role: "user", content: "上一个回答不是可解析的严格 JSON。请只重新输出一个紧凑 JSON 对象，必须包含 name、reason、strategyPatch、evidenceIds；不要 Markdown、代码围栏、思考过程、注释或尾随逗号。" }
+      ], runtimeConfig, { temperature: 0, timeoutMs: 75_000, maxTokens: 3_000, requestLabel: "门禁复盘改写技能格式重试", responseFormat: { type: "json_object" } });
+    }
+  }
+  if (!payload) throw new Error(`门禁复盘改写技能模型返回格式无效：${formatError || "未知格式错误"}`);
+  return {
+    name: String(payload.name || `${LOCALE_NAMES[locale] || locale} ${contentType} 门禁复盘候选技能`).slice(0, 120),
+    reason: String(payload.reason || "根据门禁失败复盘提出的增量改进").slice(0, 2_000),
+    strategyPatch: payload.strategyPatch,
+    caseIds: [...new Set(payload.evidenceIds)].slice(0, 100)
   };
 }
 
@@ -2026,12 +2092,25 @@ export async function analyzeDocumentContextWithModel({ filename = "", format = 
   }
 }
 
-/** 交付前一致性核对：只报跨条目的漂移，不重复逐条 QA。 */
-export async function checkBatchConsistencyWithModel({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, onUsage = null } = {}) {
-  const messages = consistencyMessages({ filename, locale, purpose, pairs, part });
-  const content = await chat(messages, configForRole("main"), {
+/**
+ * 交付前一致性核对：只报跨条目的漂移，不重复逐条 QA。
+ * evidence 是风格指南 / 术语库命中 / 主参考 TM 译例；toolRunner 给模型按需查参考资料的机会。
+ */
+export async function checkBatchConsistencyWithModel({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, evidence = null, toolRunner = null, onUsage = null } = {}) {
+  const messages = consistencyMessages({ filename, locale, purpose, pairs, part, evidence });
+  const requestOptions = {
     temperature: 0.1, timeoutMs: 120_000, maxTokens: 2_000, requestLabel: "一致性检查", responseFormat: { type: "json_object" }, onUsage
-  });
+  };
+  // 参考资料按需查询：与翻译阶段共用同一套工具与预算，查不到就按已有证据判断。
+  const content = toolRunner?.tools?.length
+    ? (await chatWithTools(messages, configForRole("main"), {
+      ...requestOptions,
+      tools: toolRunner.tools,
+      maxRounds: Number(toolRunner.maxRounds) || 2,
+      executeTool: toolRunner.execute,
+      onActivity: toolRunner.onActivity
+    })).content
+    : await chat(messages, configForRole("main"), requestOptions);
   const validIds = pairs.map((pair) => String(pair.id));
   try {
     return parseConsistencyFindings(content, { validIds });
@@ -2051,6 +2130,81 @@ export async function checkBatchConsistencyWithModel({ filename = "", locale = "
   }
 }
 
+/**
+ * 术语普查：批次翻完后找出"像术语但库里多半没有"的说法。
+ * 只产出候选与依据，是否入库由回填时的人工终稿决定（见 src/term-survey.mjs）。
+ */
+export async function surveyTermsWithModel({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, existingTerms = [], onUsage = null } = {}) {
+  const messages = termSurveyMessages({ filename, locale, purpose, pairs, part });
+  const content = await chat(messages, configForRole("main"), {
+    temperature: 0.1, timeoutMs: 120_000, maxTokens: 2_000, requestLabel: "术语普查", responseFormat: { type: "json_object" }, onUsage
+  });
+  try {
+    return parseTermSurvey(content, { existingTerms });
+  } catch (error) {
+    const retry = await chat([
+      ...messages,
+      { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
+      { role: "user", content: '上一个回答不是可解析的严格 JSON。请只重新输出 {"terms":[]} 这种形状的紧凑 JSON，不要 Markdown 或解释。' }
+    ], configForRole("main"), {
+      temperature: 0, timeoutMs: 60_000, maxTokens: 2_000, requestLabel: "术语普查格式重试", responseFormat: { type: "json_object" }, onUsage
+    });
+    try {
+      return parseTermSurvey(retry, { existingTerms });
+    } catch {
+      throw new Error(`术语普查模型返回格式无效：${error.message}`);
+    }
+  }
+}
+
+/** 人工终稿改动了 AI 建议时，让模型在终稿里找出该说法的实际写法（逐字校验在解析里做）。 */
+export async function resolveSurveyTargetsWithModel({ locale = "zh-CN", scope = {}, items = [], onUsage = null } = {}) {
+  const messages = termAlignMessages({ locale, scope, items });
+  const content = await chat(messages, configForRole("main"), {
+    temperature: 0.1, timeoutMs: 120_000, maxTokens: 2_000, requestLabel: "术语对齐", responseFormat: { type: "json_object" }, onUsage
+  });
+  try {
+    return parseTermAlign(content, { items });
+  } catch (error) {
+    const retry = await chat([
+      ...messages,
+      { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
+      { role: "user", content: '上一个回答不是可解析的严格 JSON。请只重新输出 {"matches":[]} 这种形状的紧凑 JSON，不要 Markdown 或解释。' }
+    ], configForRole("main"), {
+      temperature: 0, timeoutMs: 60_000, maxTokens: 2_000, requestLabel: "术语对齐格式重试", responseFormat: { type: "json_object" }, onUsage
+    });
+    try {
+      return parseTermAlign(retry, { items });
+    } catch {
+      throw new Error(`术语对齐模型返回格式无效：${error.message}`);
+    }
+  }
+}
+
+/** 门禁失败复盘：把复发的失败按根因归类，给出术语建议或体例规则。 */
+export async function reviewGateFailuresWithModel({ locale = "zh-CN", scope = {}, cases = [], part = null, onUsage = null } = {}) {
+  const messages = gateReviewMessages({ locale, scope, cases, part });
+  const content = await chat(messages, configForRole("main"), {
+    temperature: 0.1, timeoutMs: 120_000, maxTokens: 3_000, requestLabel: "门禁复盘", responseFormat: { type: "json_object" }, onUsage
+  });
+  try {
+    return parseGateReview(content);
+  } catch (error) {
+    const retry = await chat([
+      ...messages,
+      { role: "assistant", content: String(content || "").slice(0, 4_000) || "(空白)" },
+      { role: "user", content: '上一个回答不是可解析的严格 JSON。请只重新输出 {"summary":"","patterns":[]} 这种形状的紧凑 JSON，不要 Markdown 或解释。' }
+    ], configForRole("main"), {
+      temperature: 0, timeoutMs: 60_000, maxTokens: 3_000, requestLabel: "门禁复盘格式重试", responseFormat: { type: "json_object" }, onUsage
+    });
+    try {
+      return parseGateReview(retry);
+    } catch {
+      throw new Error(`门禁复盘模型返回格式无效：${error.message}`);
+    }
+  }
+}
+
 export async function translateWithReflection(contextPack, { reflect = true, onUsage = null, temperature = undefined, seed = undefined, onSeedUnsupported = null, model = "", modelRole = "main", toolRunner = null } = {}) {
   const rhymeLike = contextPack?.rhymeLike === true;
   const batchVerse = contextPack?.batchVerse?.active === true;
@@ -2060,15 +2214,31 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
   const initialMessages = [{ role: "user", content: packPrompt(contextPack) }];
   const initialOptions = { timeoutMs: 75_000, requestLabel: "翻译", temperature: translationTemperature, seed, onSeedUnsupported, onUsage };
   // 参考资料按需查询：只挂在初译这一步，自检与修订不重复查询，避免成本失控。
-  const initial = toolRunner?.tools?.length
-    ? (await chatWithTools(initialMessages, callConfig, {
+  const firstPass = toolRunner?.tools?.length
+    ? await chatWithTools(initialMessages, callConfig, {
       ...initialOptions,
       tools: toolRunner.tools,
       maxRounds: Number(toolRunner.maxRounds) || 2,
       executeTool: toolRunner.execute,
       onActivity: toolRunner.onActivity
-    })).content
-    : await chat(initialMessages, callConfig, initialOptions);
+    })
+    : { content: await chat(initialMessages, callConfig, initialOptions), exhausted: false };
+  let initial = String(firstPass.content || "").trim();
+  if (!initial) {
+    // 模型把轮次全花在查参考资料上（或直接吐了空白）时，以前这个空串会被当成译文：
+    // 评测把它记成"候选漏译、质量 30 分"，生产批次把它记成"这一段翻好了"。
+    // 这里补一轮不带工具的直译，明确告诉它不要再查资料、直接给译文。
+    const reason = firstPass.exhausted ? "上一轮把工具轮次用完了还没给译文" : "上一轮返回了空白";
+    initial = String(await chat([
+      { role: "system", content: "你是日语到简体中文的本地化译者。不要再调用任何工具、不要输出解释或推理过程，直接给出一行最终译文。" },
+      { role: "user", content: `${packPrompt(contextPack)}\n\n补充要求（${reason}）：请只输出这一条的简体中文译文本身。` }
+    ], callConfig, { ...initialOptions, requestLabel: "翻译（空译文重试）", tools: undefined })).trim();
+  }
+  if (!initial) {
+    const error = new Error("模型没有返回译文（连续两次都是空白输出）");
+    error.code = "empty_translation";
+    throw error;
+  }
   if (!reflect && !rhymeLike) return { initial, translation: initial, reflection: "" };
   if (rhymeLike) {
     // 韵文本地化专用通道：初译只作参考，要求模型以目标语言玩家视角再创作，
@@ -2077,18 +2247,32 @@ export async function translateWithReflection(contextPack, { reflect = true, onU
       { role: "system", content: "你是游戏文案韵文本地化师。把日语顺口溜/韵文改写为自然、节奏鲜明的简体中文短句：保留原意与情绪（自嘲、洒脱、吆喝等），重现节奏、叠词与韵脚，允许换用中文惯用句和谚语；严禁机械逐字直译，严禁把闲散语气译成命令口吻。只输出一行最终译文，不解释。\n\n改写示范（达到这个质量才算合格）：\n原文：とことこ歩いて、ぶらぶら遊んで、銭のためなら馬にも牛にも。\n译文：走走走，游游游，甘为铜钱做马牛。" },
       { role: "user", content: `原文：${contextPack.source}\n参考技巧：日语叠词、拟态词和反复句可改写为中文叠词、四字结构或顺口句；尾韵可用同韵脚或节奏呼应。不要参考任何现成译文，直接从原文创作。` }
     ], callConfig, { temperature: translationTemperature, seed, onSeedUnsupported, timeoutMs: 75_000, requestLabel: "韵文本地化", onUsage });
-    return { initial, translation: localized, reflection: "rhyme-localized" };
+    return { initial, translation: requireNonEmptyTranslation(localized, initial, "韵文本地化"), reflection: "rhyme-localized" };
   }
   const reflection = await chat([
     { role: "system", content: "你是严格的双语本地化审校。只指出漏译、误译、术语、事实、语体、翻译腔和韵律/重复结构丢失问题（原文押韵、对仗或口号式重复时，译文须自然重现节奏与语气）；若上下文带有同批已定稿译文，还要检查句式与风格是否保持一致；没有问题则回答 PASS。" },
     { role: "user", content: `${contextPackText(contextPack, "reflect")}\n\n初译：\n${initial}` }
   ], callConfig, { temperature: 0.35, timeoutMs: 60_000, requestLabel: "翻译自检", onUsage });
   if (/^PASS[。.!]?$/i.test(reflection)) return { initial, translation: initial, reflection };
-  const translation = await chat([
+  const revised = await chat([
     { role: "system", content: "你是最终修订译者。根据审校意见做最小必要修改，严格保留事实、格式、术语的语境判断结果和明确硬约束。只输出最终译文。" },
     { role: "user", content: `${contextPackText(contextPack, "reflect")}\n\n初译：${initial}\n\n审校意见：${reflection}` }
   ], callConfig, { temperature: 0.15, timeoutMs: 75_000, requestLabel: "翻译修订", onUsage });
-  return { initial, translation, reflection };
+  return { initial, translation: requireNonEmptyTranslation(revised, initial, "翻译修订"), reflection };
+}
+
+/**
+ * 修订/再创作返回空白时退回初译（初译已经校验过非空）。
+ * 两边都空就抛带 code 的错误，让上层把它当"这一组没跑成"，而不是当译文。
+ */
+function requireNonEmptyTranslation(value, fallback, label) {
+  const text = String(value || "").trim();
+  if (text) return value;
+  const initial = String(fallback || "").trim();
+  if (initial) return fallback;
+  const error = new Error(`${label}没有返回译文（连续两次都是空白输出）`);
+  error.code = "empty_translation";
+  throw error;
 }
 
 function uniqueCandidateTexts(items = []) {

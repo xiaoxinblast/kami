@@ -29,6 +29,18 @@ test("正在跑的评测是页面状态，不是按钮上的临时文字", () =>
   assert.doesNotMatch(app, /async function watchEvaluationJob/u, "旧的按钮文字轮询已经删掉");
 });
 
+/**
+ * 事故：模型工具轮次用尽没给译文，空串被当成"候选的译文"计分，用户只看到
+ * "硬错误变多"，以为候选质量差。现在评测报告单独说清"几组没跑成、几组是没产出译文"。
+ */
+test("评测板块单独说明样本执行情况：几组没跑成、几组是模型没产出译文", () => {
+  assert.match(app, /const benchmark = result\.benchmark \|\| \{\};/u);
+  assert.match(app, /样本执行：\$\{completedPairs\} \/ \$\{requestedPairs\} 组完成/u);
+  assert.match(app, /其中 \$\{missingTranslations\} 组是模型没有产出译文，可只重试失败样本/u);
+  assert.match(app, /class="learning-evaluation-samples"/u);
+  assert.match(styles, /\.learning-evaluation-samples/u);
+});
+
 test("通知中心：铃铛、未读角标与面板都在页面里", () => {
   assert.match(html, /id="notificationBell"/u);
   assert.match(html, /id="notificationBadge"/u);

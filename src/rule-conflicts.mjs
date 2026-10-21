@@ -66,18 +66,65 @@ export function ruleDirection(rule) {
 }
 
 /**
- * Normalize whatever a caller has into one comparable shape.
- * `origin` is what a human needs to know to act on the conflict: which of the
- * three sources the rule came from and how much weight it carries.
+ * 优先级（数字越小越优先）：人工风格指南 > 蒸馏规范 > 技能规则 > 译者画像。
+ * 人工指南是用户自己写的规则，冲突一律以它为准。
  */
-export function collectPromptRules({ styleProfile = null, translationSkill = null, userProfile = null } = {}) {
+export const RULE_ORIGIN_PRIORITY = Object.freeze({ guide: 0, style: 1, skill: 2, profile: 3 });
+
+/** 人工风格指南是一整篇文档：按行/编号拆成可比对条目，最多 60 条。 */
+export function splitGuideRules(instruction = "", { maximum = 60, maxLength = 200 } = {}) {
+  // 整篇没换行的指南很常见：超长行再按句末标点切，仍超长才硬切。
+  const clean = (value) => String(value || "").replace(/^\s*(?:[-*·•]|\d+[.、)]|\d+\s*[）)])\s*/u, "").trim();
+  const pieces = [];
+  for (const line of String(instruction || "").split(/\r?\n+/u).map(clean).filter(Boolean)) {
+    if ([...line].length <= maxLength) {
+      pieces.push(line);
+      continue;
+    }
+    for (const sentence of line.split(/(?<=[。．.！!？?；;])\s*/u).map(clean).filter(Boolean)) {
+      if ([...sentence].length <= maxLength) {
+        pieces.push(sentence);
+        continue;
+      }
+      const characters = [...sentence];
+      for (let index = 0; index < characters.length; index += maxLength) {
+        pieces.push(characters.slice(index, index + maxLength).join(""));
+      }
+    }
+  }
+  return pieces.slice(0, maximum);
+}
+
+/**
+ * Normalize whatever a caller has into one comparable shape.
+ * `origin`/`originLabel`/`priority` 是人处置冲突时要知道的：这条规则来自哪一方、谁让位。
+ * skills 传数组（champion + 全部候选），每条规则带上 skillId/version/status。
+ */
+export function collectPromptRules({ humanGuide = null, styleProfile = null, translationSkill = null, skills = null, userProfile = null } = {}) {
   const rules = [];
+  if (humanGuide && text(humanGuide.instruction)) {
+    splitGuideRules(humanGuide.instruction).forEach((rule, index) => {
+      rules.push({
+        key: `guide:${index}`,
+        origin: "guide",
+        originLabel: "人工风格指南",
+        priority: RULE_ORIGIN_PRIORITY.guide,
+        id: String(index),
+        category: "人工指南",
+        rule,
+        evidenceCount: 0,
+        rounds: 0,
+        guideId: String(humanGuide.id || "")
+      });
+    });
+  }
   for (const rule of Array.isArray(styleProfile?.rules) ? styleProfile.rules : []) {
     if (rule?.status === "retired" || !text(rule?.rule)) continue;
     rules.push({
       key: `style:${rule.id}`,
       origin: "style",
-      originLabel: "风格规范",
+      originLabel: "蒸馏规范",
+      priority: RULE_ORIGIN_PRIORITY.style,
       id: rule.id,
       category: text(rule.category) || "其他",
       rule: text(rule.rule),
@@ -85,28 +132,36 @@ export function collectPromptRules({ styleProfile = null, translationSkill = nul
       rounds: Math.max(0, Number(rule.rounds) || 0)
     });
   }
-  const additional = translationSkill?.strategy?.prompting?.additionalRules;
-  (Array.isArray(additional) ? additional : []).forEach((rule, index) => {
-    if (!text(rule)) return;
-    rules.push({
-      key: `skill:${index}`,
-      origin: "skill",
-      originLabel: "技能附加规则",
-      id: String(index),
-      category: "技能",
-      rule: text(rule),
-      // 技能规则没有证据计数：它靠配对评测晋升，权重单独处理。
-      evidenceCount: 0,
-      rounds: 0,
-      skillId: String(translationSkill?.id || ""),
-      skillVersion: Number(translationSkill?.version) || 0
+  const skillList = Array.isArray(skills) && skills.length ? skills : (translationSkill ? [translationSkill] : []);
+  for (const skill of skillList) {
+    const additional = skill?.strategy?.prompting?.additionalRules;
+    (Array.isArray(additional) ? additional : []).forEach((rule, index) => {
+      if (!text(rule)) return;
+      const version = Number(skill?.version) || 0;
+      const status = text(skill?.status) || "champion";
+      rules.push({
+        key: `skill:${skill?.id || ""}:${index}`,
+        origin: "skill",
+        originLabel: `技能规则 v${version || "?"}（${SKILL_STATUS_LABELS[status] || status}）`,
+        priority: RULE_ORIGIN_PRIORITY.skill,
+        id: String(index),
+        category: "技能",
+        rule: text(rule),
+        // 技能规则没有证据计数：它靠配对评测晋升，权重单独处理。
+        evidenceCount: 0,
+        rounds: 0,
+        skillId: String(skill?.id || ""),
+        skillVersion: version,
+        skillStatus: status
+      });
     });
-  });
+  }
   if (text(userProfile?.instruction)) {
     rules.push({
       key: "profile:instruction",
       origin: "profile",
       originLabel: "译者画像",
+      priority: RULE_ORIGIN_PRIORITY.profile,
       id: String(userProfile.id || ""),
       category: "画像",
       rule: text(userProfile.instruction),
@@ -116,6 +171,8 @@ export function collectPromptRules({ styleProfile = null, translationSkill = nul
   }
   return rules;
 }
+
+const SKILL_STATUS_LABELS = Object.freeze({ champion: "生效版本", challenger: "候选", draft: "草稿", inactive: "已停用", rejected: "已拒绝" });
 
 /**
  * Deterministic first pass.
@@ -173,17 +230,36 @@ export function findConflictCandidates(rules, { maxPairs = 40 } = {}) {
  */
 export const SKILL_RULE_EQUIVALENT_EVIDENCE = 50;
 
+const ORIGIN_PRIORITY_FALLBACK = 9;
+
+function originPriority(rule) {
+  const explicit = Number(rule?.priority);
+  if (Number.isFinite(explicit)) return explicit;
+  return RULE_ORIGIN_PRIORITY[rule?.origin] ?? ORIGIN_PRIORITY_FALLBACK;
+}
+
 export function weighConflict(left, right) {
   const weight = (rule) => (rule.origin === "skill" ? SKILL_RULE_EQUIVALENT_EVIDENCE : rule.evidenceCount) + rule.rounds;
+  const leftPriority = originPriority(left);
+  const rightPriority = originPriority(right);
   const leftWeight = weight(left);
   const rightWeight = weight(right);
+  // 人工风格指南恒胜；其余按来源优先级（蒸馏规范 > 技能规则 > 译者画像），同级才看证据强弱。
+  if (leftPriority !== rightPriority) {
+    const winner = leftPriority < rightPriority ? left : right;
+    const loser = winner === left ? right : left;
+    return {
+      winner, loser, leftWeight, rightWeight, leftPriority, rightPriority,
+      verdict: `${winner.originLabel}优先于${loser.originLabel}`
+    };
+  }
   if (leftWeight === rightWeight) {
-    return { winner: null, loser: null, leftWeight, rightWeight, verdict: "势均力敌，需要人工判断" };
+    return { winner: null, loser: null, leftWeight, rightWeight, leftPriority, rightPriority, verdict: "势均力敌，需要人工判断" };
   }
   const winner = leftWeight > rightWeight ? left : right;
   const loser = leftWeight > rightWeight ? right : left;
   return {
-    winner, loser, leftWeight, rightWeight,
+    winner, loser, leftWeight, rightWeight, leftPriority, rightPriority,
     verdict: `${winner.originLabel}的规则支撑更强（${Math.max(leftWeight, rightWeight)} vs ${Math.min(leftWeight, rightWeight)}）`
   };
 }
@@ -199,17 +275,29 @@ export function weighConflict(left, right) {
 export function planConflictResolution(conflict) {
   const { winner, loser, verdict } = weighConflict(conflict.left, conflict.right);
   if (!winner) return { action: "review", reason: verdict, conflict };
-  if (loser.origin !== "style") {
+  if (loser.origin === "style") {
     return {
-      action: "review",
-      reason: `${verdict}，但需要退让的是${loser.originLabel}，只能人工处理（技能规则须经评测晋升，画像须走草稿流程）`,
+      action: "retire-style-rule",
+      ruleId: loser.id,
+      reason: `与${winner.originLabel}冲突：${winner.rule.slice(0, 60)}；${verdict}`,
       conflict, winner, loser
     };
   }
+  // 候选技能（challenger/draft）还没生效，冲突时可以直接停用；生效版本只能走回滚或新候选。
+  if (loser.origin === "skill" && ["challenger", "draft"].includes(String(loser.skillStatus || ""))) {
+    return {
+      action: "disable-skill",
+      skillId: loser.skillId,
+      reason: `与${winner.originLabel}冲突，且该技能尚未生效，可直接停用：${verdict}`,
+      conflict, winner, loser
+    };
+  }
+  const hint = loser.origin === "skill"
+    ? "生效版本的技能规则只能走回滚或新候选，不能就地改写"
+    : loser.origin === "guide" ? "人工风格指南要改只能重新导入一份" : "译者画像须走草稿流程";
   return {
-    action: "retire-style-rule",
-    ruleId: loser.id,
-    reason: `与${winner.originLabel}冲突：${winner.rule.slice(0, 60)}；${verdict}`,
+    action: "review",
+    reason: `${verdict}，但需要退让的是${loser.originLabel}，只能人工处理（${hint}）`,
     conflict, winner, loser
   };
 }

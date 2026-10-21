@@ -4,6 +4,7 @@ import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { exportBatchDocument, prepareBatchDocument, segmentLongText, splitBatchSubBatches } from "../src/batch-document.mjs";
 import { extractXliffPairs } from "../src/xliff-document.mjs";
+import { csvValues, parseCsvDocument } from "../src/csv-document.mjs";
 
 test("批次只按完整句子或自然段切分，不使用固定字数", () => {
   const source = "第一句内容很长。第二句继续说明！第三句作为结尾。";
@@ -245,7 +246,7 @@ test("写回原文件缺原文件时明确报错，不静默换格式", async ()
   );
 });
 
-test("XLSX 只抽取日语单元格并在原位置写回简体中文译文", async () => {
+test("XLSX 只抽取日语单元格：没有译文列就在末尾新增一列，原文原样保留", async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("剧情");
   sheet.getCell("A1").value = "日语原文";
@@ -266,8 +267,35 @@ test("XLSX 只抽取日语单元格并在原位置写回简体中文译文", asy
   });
   const result = new ExcelJS.Workbook();
   await result.xlsx.load(Buffer.from(exported.base64, "base64"));
-  assert.equal(result.getWorksheet("剧情").getCell("A2").value, "欢迎回来！");
-  assert.equal(result.getWorksheet("剧情").getCell("B2").value, "保留");
+  const sheet2 = result.getWorksheet("剧情");
+  assert.equal(sheet2.getCell("A2").value, "おかえりなさい！", "原文列不能被译文覆盖");
+  assert.equal(sheet2.getCell("B2").value, "保留");
+  assert.equal(sheet2.getCell("C1").value, "译文", "追加列要有列头");
+  assert.equal(sheet2.getCell("C2").value, "欢迎回来！");
+});
+
+test("XLSX 有译文列时写进那一列，不再新增", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("剧情");
+  sheet.addRow(["日语原文", "说明", "译文"]);
+  sheet.addRow(["おかえりなさい！", "开场", ""]);
+  const original = Buffer.from(await workbook.xlsx.writeBuffer());
+  const prepared = await prepareBatchDocument({ filename: "lines.xlsx", base64: original.toString("base64") });
+  assert.equal(prepared.structure.translationColumns["剧情"].hasTranslationColumn, true);
+  const exported = await exportBatchDocument({
+    filename: prepared.filename,
+    locale: "zh-CN",
+    format: prepared.format,
+    structure: prepared.structure,
+    base64: original.toString("base64"),
+    segments: prepared.segments.map((segment) => ({ ...segment, translation: "欢迎回来！" }))
+  });
+  const result = new ExcelJS.Workbook();
+  await result.xlsx.load(Buffer.from(exported.base64, "base64"));
+  const out = result.getWorksheet("剧情");
+  assert.equal(out.getCell("A2").value, "おかえりなさい！");
+  assert.equal(out.getCell("C2").value, "欢迎回来！", "译文写进已有译文列");
+  assert.equal(out.getCell("D1").value ?? null, null, "不该再多一列");
 });
 
 test("XLSX 只把日语正文列做成翻译单元，行内字段作为上下文", async () => {
@@ -318,7 +346,7 @@ test("XLSX 可采用 AI 返回的无表头列角色", async () => {
   assert.deepEqual(prepared.segments[0].context.metadata.map((item) => item.value), ["官网标题", "80字符内"]);
 });
 
-test("CSV 有表头时复用日中表格结构识别并原位回写译文", async () => {
+test("CSV 有表头时复用日中表格结构识别，译文写到末尾新增列", async () => {
   const source = '\uFEFF位置,字数限制,Japanese,Chinese Simp.\r\n官网标题,80字符内,"8月になり、セールが始まります！","八月已至，折扣活动即将开启！"\r\n';
   const base64 = Buffer.from(source, "utf8").toString("base64");
   const prepared = await prepareBatchDocument({ filename: "delivery.csv", base64, segmentationMode: "paragraph" });
@@ -339,12 +367,12 @@ test("CSV 有表头时复用日中表格结构识别并原位回写译文", asyn
     segments: prepared.segments.map((segment) => ({ ...segment, translation: "八月已至，折扣活动即将开启！" }))
   });
   const output = Buffer.from(exported.base64, "base64").toString("utf8");
-  assert.equal(output, '\uFEFF位置,字数限制,Japanese,Chinese Simp.\r\n官网标题,80字符内,"八月已至，折扣活动即将开启！","八月已至，折扣活动即将开启！"\r\n');
+  assert.equal(output, '\uFEFF位置,字数限制,Japanese,Chinese Simp.,译文\r\n官网标题,80字符内,"8月になり、セールが始まります！","八月已至，折扣活动即将开启！",八月已至，折扣活动即将开启！\r\n');
   assert.equal(exported.filename, "delivery.zh-CN.csv");
   assert.equal(exported.mimeType, "text/csv; charset=utf-8");
 });
 
-test("无表头分号 CSV 自动找到正文列且不改动其他列", async () => {
+test("无表头分号 CSV 自动找到正文列：译文追加到末尾，其他列一个字都不动", async () => {
   const source = "海外社媒;80字符内;八月已至，折扣活动即将开启！完成任务还可领取奖励。;August sale soon\n官网标题;30字符内;限时折扣现已开启。;Sale now";
   const prepared = await prepareBatchDocument({ filename: "headerless.csv", text: source, segmentationMode: "paragraph" });
 
@@ -360,10 +388,14 @@ test("无表头分号 CSV 自动找到正文列且不改动其他列", async () 
     text: source,
     segments: prepared.segments.map((segment) => ({ ...segment, translation: `번역 ${segment.index}` }))
   });
-  assert.equal(Buffer.from(exported.base64, "base64").toString("utf8"), "海外社媒;80字符内;번역 1;August sale soon\n官网标题;30字符内;번역 2;Sale now");
+  assert.equal(
+    Buffer.from(exported.base64, "base64").toString("utf8"),
+    "海外社媒;80字符内;八月已至，折扣活动即将开启！完成任务还可领取奖励。;August sale soon;번역 1\n官网标题;30字符内;限时折扣现已开启。;Sale now;번역 2",
+    "无表头时不能往第一行写列头，原文列也必须保留"
+  );
 });
 
-test("CSV 支持带换行的引号字段并仅重写目标单元格", async () => {
+test("CSV 支持带换行的引号字段：原文保留，译文含引号与换行也能安全写出", async () => {
   const source = '位置,Chinese Simp.,English\r\n剧情,"第一句。\n第二句。","Existing translation"\r\n';
   const prepared = await prepareBatchDocument({ filename: "multiline.csv", text: source, segmentationMode: "paragraph" });
   assert.equal(prepared.segments.length, 1);
@@ -377,7 +409,11 @@ test("CSV 支持带换行的引号字段并仅重写目标单元格", async () =
     text: source,
     segments: [{ ...prepared.segments[0], translation: 'บรรทัดหนึ่ง,\n"บรรทัดสอง"' }]
   });
-  assert.equal(Buffer.from(exported.base64, "base64").toString("utf8"), '位置,Chinese Simp.,English\r\n剧情,"บรรทัดหนึ่ง,\n""บรรทัดสอง""","Existing translation"\r\n');
+  const rows = csvValues(parseCsvDocument(Buffer.from(exported.base64, "base64").toString("utf8")));
+  assert.equal(rows[0].length, 4, "原三列 + 末尾新增译文列");
+  assert.equal(String(rows[1][1]), "第一句。\n第二句。", "带换行的原文列一个字都不能变");
+  assert.equal(String(rows[1][3]), 'บรรทัดหนึ่ง,\n"บรรทัดสอง"');
+  assert.equal(String(rows[1][2]), "Existing translation");
 });
 
 test("单列 CSV 的日语表头不会被当作待翻译正文", async () => {

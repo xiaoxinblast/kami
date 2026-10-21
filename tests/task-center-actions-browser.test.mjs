@@ -142,13 +142,50 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
           })
         });
       }
-      if (url.pathname === "/api/batch/export") {
+      // 批次页导出也走后台任务：任务中心能看到进度，完成后从导出目录取文件。
+      if (url.pathname === "/api/tasks/batch-2/export" && request.method() === "POST") {
         actions.push(`${request.method()} ${url.pathname}`);
         exportBody = JSON.parse(request.postData() || "{}");
         return route.fulfill({
-          status: 200, contentType: "application/json",
-          body: JSON.stringify({ filename: "interrupted.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", base64: Buffer.from("test").toString("base64") })
+          status: 202, contentType: "application/json",
+          body: JSON.stringify({ backgroundTaskId: "task-export-batch2", message: "导出已进入任务中心后台处理" })
         });
+      }
+      if (url.pathname === "/api/background-tasks/task-export-batch2") {
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            id: "task-export-batch2", taskType: "batch_export", status: "completed",
+            progress: { phase: "completed", message: "导出完成", percent: 100, completed: 1, total: 1 },
+            payload: { filename: "interrupted.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", downloadUrl: "/api/export-tasks/task-export-batch2/download" }
+          })
+        });
+      }
+      // 返回实际文件字节，错误响应必须作为失败呈现。
+      if (url.pathname === "/api/export-tasks/task-export-batch2/download") {
+        return route.fulfill({ status: 200, contentType: "application/octet-stream", body: Buffer.from("test export bytes") });
+      }
+      // 任务中心的导出按钮同样走后台任务（与翻译界面同一个端点）。
+      if (url.pathname === "/api/tasks/batch-1/export" && request.method() === "POST") {
+        actions.push(`${request.method()} ${url.pathname}`);
+        exportBody = JSON.parse(request.postData() || "{}");
+        return route.fulfill({
+          status: 202, contentType: "application/json",
+          body: JSON.stringify({ backgroundTaskId: "task-export-batch1", message: "导出已进入任务中心后台处理" })
+        });
+      }
+      if (url.pathname === "/api/background-tasks/task-export-batch1") {
+        return route.fulfill({
+          status: 200, contentType: "application/json",
+          body: JSON.stringify({
+            id: "task-export-batch1", taskType: "batch_export", status: "completed",
+            progress: { phase: "completed", message: "导出完成", percent: 100, completed: 1, total: 1 },
+            payload: { filename: "dialogue.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", downloadUrl: "/api/export-tasks/task-export-batch1/download" }
+          })
+        });
+      }
+      if (url.pathname === "/api/export-tasks/task-export-batch1/download") {
+        return route.fulfill({ status: 200, contentType: "application/octet-stream", body: Buffer.from("test export bytes") });
       }
       if (url.pathname.startsWith("/api/batch/run/") || url.pathname.includes("/cancel")) {
         actions.push(`${request.method()} ${url.pathname}`);
@@ -213,6 +250,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await interruptedRow.locator('[data-action="import-review"]').click();
     await page.locator("#reviewImportFile").setInputFiles({ name: "reviewed.mqxliff", mimeType: "application/xml", buffer: Buffer.from("<xliff/>") });
     await page.waitForSelector("#reviewImportDialog[open]");
+    await page.waitForFunction(() => /已回填/.test(document.querySelector("#reviewImportSummary")?.textContent || ""));
     const summary = await page.locator("#reviewImportSummary").textContent();
     assert.match(summary, /已回填 4 \/ 5 条/u);
     assert.match(summary, /写入主 TM 4 条/u);
@@ -244,7 +282,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/export-options-dialog.png`, animations: "disabled" });
     }
-    await page.locator('[data-export-option="translation-only"]').click();
+    await page.locator('[data-export-option="translation"]').click();
     await page.waitForSelector("#exportDialog[open]");
     assert.match(await page.locator("#exportDialogTitle").textContent(), /导出被 QA 门禁挡住/u);
     assert.match(await page.locator("#exportDialogSummary").textContent(), /规则层的硬问题/u);
@@ -260,8 +298,9 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     } catch (error) {
       throw new Error(`${error.message}；toast：${await page.locator("#toast").textContent()}；页面异常：${errors.join(" | ") || "无"}`);
     }
-    assert.ok(actions.some((item) => item.includes("/api/batch/export")), `强制导出要打到导出接口：${actions.join(" | ")}`);
-    assert.equal(exportBody?.mode, "translation-only", "选择的导出方式要带到接口");
+    assert.ok(actions.some((item) => item.includes("/api/tasks/batch-2/export")), `强制导出要打到导出接口：${actions.join(" | ")}`);
+    assert.equal(exportBody?.mode, "translation", "选择的导出方式要带到接口");
+    assert.equal(exportBody?.sourceFormat, "xlsx", "原格式要带上，导出才知道写回什么结构");
     assert.match(await page.locator("#exportDialogSummary").textContent(), /仅译文/u);
     await page.locator('#exportDialog .icon-button[data-close="exportDialog"]').click();
 
@@ -271,9 +310,9 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.locator('#taskList .task-row[data-task-id="batch-1"] [data-action="export-task"]').click();
     await page.waitForSelector("#exportOptionsDialog[open]");
     assert.match(await page.locator("#exportOptionsSummary").textContent(), /原文件已随批次存档/u);
-    assert.equal(await page.locator('[data-export-option="in-place"]').count(), 1, "有存档就直接给「写回原文件」");
+    assert.equal(await page.locator('[data-export-option="bilingual"]').count(), 1, "有存档就直接给「写回原文件」");
     assert.equal(await page.locator('[data-export-option="pick-source"]').count(), 0, "不该再要求用户重新选原文件");
-    await page.locator('[data-export-option="in-place"]').click();
+    await page.locator('[data-export-option="bilingual"]').click();
     await page.waitForSelector("#exportDialog[open]");
     assert.match(await page.locator("#exportDialogTitle").textContent(), /导出被 QA 门禁挡住/u);
     await page.locator("#exportDialogForce").click();
@@ -282,8 +321,8 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     } catch (error) {
       throw new Error(`${error.message}；toast：${await page.locator("#toast").textContent()}；页面异常：${errors.join(" | ") || "无"}`);
     }
-    assert.equal(exportBody?.mode, "in-place", "写回模式要传到接口");
-    assert.equal(exportBody?.batchId, "batch-1", "带上批次号，服务端才能用它存档的原文件写回");
+    assert.equal(exportBody?.mode, "bilingual", "写回模式要传到接口");
+    assert.equal(exportBody?.projectId, "project-1", "带上项目号，服务端据此校验批次归属");
     assert.equal(exportBody?.base64, undefined, "有存档时不用前端再传原文件");
     await page.locator('#exportDialog .icon-button[data-close="exportDialog"]').click();
 
@@ -292,7 +331,7 @@ test("任务中心提供暂停、继续、中断，并且点击打到对应接�
     await page.waitForSelector("#exportOptionsDialog[open]");
     assert.match(await page.locator("#exportOptionsSummary").textContent(), /没有原文件存档/u);
     assert.equal(await page.locator('[data-export-option="pick-source"]').count(), 1, "老批次要能补选原文件");
-    assert.equal(await page.locator('[data-export-option="in-place"]').count(), 0);
+    assert.equal(await page.locator('[data-export-option="bilingual"]').count(), 0);
     await page.locator('#exportOptionsDialog .icon-button[data-close="exportOptionsDialog"]').click();
 
     // 待处理定位：任务中心那行「N 条待处理」可点，打开批次并跳到第一条

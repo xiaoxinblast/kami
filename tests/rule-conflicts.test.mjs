@@ -7,6 +7,7 @@ import {
   planConflictResolution,
   ruleAspects,
   ruleDirection,
+  splitGuideRules,
   weighConflict
 } from "../src/rule-conflicts.mjs";
 import { createConflictScanner } from "../src/conflict-scan.mjs";
@@ -21,14 +22,27 @@ const styleProfile = {
 };
 const translationSkill = { id: "s1", version: 3, strategy: { prompting: { additionalRules: ["句尾一律改用だ・である体"] } } };
 
-test("三个提示词来源都被纳入比较，退休规则排除在外", () => {
+test("四个提示词来源都被纳入比较，退休规则排除在外", () => {
   const rules = collectPromptRules({
+    humanGuide: { id: "g1", instruction: "1. 句尾统一用简体\n2. 不要使用「您」" },
     styleProfile,
-    translationSkill,
+    skills: [{ id: "s1", version: 3, status: "challenger", strategy: { prompting: { additionalRules: ["句尾一律改用だ・である体"] } } }],
     userProfile: { id: "u1", instruction: "整体保持亲切口语，避免书面腔", evidenceCount: 12 }
   });
-  assert.deepEqual(rules.map((rule) => rule.origin).sort(), ["profile", "skill", "style", "style", "style"]);
+  assert.deepEqual(rules.map((rule) => rule.origin).sort(), ["guide", "guide", "profile", "skill", "style", "style", "style"]);
+  assert.equal(rules.find((rule) => rule.origin === "guide").originLabel, "人工风格指南");
+  assert.match(rules.find((rule) => rule.origin === "skill").originLabel, /候选/u, "技能规则要标明版本与状态");
+  assert.equal(rules.find((rule) => rule.origin === "style").originLabel, "蒸馏规范");
   assert.equal(rules.some((rule) => rule.rule === "已退休的旧规则"), false, "退休规则不再进提示词，也就不该参与冲突比较");
+});
+
+test("人工风格指南：按行/编号拆条，超长行再按句子切", () => {
+  const rules = splitGuideRules("1. 句尾统一用简体\n\n- 不要使用「您」\n" + "あ".repeat(300));
+  assert.equal(rules[0], "句尾统一用简体");
+  assert.equal(rules[1], "不要使用「您」");
+  assert.equal(rules.length, 2 + Math.ceil(300 / 200));
+  assert.ok(rules.slice(2).every((rule) => rule.length <= 200), "超长行要切成可比对的片段");
+  assert.equal(splitGuideRules("a\nb\nc\nd", { maximum: 2 }).length, 2);
 });
 
 test("方面识别把谈同一件事的规则聚到一起", () => {
@@ -65,53 +79,65 @@ test("不谈同一方面的规则不会被凑成候选", () => {
   assert.equal(candidates.length, 0);
 });
 
-test("权重按证据算，技能规则折算成中等权重而不是垫底", () => {
-  const strong = { origin: "style", originLabel: "风格规范", evidenceCount: 520, rounds: 6 };
-  const weak = { origin: "style", originLabel: "风格规范", evidenceCount: 9, rounds: 1 };
-  const skill = { origin: "skill", originLabel: "技能附加规则", evidenceCount: 0, rounds: 0 };
-  assert.equal(weighConflict(strong, weak).winner, strong);
-  assert.equal(weighConflict(skill, weak).winner, skill, "技能规则靠评测晋升，不该输给只有 9 条证据的风格规则");
-  assert.equal(weighConflict(strong, skill).winner, strong);
+test("裁决按来源优先级：人工指南 > 蒸馏规范 > 技能规则 > 译者画像", () => {
+  const strong = { origin: "style", originLabel: "蒸馏规范", evidenceCount: 520, rounds: 6 };
+  const weak = { origin: "style", originLabel: "蒸馏规范", evidenceCount: 9, rounds: 1 };
+  const skill = { origin: "skill", originLabel: "技能规则 v3（候选）", evidenceCount: 0, rounds: 0, skillStatus: "challenger" };
+  const guide = { origin: "guide", originLabel: "人工风格指南", evidenceCount: 0, rounds: 0 };
+  const profile = { origin: "profile", originLabel: "译者画像", evidenceCount: 99, rounds: 9 };
+  assert.equal(weighConflict(strong, weak).winner, strong, "同级按证据强弱");
+  assert.equal(weighConflict(weak, skill).winner, weak, "蒸馏规范优先于技能规则");
+  assert.equal(weighConflict(guide, strong).winner, guide, "人工指南恒胜，哪怕对方证据很多");
+  assert.equal(weighConflict(skill, profile).winner, skill, "技能规则优先于译者画像");
   assert.equal(SKILL_RULE_EQUIVALENT_EVIDENCE, 50);
 });
 
 test("势均力敌时交人工，不硬选一个", () => {
-  const same = { origin: "style", originLabel: "风格规范", evidenceCount: 10, rounds: 1 };
+  const same = { origin: "style", originLabel: "蒸馏规范", evidenceCount: 10, rounds: 1 };
   const result = weighConflict({ ...same }, { ...same });
   assert.equal(result.winner, null);
   assert.match(result.verdict, /人工/);
 });
 
-test("只有风格规则可以被提议退休，技能与画像一律交人工", () => {
+test("可以就地处置的只有蒸馏规则（退休）与未生效的候选技能（停用）", () => {
   const styleVsStyle = planConflictResolution({
     aspects: ["句尾体裁"],
-    left: { origin: "style", originLabel: "风格规范", id: "r1", rule: "统一敬体", evidenceCount: 520, rounds: 6 },
-    right: { origin: "style", originLabel: "风格规范", id: "r3", rule: "避免敬体", evidenceCount: 9, rounds: 1 }
+    left: { origin: "style", originLabel: "蒸馏规范", id: "r1", rule: "统一敬体", evidenceCount: 520, rounds: 6 },
+    right: { origin: "style", originLabel: "蒸馏规范", id: "r3", rule: "避免敬体", evidenceCount: 9, rounds: 1 }
   });
   assert.equal(styleVsStyle.action, "retire-style-rule");
   assert.equal(styleVsStyle.ruleId, "r3");
 
-  // 风格规则输了就可以提议退休；输的是技能规则时只能交人工——
-  // 技能只能经 challenger 评测晋升修改，扫描不得代劳。
-  const skillLoses = planConflictResolution({
+  // 人工指南赢：蒸馏规范让位，可以一键退休。
+  const guideWins = planConflictResolution({
     aspects: ["句尾体裁"],
-    left: { origin: "style", originLabel: "风格规范", id: "r1", rule: "统一敬体", evidenceCount: 520, rounds: 6 },
-    right: { origin: "skill", originLabel: "技能附加规则", id: "0", rule: "改用常体", evidenceCount: 0, rounds: 0 }
+    left: { origin: "guide", originLabel: "人工风格指南", id: "0", rule: "句尾统一用简体", evidenceCount: 0, rounds: 0 },
+    right: { origin: "style", originLabel: "蒸馏规范", id: "r3", rule: "避免敬体", evidenceCount: 520, rounds: 6 }
   });
-  assert.equal(skillLoses.action, "review");
-  assert.match(skillLoses.reason, /技能附加规则/);
+  assert.equal(guideWins.action, "retire-style-rule");
+  assert.equal(guideWins.ruleId, "r3");
 
-  const styleLosesToSkill = planConflictResolution({
+  // 候选技能让位：可以一键停用（它还没生效）。
+  const candidateLoses = planConflictResolution({
     aspects: ["句尾体裁"],
-    left: { origin: "style", originLabel: "风格规范", id: "r1", rule: "统一敬体", evidenceCount: 5, rounds: 1 },
-    right: { origin: "skill", originLabel: "技能附加规则", id: "0", rule: "改用常体", evidenceCount: 0, rounds: 0 }
+    left: { origin: "style", originLabel: "蒸馏规范", id: "r1", rule: "统一敬体", evidenceCount: 520, rounds: 6 },
+    right: { origin: "skill", originLabel: "技能规则 v3（候选）", id: "0", rule: "改用常体", evidenceCount: 0, rounds: 0, skillId: "s9", skillStatus: "challenger" }
   });
-  assert.equal(styleLosesToSkill.action, "retire-style-rule", "输的是风格规则时可以提议退休它");
-  assert.equal(styleLosesToSkill.ruleId, "r1");
+  assert.equal(candidateLoses.action, "disable-skill");
+  assert.equal(candidateLoses.skillId, "s9");
+
+  // 生效版本让位：只能人工（回滚或新候选）。
+  const championLoses = planConflictResolution({
+    aspects: ["句尾体裁"],
+    left: { origin: "style", originLabel: "蒸馏规范", id: "r1", rule: "统一敬体", evidenceCount: 520, rounds: 6 },
+    right: { origin: "skill", originLabel: "技能规则 v3（生效版本）", id: "0", rule: "改用常体", evidenceCount: 0, rounds: 0, skillId: "s1", skillStatus: "champion" }
+  });
+  assert.equal(championLoses.action, "review");
+  assert.match(championLoses.reason, /回滚/u);
 
   const profileLoses = planConflictResolution({
     aspects: ["语气强度"],
-    left: { origin: "style", originLabel: "风格规范", id: "r1", rule: "保持庄重", evidenceCount: 520, rounds: 6 },
+    left: { origin: "style", originLabel: "蒸馏规范", id: "r1", rule: "保持庄重", evidenceCount: 520, rounds: 6 },
     right: { origin: "profile", originLabel: "译者画像", id: "u1", rule: "保持轻快口语", evidenceCount: 3, rounds: 0 }
   });
   assert.equal(profileLoses.action, "review", "画像须走草稿流程，扫描同样不得代劳");

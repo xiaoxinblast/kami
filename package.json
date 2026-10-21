@@ -6,12 +6,13 @@
   "scripts": {
     "start": "node --use-system-ca --env-file=directus/.env server.mjs",
     "dev": "node --use-system-ca --env-file=directus/.env --watch server.mjs",
-    "test": "node --test",
+    "test": "node --import ./tests/setup-env.mjs --test",
     "directus:up": "docker compose --env-file directus/.env -f directus/docker-compose.yml up -d",
     "directus:down": "docker compose --env-file directus/.env -f directus/docker-compose.yml down",
     "directus:provision": "node --env-file=directus/.env scripts/provision-directus.mjs",
     "directus:backfill-memory-hash": "node --env-file=directus/.env scripts/backfill-memory-hash.mjs",
     "directus:dedupe-memory": "node --env-file=directus/.env scripts/dedupe-memory.mjs",
+    "directus:prune-history": "node --env-file=directus/.env scripts/prune-directus-revisions.mjs",
     "taxonomy:migrate": "node --env-file=directus/.env scripts/migrate-content-taxonomy.mjs",
     "directus:drop-shares": "node --env-file=directus/.env scripts/cleanup-shares-collection.mjs",
     "directus:snapshot": "docker compose --env-file directus/.env -f directus/docker-compose.yml exec -T directus node /directus/cli.js schema snapshot --yes /directus/schema/snapshot.yaml"

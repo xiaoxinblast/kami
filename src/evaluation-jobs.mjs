@@ -90,6 +90,8 @@ function publicJob(job) {
     updatedAt: job.updatedAt,
     finishedAt: job.finishedAt || "",
     error: job.error || "",
+    // 任务中心那条镜像记录的 id：重启后照它继续更新，不再新建一条。
+    backgroundTaskId: String(job.backgroundTaskId || ""),
     completionHookWarning: String(job.completionHookWarning || ""),
     result: job.result || null,
     reproducibility: {
@@ -109,8 +111,10 @@ function publicJob(job) {
  *   each other's checkpoints.
  * @param guardrails  Extra promotion guardrails merged into every conclusion,
  *   e.g. restricting which metrics may justify a style-profile promotion.
+ * @param onChanged  每次状态或进度变化后回调（收到的是 publicJob）。用于把评测
+ *   同步给任务中心 / 通知中心：评测以前只在学习中心自己那一栏可见，跑完也没人通知。
  */
-export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jobsDirectory, deps, concurrency = 5, kind = "skill-evaluation", guardrails = {}, onCompleted = null, now = () => new Date().toISOString() } = {}) {
+export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jobsDirectory, deps, concurrency = 5, kind = "skill-evaluation", guardrails = {}, onCompleted = null, onChanged = null, now = () => new Date().toISOString() } = {}) {
   if (typeof benchmark !== "function") throw new TypeError("benchmark 必须是函数");
   for (const name of ["getSkill", "getCurrentChampion", "validatePromotionState", "saveEvaluation", "updateSkillMetrics", "buildUiReport"]) {
     if (typeof deps?.[name] !== "function") throw new TypeError(`evaluation job deps 缺少 ${name}`);
@@ -118,6 +122,21 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
 
   const jobs = new Map();
   let running = false;
+  /** 同一个 job 的回调必须按顺序落地，否则后到的旧进度会盖掉新进度。 */
+  const changeChains = new Map();
+
+  /**
+   * 状态回传：串行、吞异常。任务中心写不进去（记录被删掉、库抖了）绝不能让评测本身失败。
+   */
+  function notifyChanged(job) {
+    if (typeof onChanged !== "function") return Promise.resolve();
+    const previous = changeChains.get(job.jobId) || Promise.resolve();
+    const next = previous
+      .then(() => onChanged(publicJob(job)))
+      .catch(() => undefined);
+    changeChains.set(job.jobId, next);
+    return next;
+  }
 
   async function jobPath(jobId) {
     return join(jobsDirectory, `${jobId}.json`);
@@ -198,6 +217,9 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         // 历史里已完成的评测只需要摘要：快照留在磁盘上，不进内存。
         releaseCompletedPayload(job);
         jobs.set(job.jobId, job);
+        // 未跑完 / 失败的评测要同步到任务中心，用户才知道"上次那条停了"；
+        // 已完成的结论在学习中心里已经有了，不再往任务中心灌历史。
+        if (job.status !== COMPLETED) await notifyChanged(job);
       } catch { /* 损坏的检查点文件不阻断启动，直接忽略 */ }
     }
   }
@@ -231,7 +253,9 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     job.error = message;
     job.finishedAt = now();
     job.updatedAt = job.finishedAt;
-    return chainPersist(job);
+    const written = chainPersist(job);
+    notifyChanged(job);
+    return written;
   }
 
   async function execute(job) {
@@ -240,6 +264,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     job.evaluationProfile ||= evaluationProfileForContentType(job.scope?.contentType);
     job.updatedAt = now();
     await persist(job);
+    notifyChanged(job);
 
     // Fail fast when the pairing is already stale, before spending model calls.
     const [liveChampion, liveCandidate] = await Promise.all([deps.getSkill(job.championId, job.scope), deps.getSkill(job.challengerId, job.scope)]);
@@ -326,9 +351,11 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
             };
           } else if (progress.caseId) {
             job.caseFailures[progress.caseId] = progress.error || "评测失败";
+            job.caseFailureCodes[progress.caseId] = String(progress.errorCode || "");
           }
           job.updatedAt = now();
           chainPersist(job);
+          notifyChanged(job);
         }
       });
       await job._persistChain;
@@ -338,8 +365,17 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     const challengerSamples = flattenVariantSamples(job, "challenger");
     const failures = job.requestedCaseIds.filter((caseId) => job.caseFailures[caseId]).map((caseId) => ({
       caseId,
-      error: job.caseFailures[caseId]
+      error: job.caseFailures[caseId],
+      code: String(job.caseFailureCodes?.[caseId] || "")
     }));
+    // 失败分成"模型没产出译文"和"接口/质检报错"两类：前者可以直接只重试失败样本，
+    // 后者要看上游状态。报告里分开写，用户才知道该点哪个按钮。
+    const missingTranslations = failures.filter((item) => item.code === "empty_translation").length;
+    const failureReasons = [...failures.reduce((counts, item) => {
+      const key = item.code || item.error || "其他错误";
+      counts.set(key, (counts.get(key) || 0) + 1);
+      return counts;
+    }, new Map()).entries()].map(([reason, count]) => ({ reason, count }));
 
     const repetitions = Math.max(1, Math.trunc(Number(job.evaluationProfile?.repetitions) || 1));
     const evaluationGuardrails = { ...guardrails, requireCost: job.requireCost === true };
@@ -379,6 +415,8 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       repetitions,
       failedPairs: failures.length,
       failures: failures.slice(0, 10),
+      missingTranslations,
+      failureReasons,
       isolation: [...championSamples, ...challengerSamples].reduce((summary, sample) => {
         const isolation = sample?.isolation || {};
         return {
@@ -441,7 +479,10 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     if (failures.length) {
       report.promotable = false;
       report.status = "insufficient";
-      report.conclusion = `评测未完成：${failures.length} 组「生效版本 / 候选版本」对照在翻译或独立 AIQA 阶段失败。失败样本不会按“零问题”计分，本次结果禁止晋升。`;
+      const breakdown = missingTranslations
+        ? `其中 ${missingTranslations} 组是模型没有产出译文（不是候选翻译质量差），可以只重试这些失败样本。`
+        : "";
+      report.conclusion = `评测未完成：${failures.length} 组「生效版本 / 候选版本」对照在翻译或独立 AIQA 阶段失败。${breakdown}失败样本不会按“零问题”计分，本次结果禁止晋升。`;
     }
 
     // Revalidate after the potentially long benchmark: the champion may have
@@ -473,6 +514,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
     job.finishedAt = now();
     job.updatedAt = job.finishedAt;
     await persist(job);
+    notifyChanged(job);
     if (typeof onCompleted === "function") {
       try {
         await onCompleted(publicJob(job));
@@ -512,6 +554,8 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
         caseTrajectories,
         caseSamples: {},
         caseFailures: {},
+        // 失败原因码（如 empty_translation）：报告里要能区分"模型没产出译文"和"接口报错"。
+        caseFailureCodes: {},
         evaluationProfile,
         benchmarkSnapshot: null,
         snapshotFingerprint: "",
@@ -526,6 +570,7 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       };
       jobs.set(job.jobId, job);
       await persist(job);
+      notifyChanged(job);
       pumpQueue();
       return publicJob(job);
     },
@@ -550,7 +595,56 @@ export function createEvaluationJobRunner({ benchmark, createSnapshot = null, jo
       job.error = "";
       job.updatedAt = now();
       await persist(job);
+      notifyChanged(job);
       pumpQueue();
+      return publicJob(job);
+    },
+    /**
+     * 只重试失败的样本。
+     *
+     * 以前一条评测挂掉一组就只能「重新评测」——27 组样本全部重跑一遍，模型调用白烧一遍。
+     * 这里把 caseFailures 清空后重新入队：execute() 只会跑"既没有样本也没有失败记录"
+     * 的 case，也就是刚才失败的那几组，已成功的样本原样沿用。
+     */
+    async retryFailed(jobId) {
+      const job = jobs.get(String(jobId));
+      if (!job) return null;
+      // 只有跑完/中断/失败的任务才谈得上"重试失败样本"：正在排队或正在跑的别插队。
+      if (![COMPLETED, FAILED, INTERRUPTED].includes(job.status)) return publicJob(job);
+      if (!Object.keys(job.caseFailures || {}).length) return publicJob(job);
+      if (!job.benchmarkSnapshot) {
+        // 已完成的检查点会把输入快照从内存里放掉（实测 77MB JSON），而只重试失败样本
+        // 必须用同一份冻结输入重跑，所以从磁盘读回来；磁盘上也没有就只能重新发起完整评测。
+        try {
+          const persisted = JSON.parse(await readFile(await jobPath(job.jobId), "utf8"));
+          if (persisted?.benchmarkSnapshot) job.benchmarkSnapshot = persisted.benchmarkSnapshot;
+        } catch { /* 读不出来就走下面这条明确失败 */ }
+        if (!job.benchmarkSnapshot) {
+          const error = new Error("这份评测检查点缺少输入快照，无法只重试失败样本，请重新发起完整评测");
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+      job.caseFailures = {};
+      job.caseFailureCodes = {};
+      job.status = QUEUED;
+      job.error = "";
+      job.finishedAt = "";
+      job.updatedAt = now();
+      await persist(job);
+      notifyChanged(job);
+      pumpQueue();
+      return publicJob(job);
+    },
+    /**
+     * 调用方往检查点上记自己的关联信息（目前只有任务中心的记录 id）。
+     * 走检查点而不是另存一张映射表：重启后照样能接回同一条任务记录。
+     */
+    async patch(jobId, fields = {}) {
+      const job = jobs.get(String(jobId));
+      if (!job) return null;
+      Object.assign(job, fields);
+      await persist(job);
       return publicJob(job);
     },
     /**

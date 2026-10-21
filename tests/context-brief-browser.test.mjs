@@ -133,6 +133,15 @@ test("语境档案可查看可编辑，质量报告显示指标与待核对清�
       else if (path === "/api/qa-cases/pending") payload = [];
       else if (path === "/api/style-profiles") payload = { userProfiles: [], styleProfiles: [], learningRuns: [], evidencePools: [] };
       else if (path === "/api/tasks") payload = { tasks: [] };
+      // 翻译视图默认落文件列表：上次打开的批次要在列表里给一个「继续」入口。
+      else if (path === "/api/batch/files") payload = {
+        total: 1,
+        files: [{
+          batchId: "batch-brief-1", filename: "Asia_batch18_new.xlsx_zho-CN.mqxliff", format: "mqxliff", runState: "ready", status: "in_progress",
+          totalSegments: 30, completedSegments: 30, failedSegments: 0, qaPending: 0, brief: { status: "ready", sections: 2 },
+          learning: { count: 0, humanReviewed: 0 }, hasOriginal: true, originalBytes: 2048, updatedAt: "2026-09-25T11:00:00.000Z"
+        }]
+      };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
     });
 
@@ -141,6 +150,13 @@ test("语境档案可查看可编辑，质量报告显示指标与待核对清�
       localStorage.setItem("kami-project-id", "project-1");
     });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
+    // 默认落在文件列表：点「继续」才进上次打开的批次。
+    await page.waitForSelector('#batchFileList .batch-file-row[data-batch-file="batch-brief-1"]');
+    await page.locator('#batchFileList .batch-file-row[data-batch-file="batch-brief-1"] [data-batch-action="open"]').click();
+    // 打开已有批次默认落在「翻译队列」；语境档案与质量报告各自在自己的标签页里。
+    await page.waitForSelector("#batchTabs .batch-tab.active");
+    assert.equal(await page.locator('#batchTabs [data-batch-tab="queue"]').getAttribute("class"), "batch-tab active");
+    await page.locator('#batchTabs [data-batch-tab="brief"]').click();
     await page.waitForSelector("#batchBriefPanel:not([hidden])");
 
     // ① 语境档案：用途区间、注意点、整体结论
@@ -152,16 +168,21 @@ test("语境档案可查看可编辑，质量报告显示指标与待核对清�
     assert.match(briefText, /同一个道具名前后要一致/u);
     assert.equal(await page.locator("#batchQualityTier").count(), 1, "批次页要有质量档下拉");
 
-    // ② 编辑用途并保存：PATCH 必须带上新的用途
+    // ② 编辑注意点并保存：区间用途由 AI 自动判定、只读；PATCH 提交的是注意点。
     await page.locator("#batchBriefEditToggle").click();
-    await page.locator("#batchBriefSections select[data-brief-section-purpose]").first().selectOption("narrative");
+    assert.equal(await page.locator("#batchBriefSections select[data-brief-section-purpose]").count(), 0, "区间语体不再让用户手选");
+    assert.match(await page.locator("#batchBriefSections").textContent(), /对话|剧情对白/u, "用途仍然只读展示");
+    await page.locator("#batchBriefSections input[data-brief-section-note]").first().fill("这段保持短句");
     await page.locator("#batchBriefSave").click();
     await page.waitForFunction(() => /语境档案已更新/.test(document.querySelector("#toast")?.textContent || ""));
     const patch = writes.find((item) => item.method === "PATCH" && item.path.endsWith("/context-brief"));
     assert.ok(patch, "必须把修改提交到语境档案接口");
-    assert.equal(patch.body.sections[0].purpose, "narrative");
+    assert.equal(patch.body.sections[0].note, "这段保持短句");
+    assert.equal(patch.body.sections[0].purpose, "dialogue", "用途保持自动判定的结果，不被改写");
 
     // ③ 质量报告：档位分布、术语采用率、跨条目待核对
+    await page.locator('#batchTabs [data-batch-tab="report"]').click();
+    await page.waitForSelector("#batchReportPanel:not([hidden])");
     const reportText = await page.locator("#batchReportPanel").textContent();
     assert.match(reportText, /快速 14 · 标准 4 · 严苛 2 · 升级 1/u);
     assert.match(reportText, /90%（9 \/ 10）/u);
@@ -170,6 +191,8 @@ test("语境档案可查看可编辑，质量报告显示指标与待核对清�
     assert.match(await page.locator("#batchReportSummary").textContent(), /质检覆盖 30%/u);
 
     // ④ 段落行显示本段用途与档位
+    await page.locator('#batchTabs [data-batch-tab="queue"]').click();
+    await page.waitForSelector("#batchSegments .batch-segment");
     const firstSegment = await page.locator(".batch-segment").first().textContent();
     assert.match(firstSegment, /快速/u);
 

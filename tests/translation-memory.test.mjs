@@ -3,6 +3,18 @@ import assert from "node:assert/strict";
 import { calculateQaScore, presentAiQaIssues } from "../src/qa.mjs";
 import { narrowByDomain, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "../src/translation-memory.mjs";
 
+test("内联标签不再制造相似度：只有标签雷同的行不会被当参考译例", () => {
+  // 真库实测：8,455 行里 3,019 行带标签，`（笑い）<tag…/>` 这类行靠标签蹭到 0.6 相似度。
+  const tag = (id) => `<tag id='${id}' type='inline' desc='ph'/>`;
+  const memories = [
+    { id: "noise", source: `（笑い）${tag("tag-1")}`, target: "（微笑）", qualityStatus: "human_approved", libraryRole: "master", projectId: "p1" },
+    { id: "real", source: `また　君とお話ししたくなったんだ${tag("tag-1")}`, target: "我又想和你聊聊了", qualityStatus: "human_approved", libraryRole: "master", projectId: "p1" }
+  ];
+  const ranked = rankTranslationMemories(`また　君とお話ししたくなったんだ${tag("tag-9")}`, memories, { projectId: "p1" });
+  assert.deepEqual(ranked.map((item) => item.id), ["real"], "只有标签雷同的行必须被过滤掉");
+  assert.ok(ranked[0].similarity > 0.9, "换了标签 id 的同一句仍要算高分");
+});
+
 test("翻译记忆检索优先同义近似且已验证的译例", () => {
   const ranked = rankTranslationMemories("高级通行证现已开放购买", [
     { id: "a", source: "高级通行证现已开放购买。", target: "プレミアムパスを販売中です。", qualityStatus: "human_approved", qaScore: 100 },
@@ -98,32 +110,31 @@ test("输入非数组时安全返回两个空档", () => {
   assert.deepEqual(machineDrafts, []);
 });
 
-test("领域收窄命中时只保留本领域与通用资产", () => {
+test("语体/领域只作参考：不再收窄候选池，跨领域的资产照样进池", () => {
   const { items, relaxed } = narrowByDomain([
     { id: "a", domain: "marketing" },
     { id: "b", domain: "game" },
     { id: "c", domain: "general" }
   ], "marketing");
-  assert.deepEqual(items.map((item) => item.id), ["a", "c"]);
+  assert.deepEqual(items.map((item) => item.id), ["a", "b", "c"]);
   assert.equal(relaxed, false);
 });
 
-test("收窄后为空时退回全量，避免选错领域让检索归零", () => {
-  // 实测：全库 592 条记忆都归在 game 下，选「市场营销」会把它们全部滤掉。
+test("领域判成别的值也不会让检索归零", () => {
   const pool = Array.from({ length: 5 }, (_, index) => ({ id: `m${index}`, domain: "game" }));
   const { items, relaxed } = narrowByDomain(pool, "marketing");
-  assert.equal(items.length, 5, "宁可放宽领域，也不能让模型失去全部参考译例");
-  assert.equal(relaxed, true, "放宽过要能被界面说明");
+  assert.equal(items.length, 5, "领域只是参考，不能把参考译例挡在池外");
+  assert.equal(relaxed, false, "没有发生收窄，就不该报放宽");
 });
 
-test("领域为 general 或缺省时本就不收窄", () => {
+test("领域为 general 或缺省时同样全量返回", () => {
   const pool = [{ id: "a", domain: "game" }, { id: "b", domain: "marketing" }];
   assert.equal(narrowByDomain(pool, "general").items.length, 2);
   assert.equal(narrowByDomain(pool, "").items.length, 2);
   assert.equal(narrowByDomain(pool, "general").relaxed, false);
 });
 
-test("空池不会被误报成放宽", () => {
+test("空池照样不报放宽", () => {
   const { items, relaxed } = narrowByDomain([], "marketing");
   assert.deepEqual(items, []);
   assert.equal(relaxed, false, "本来就没有资产，不是领域收窄造成的");

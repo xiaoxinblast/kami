@@ -87,6 +87,16 @@ test("评测进行中的状态扛得住重绘，跑完自动刷新结论", { ski
         scopeCounts: [{ contentType: "general", domain: "general", count: 1 }],
         trajectories: [trajectory], evidence: [trajectory]
       };
+      else if (url.pathname === "/api/learning/overview") payload = {
+        locale: "zh-CN", project: "project-1",
+        scopes: [{
+          scope: { locale: "zh-CN", contentType: "general", domain: "general", project: "project-1" },
+          trajectoryCount: 1, files: [], champion: { id: champion.id, version: 1, name: champion.name },
+          candidateCount: 1, latestCandidate: { id: candidate.id, version: 2, status: "challenger", name: candidate.name },
+          assets: { goldSampleCount: 0, regressionCaseCount: 0, goldenVersions: [], regressionSuiteVersions: [] }, gate: null
+        }]
+      };
+      else if (url.pathname === "/api/learning/evidence") payload = { scope: {}, total: 1, limit: 20, offset: 0, hasMore: false, items: [trajectory] };
       else if (url.pathname === "/api/learning/conflict-scan") payload = { scope: {}, conflicts: [], reason: "尚未扫描" };
       else if (url.pathname === "/api/quality/assets") payload = { assets: [] };
       else if (url.pathname === "/api/quality/gate") payload = { latestRun: null, recentRuns: [], assets: {} };
@@ -97,6 +107,8 @@ test("评测进行中的状态扛得住重绘，跑完自动刷新结论", { ski
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForSelector(".nav-item");
     await page.getByRole("button", { name: "学习中心" }).click();
+    // 评测按钮在流水线第 2 步（候选技能）里。
+    await page.locator('[data-learning-step-button="candidates"]').click();
     const evaluateButton = page.locator('#learningCandidateList [data-learning-action="evaluate"]');
     await page.waitForSelector("#learningCandidateList .learning-skill-card");
 

@@ -5,9 +5,13 @@
  * 索引按项目缓存；评测传入 onlyChunkIds 时只允许考试允许的片段进入检索。
  */
 
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
 import { createReferenceIndex } from "./reference-index.mjs";
 import { createReferenceToolRunner } from "./reference-tools.mjs";
-import { getResourceLibraries, listReferenceChunks, listReferenceChunksForProject, listReferenceDocuments } from "./store.mjs";
+import { DATA_ROOT, getResourceLibraries, listReferenceChunks, listReferenceChunksForProject, listReferenceDocuments } from "./store.mjs";
 
 /** 与技能策略模板保持一致的出厂值。 */
 export const REFERENCE_FACTORY_DEFAULTS = Object.freeze({
@@ -25,11 +29,15 @@ export function createProjectReferenceIndex() {
   return createReferenceIndex({
     loader: async (projectId) => {
       const { items: documents } = await listReferenceDocuments({ projectId, limit: 200 });
-      const documentById = new Map(documents.map((document) => [document.id, document]));
       const libraries = await getResourceLibraries(projectId).catch(() => []);
+      const fingerprint = referenceDocumentsFingerprint(documents, libraries);
+      const snapshotPath = referenceSnapshotPath(projectId);
+      const cached = await readReferenceSnapshot(snapshotPath, fingerprint).catch(() => null);
+      if (cached) return cached;
+      const documentById = new Map(documents.map((document) => [document.id, document]));
       const libraryEnabled = new Map(libraries.map((library) => [library.id, library.enabled !== false]));
       const chunks = await listReferenceChunksForProject(projectId, { limit: 5_000 });
-      return chunks.map((chunk) => {
+      const items = chunks.map((chunk) => {
         const document = documentById.get(chunk.documentId);
         return {
           id: chunk.id,
@@ -50,8 +58,50 @@ export function createProjectReferenceIndex() {
           embedding: chunk.embedding
         };
       });
+      // 失败不影响本次检索：下次重启最多再走一遍 Directus。
+      await writeReferenceSnapshot(snapshotPath, fingerprint, items).catch(() => {});
+      return items;
     }
   });
+}
+
+/**
+ * 参考资料索引的磁盘快照。
+ *
+ * 5 页 × 1,000 条 × 带 embedding 的冷加载很重；进程重启后只要资料文档和库开关
+ * 没变，就可以直接读磁盘。指纹含文档 id/updatedAt/chunkCount 与库 enabled，
+ * 资料上传/删除会改变指纹；TTL 兜底绕过工作台直接改库的情况。
+ */
+export const REFERENCE_SNAPSHOT_TTL_MS = 10 * 60_000;
+
+export function referenceDocumentsFingerprint(documents = [], libraries = []) {
+  const documentPart = (Array.isArray(documents) ? documents : [])
+    .map((document) => [document.id || "", document.updatedAt || "", document.chunkCount || 0])
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+  const libraryPart = (Array.isArray(libraries) ? libraries : [])
+    .map((library) => [library.id || "", library.enabled !== false])
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+  return createHash("sha256").update(JSON.stringify([documentPart, libraryPart])).digest("hex");
+}
+
+export function referenceSnapshotPath(projectId) {
+  const safe = String(projectId || "global").replace(/[^a-zA-Z0-9_-]/gu, "_");
+  return join(DATA_ROOT, "runtime", "reference-index", `${safe}.json`);
+}
+
+export async function readReferenceSnapshot(path, fingerprint, { now = Date.now(), ttlMs = REFERENCE_SNAPSHOT_TTL_MS } = {}) {
+  const parsed = JSON.parse(await readFile(path, "utf8"));
+  if (parsed?.fingerprint !== fingerprint) return null;
+  if (!Array.isArray(parsed.items)) return null;
+  if (!Number.isFinite(parsed.at) || now - parsed.at >= ttlMs) return null;
+  return parsed.items;
+}
+
+export async function writeReferenceSnapshot(path, fingerprint, items) {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, JSON.stringify({ fingerprint, at: Date.now(), items }), "utf8");
+  await rename(temporary, path);
 }
 
 /** 参数设置给预算，技能里的值偏离出厂值时以技能为准。 */

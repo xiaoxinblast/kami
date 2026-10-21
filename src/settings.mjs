@@ -44,8 +44,11 @@ export const SETTING_SPECS = Object.freeze({
   "reference.maxCharsPerCall": { min: 500, max: 6000, step: 100, default: 2400, label: "参考资料：单次返回字符上限", hint: "一次工具结果最多注入多少字符" },
   "reference.maxCharsTotal": { min: 1000, max: 20000, step: 500, default: 6000, label: "参考资料：单条句段总字符上限", hint: "一条句段所有查询合计最多注入多少字符" },
   "quality.autoConsistencyCheck": { type: "boolean", default: true, label: "批次结束后自动一致性核对", hint: "整批翻完自动跑跨条目一致性核对与质量报告；关掉可省额度，批次页仍可手动运行" },
+  "quality.consistencyAutoRepair": { type: "boolean", default: true, label: "一致性核对后自动统一译法", hint: "有证据的漂移（术语库登记译法、主/参考 TM 人工译例、文件内多数）自动统一；没有依据、或批次已有人工回填时只报告不改" },
+  "quality.consistencyRepairMaxSegments": { min: 0, max: 200, step: 5, default: 20, label: "单批自动统一段落上限", hint: "一次自动统一最多改几段，超出部分只列入报告；0 表示不限" },
 
   "retrieval.translationMemoryLimit": { min: 1, max: 20, step: 1, default: 5, label: "参考译例条数", hint: "每次翻译注入的相似译例上限" },
+  "retrieval.candidatePoolSize": { min: 0, max: 5000, step: 100, default: 1000, label: "TM 候选池大小", hint: "先用字符 n-gram 从整库粗筛出多少条候选再做精排：越大越接近全量检索、越慢；0 表示不粗筛（整库打分，8 万条时每段要十几秒）" },
   "retrieval.qaCaseLimit": { min: 1, max: 20, step: 1, default: 3, label: "QA 反例条数", hint: "注入的历史问题译文上限" },
   "retrieval.previousSegments": { min: 0, max: 6, step: 1, default: 2, label: "上文段数", hint: "批次翻译携带的前置上下文" },
   "retrieval.nextSegments": { min: 0, max: 4, step: 1, default: 1, label: "下文段数", hint: "批次翻译携带的后续上下文" },
@@ -62,6 +65,14 @@ export const SETTING_SPECS = Object.freeze({
   "learning.ruleStaleRounds": { min: 2, max: 20, step: 1, default: 4, label: "规则退休轮数", hint: "连续多少轮蒸馏没被证据确认才退休。设小了退回滚动重写，设大了过时规则赖着不走" },
 
   "learning.conflictScanIntervalMinutes": { min: 0, max: 1440, step: 15, default: 0, label: "规则冲突定时扫描（分钟）", hint: "0 表示只在蒸馏沉淀后扫描，不定时。每次扫描最多送 12 对规则给模型" },
+
+  "learning.regressionEditDistance": { min: 0, max: 1, step: 0.05, default: 0.2, label: "审校改动入回归集阈值", hint: "外部审校把机器稿改动到多大的归一化编辑距离才登记为历史失败案例；纯标点与措辞润色低于阈值不入集" },
+  "learning.gateRegressionCaseLimit": { min: 0, max: 200, step: 10, default: 50, label: "门禁单次回归案例上限", hint: "每次门禁按改动幅度从大到小最多跑几条回归案例（每条一次模型调用）；0 表示不限" },
+  "learning.gateRegressionPassRate": { min: 0.5, max: 1, step: 0.05, default: 1, label: "回归通过率门槛", hint: "低于此比例直接阻断发版；默认 100%，即历史失败一条都不许复发" },
+  "learning.autoGateEnabled": { type: "boolean", default: true, label: "回填后自动重建回归集并跑门禁", hint: "审校回填完成后自动把改动并入回归集，并对最新候选执行一次门禁；关掉则只在面板手动触发" },
+  "learning.gateDedupeSources": { type: "boolean", default: true, label: "门禁按原文去重", hint: "同一条原文只翻一次、同时按 Gold 与回归两套规则判定；关掉则回到逐条执行（更贵，结论口径不变）" },
+  "learning.termSurveyEnabled": { type: "boolean", default: true, label: "批次翻完后做术语普查", hint: "整批翻完让模型指出“像术语但库里没有”的说法，回填时用人工终稿确认译法；关掉则不做这一步" },
+  "learning.termAutoWriteReviewedTerms": { type: "boolean", default: true, label: "审校确认的术语自动入库", hint: "仅当“库里没有该源词 + 人工终稿逐字保留了 AI 建议译法”时自动写入项目术语库；其余一律进待审核" },
 });
 
 /** 作品名括号是风格约定而非语言对错，按语种单独配置。空串表示该语种不做约定检查。 */

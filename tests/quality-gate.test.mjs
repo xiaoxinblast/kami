@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildGateQueue,
   decideReleaseGate,
   evaluateGoldRun,
   evaluateGoldSample,
   evaluateRegressionCase,
   evaluateRegressionRun,
+  gateRefreshDecision,
+  gateRunCoversAssets,
+  selectGateCases,
+  selectGateTargetSkill,
   resolveGateAssets
 } from "../src/quality-gate.mjs";
 
@@ -162,4 +167,92 @@ test("门禁资产解析只取当前作用域启用的最新版本，并带出�
   assert.equal(resolved.samples[0].id, "gold-9");
   assert.deepEqual(resolved.goldSetVersions, ["gold@v2"]);
   assert.ok(resolved.samples[0].goldSetFingerprint);
+});
+
+test("回归案例按改动幅度封顶，改动最大的先跑", () => {
+  const cases = Array.from({ length: 60 }, (_, index) => ({
+    ...REGRESSION_CASE,
+    id: `regression-${String(index).padStart(2, "0")}`,
+    editDistance: index / 100
+  }));
+  const capped = selectGateCases(cases, 50);
+  assert.equal(capped.length, 50);
+  assert.equal(capped[0].id, "regression-59", "改动最大的排在最前");
+  assert.equal(capped.at(-1).id, "regression-10", "只截掉改动最小的那批");
+  assert.equal(selectGateCases(cases, 0).length, 60, "0 表示不限");
+});
+
+test("门禁结论必须覆盖当前资产版本，资产出新版本后旧 pass 作废", () => {
+  const assets = { goldSetVersions: ["gold@v1"], regressionSuiteVersions: ["regression:reg#v2"] };
+  const run = { decision: "pass", assetVersions: { goldSets: ["gold@v1"], regressionSuites: ["regression:reg#v2"] } };
+  assert.equal(gateRunCoversAssets(run, assets), true);
+  assert.equal(gateRunCoversAssets({ ...run, assetVersions: { ...run.assetVersions, regressionSuites: ["regression:reg#v1"] } }, assets), false);
+  assert.equal(gateRunCoversAssets({ ...run, assetVersions: { ...run.assetVersions, goldSets: ["gold@v2"] } }, assets), false);
+  assert.equal(gateRunCoversAssets({ decision: "pass", assetVersions: {} }, assets), false, "没有资产记录的旧运行不算覆盖");
+});
+
+test("自动门禁只针对最新候选，并在结论仍覆盖资产或已有任务在跑时跳过", () => {
+  const skills = [
+    { id: "champion-1", status: "champion", version: 7 },
+    { id: "draft-1", status: "draft", version: 2 },
+    { id: "challenger-1", status: "challenger", version: 3 }
+  ];
+  assert.equal(selectGateTargetSkill(skills).id, "challenger-1", "候选优先于草稿，版本高的优先");
+  assert.equal(selectGateTargetSkill([{ id: "champion-1", status: "champion", version: 7 }]), null, "没有候选时不拿生效版本空跑");
+
+  const assets = { samples: [{ id: "gold-1" }], cases: [{ id: "reg-1" }], goldSetVersions: ["gold@v1"], regressionSuiteVersions: ["regression:r#v2"] };
+  const covered = { decision: "pass", assetVersions: { goldSets: ["gold@v1"], regressionSuites: ["regression:r#v2"] } };
+  const stale = { decision: "pass", assetVersions: { goldSets: ["gold@v1"], regressionSuites: ["regression:r#v1"] } };
+
+  assert.equal(gateRefreshDecision({ skills, assets, latestRun: null }).run, true);
+  assert.equal(gateRefreshDecision({ skills, assets, latestRun: stale }).run, true, "资产更新后必须重跑");
+  assert.equal(gateRefreshDecision({ skills, assets, latestRun: covered }).reason, "already_covered");
+  assert.equal(gateRefreshDecision({ skills, assets, inFlight: true }).reason, "already_running");
+  assert.equal(gateRefreshDecision({ enabled: false, skills, assets }).reason, "auto_gate_disabled");
+  assert.equal(gateRefreshDecision({ skills: [{ id: "champion-1", status: "champion", version: 3 }], assets }).reason, "no_candidate");
+  assert.equal(gateRefreshDecision({ skills, assets: { samples: [], cases: [] } }).reason, "no_assets");
+});
+
+test("样本一条都没跑成时说清是执行被中断，而不是拿 0% 通过率当质量结论", () => {
+  const neverRan = evaluateRegressionRun({
+    cases: [REGRESSION_CASE, { ...REGRESSION_CASE, id: "regression-2" }],
+    results: []
+  });
+  const blocked = decideReleaseGate({ regression: neverRan, gold: null });
+  assert.equal(blocked.allowed, false);
+  const messages = blocked.blocking.map((item) => item.message);
+  assert.ok(messages.some((message) => /一条都没执行（本次执行多半被中断）/u.test(message)), messages.join(" | "));
+  assert.equal(blocked.blocking.some((item) => item.code === "regression_failed"), false, "没跑完时不该给出通过率结论");
+
+  const goldNeverRan = evaluateGoldRun({ samples: [goldSample(), goldSample({ id: "gold-2" })], results: [] });
+  const goldGate = decideReleaseGate({ regression: null, gold: goldNeverRan });
+  assert.ok(goldGate.blocking.some((item) => /Gold 样本 2 条一条都没执行/u.test(item.message)));
+});
+
+test("样本缺一半时只报未执行数量，不给自欺欺人的通过率", () => {
+  const half = evaluateRegressionRun({
+    cases: [REGRESSION_CASE, { ...REGRESSION_CASE, id: "regression-2" }],
+    results: [{ id: "regression-1", translation: "본 이벤트는 일본 지역 한정입니다." }]
+  });
+  const gate = decideReleaseGate({ regression: half, gold: null });
+  const incomplete = gate.blocking.find((item) => item.code === "regression_incomplete");
+  assert.match(incomplete.message, /有 1 个回归案例未执行（共 2 条，已执行 1 条）/u);
+  assert.equal(gate.blocking.some((item) => item.code === "regression_failed"), false);
+});
+
+test("待测清单按原文去重：一条原文只翻一次，但要过 Gold 与回归两套规则", () => {
+  const shared = { id: "gold-1", source: "浄璃の架", referenceTargets: ["净璃之架"] };
+  const onlyGold = { id: "gold-2", source: "星葬の玉座", referenceTargets: ["星葬王座"] };
+  const sharedCase = { id: "reg-1", source: "浄璃の架", failingTranslation: "净璃架", expectedTranslation: "净璃之架" };
+  const sameSourceTwice = { id: "reg-2", source: "浄璃の架", failingTranslation: "净璃之架", expectedTranslation: "净璃架" };
+  const queue = buildGateQueue({ samples: [shared, onlyGold], cases: [sharedCase, sameSourceTwice] });
+  assert.equal(queue.length, 2, "两条唯一原文 → 两次执行（原来是 4 条样本/案例）");
+  const merged = queue.find((entry) => entry.key === "浄璃の架");
+  assert.equal(merged.gold.length, 1);
+  assert.equal(merged.regression.length, 2, "回归集内部同句也合并到同一次执行");
+  assert.equal(queue.find((entry) => entry.source === "星葬の玉座").gold.length, 1);
+
+  const raw = buildGateQueue({ samples: [shared, onlyGold], cases: [sharedCase, sameSourceTwice], dedupe: false });
+  assert.equal(raw.length, 4, "关掉去重回到逐条执行");
+  assert.equal(raw[0].key, "gold:gold-1");
 });

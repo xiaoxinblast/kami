@@ -20,6 +20,9 @@ export const CONSISTENCY_FINDING_TYPES = Object.freeze([
 const MAX_FINDINGS_PER_CHUNK = 40;
 const MAX_TEXT = 300;
 
+/** 核对提示词里的证据上限：够模型判断即可，避免一次把术语库和 TM 全灌进去。 */
+export const CONSISTENCY_EVIDENCE_LIMITS = Object.freeze({ terms: 40, tm: 30, styleRules: 12 });
+
 function clip(value, limit = MAX_TEXT) {
   const text = String(value ?? "").replace(/\s+/gu, " ").trim();
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
@@ -44,22 +47,54 @@ export function splitConsistencyChunks(pairs = [], { maxChars = CONSISTENCY_CHUN
   return chunks.map((chunk, index) => ({ index, ids: chunk.ids, chars: chunk.chars }));
 }
 
-export function consistencyMessages({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null } = {}) {
+function evidenceLines(evidence = null) {
+  const style = evidence?.style || null;
+  const styleText = style
+    ? [
+      `风格规范：${clip(style.name, 80) || "未命名"}${style.version ? ` · 版本 ${style.version}` : ""}`,
+      style.instruction ? `规范说明：${clip(style.instruction, 600)}` : "",
+      (Array.isArray(style.rules) ? style.rules : []).slice(0, CONSISTENCY_EVIDENCE_LIMITS.styleRules).length
+        ? `规范要点：\n${(style.rules || []).slice(0, CONSISTENCY_EVIDENCE_LIMITS.styleRules).map((rule) => `· ${clip(rule, 140)}`).join("\n")}`
+        : "",
+      style.registerPolicy ? `语域上限：${JSON.stringify(style.registerPolicy)}` : ""
+    ].filter(Boolean).join("\n")
+    : "";
+  const terms = (Array.isArray(evidence?.terms) ? evidence.terms : []).slice(0, CONSISTENCY_EVIDENCE_LIMITS.terms);
+  const termsText = terms.length
+    ? terms.map((item) => `· ${clip(item.source, 80)} → ${clip(item.target, 80)}${item.mode ? ` [${clip(item.mode, 20)}]` : ""}`).join("\n")
+    : "";
+  const tm = (Array.isArray(evidence?.tm) ? evidence.tm : []).slice(0, CONSISTENCY_EVIDENCE_LIMITS.tm);
+  const tmText = tm.length
+    ? tm.map((item) => `· ${clip(item.source, 90)} → ${clip(item.target, 90)}${item.authority ? `［${clip(item.authority, 30)}］` : ""}`).join("\n")
+    : "";
+  return [
+    styleText ? `风格指南（项目生效版本，判断语体/口吻漂移时以它为准）：\n${styleText}` : "",
+    termsText ? `登记术语（项目术语库里命中本片原文的条目，术语写法以它为准）：\n${termsText}` : "",
+    tmText ? `翻译记忆（按权威排序：主 TM/参考 TM 的人工译例优先；工作 TM 的机器译例只作参考，不得当作权威）：\n${tmText}` : ""
+  ].filter(Boolean);
+}
+
+export function consistencyMessages({ filename = "", locale = "zh-CN", purpose = "general", pairs = [], part = null, evidence = null } = {}) {
   const partLine = part ? `这是整份文件的第 ${part.index + 1} / ${part.total} 片，id 沿用文件里的条目 id。\n` : "";
   const system = [
     "你是日语到简体中文本地化项目的交付前一致性审核员。你只看**跨条目的不一致**，不重复逐条 QA 已经查过的问题。",
     "只报这两类：① 同一角色、同一专名、同一术语或同一固定说法在不同条目里出现了不一致的译法；② 同一角色的口吻、敬语级别在不同条目里明显漂移。",
     "不要报单条问题（漏译、错译、标点、术语未采用），也不要给主观润色建议。没有发现就返回空数组。",
+    "判断前先看证据：登记术语与人工批准的翻译记忆是权威，按它判定该统一成哪个写法；工作 TM 的机器译例只能参考。",
+    "证据不足时不要自己发明统一译法：把 suggestion 写成「依据缺失，需人工决定：……」，unify 留空数组。",
     `type 只能是：${CONSISTENCY_FINDING_TYPES.join(" / ")}。`,
     "ids 必须逐字引用输入里的条目 id，至少两个；detail 与 suggestion 用简体中文。",
-    '只输出严格 JSON：{"findings":[{"type":"term_drift","ids":["seg-3","seg-88"],"detail":"同一个专名在两条里译法不同","suggestion":"统一为其中一种并复核术语库"}]}',
+    "terms 填这条 finding 涉及的原词与它在文件里出现过的写法；unify 填你建议的统一方案（每个原词一个 target，写法和 variant 逐字一致）；evidence 填你依据的条目。",
+    '只输出严格 JSON：{"findings":[{"type":"term_drift","ids":["seg-3","seg-88"],"detail":"同一个专名在两条里译法不同","suggestion":"统一为其中一种并复核术语库","terms":[{"source":"無効","variants":["禁用","关闭"]}],"unify":[{"source":"無効","target":"禁用"}],"evidence":[{"kind":"term","ref":"無効 → 禁用"}]}]}',
     "整个回答只能是一个 JSON 对象：禁止拆成多段、禁止 Markdown、解释或代码围栏。"
   ].join("\n");
+  const evidenceText = evidenceLines(evidence);
   const user = [
     `文件名：${filename || "未命名"}`,
     `目标语言：${locale}`,
     `文件整体用途：${purpose}`,
     partLine,
+    ...evidenceText,
     "条目对照：",
     JSON.stringify(pairs.map((pair) => ({ id: pair.id, source: clip(pair.source, 400), translation: clip(pair.translation, 400) })))
   ].filter(Boolean).join("\n");
@@ -77,6 +112,51 @@ function extractJsonObject(content) {
   }
 }
 
+const MAX_FINDING_TERMS = 8;
+const MAX_FINDING_VARIANTS = 6;
+const MAX_FINDING_UNIFY = 8;
+const MAX_FINDING_EVIDENCE = 8;
+
+/** 模型给的"涉及哪些原词、出现过哪些写法"：字段残缺时按空数组处理，不因此丢整条 finding。 */
+function parseFindingTerms(list = []) {
+  const terms = [];
+  for (const item of Array.isArray(list) ? list : []) {
+    const source = clip(item?.source, 120);
+    if (!source) continue;
+    const variants = [...new Set((Array.isArray(item?.variants) ? item.variants : [])
+      .map((value) => clip(value, 120)).filter(Boolean))].slice(0, MAX_FINDING_VARIANTS);
+    terms.push({ source, variants });
+    if (terms.length >= MAX_FINDING_TERMS) break;
+  }
+  return terms;
+}
+
+/** 模型建议的统一方案：只保留 source/target 都非空的项，统一值是否成立由裁决层复核。 */
+function parseFindingUnify(list = []) {
+  const unify = [];
+  for (const item of Array.isArray(list) ? list : []) {
+    const source = clip(item?.source, 120);
+    const target = clip(item?.target, 120);
+    if (!source || !target) continue;
+    unify.push({ source, target });
+    if (unify.length >= MAX_FINDING_UNIFY) break;
+  }
+  return unify;
+}
+
+function parseFindingEvidence(list = []) {
+  const evidence = [];
+  for (const item of Array.isArray(list) ? list : []) {
+    const ref = clip(item?.ref, 160);
+    const kind = clip(item?.kind, 32);
+    const note = clip(item?.note, 160);
+    if (!ref && !kind) continue;
+    evidence.push({ kind, ref, note });
+    if (evidence.length >= MAX_FINDING_EVIDENCE) break;
+  }
+  return evidence;
+}
+
 /** 解析一片结论；引用了本片之外条目 id 的发现整条丢弃，宁可少报也不误报。 */
 export function parseConsistencyFindings(content, { validIds = [] } = {}) {
   const payload = extractJsonObject(content);
@@ -91,7 +171,16 @@ export function parseConsistencyFindings(content, { validIds = [] } = {}) {
       continue;
     }
     const type = CONSISTENCY_FINDING_TYPES.includes(String(item?.type)) ? String(item.type) : "term_drift";
-    findings.push({ type, ids, detail, suggestion: clip(item?.suggestion), source: "model" });
+    findings.push({
+      type,
+      ids,
+      detail,
+      suggestion: clip(item?.suggestion),
+      source: "model",
+      terms: parseFindingTerms(item?.terms),
+      unify: parseFindingUnify(item?.unify),
+      evidence: parseFindingEvidence(item?.evidence)
+    });
     if (findings.length >= MAX_FINDINGS_PER_CHUNK) break;
   }
   return { findings, dropped };
@@ -135,7 +224,11 @@ export function deterministicConsistencyFindings(segments = []) {
       ids: list.map((segment) => String(segment.id)),
       detail: `同一原文出现 ${list.length} 次，却有 ${variants.size} 种不同译文：${[...variants.keys()].map((value) => clip(value, 60)).join(" / ")}`,
       suggestion: "确认这几处是否应保持一致，或原文本身一字多义需要区分。",
-      source: "rule"
+      source: "rule",
+      // 同一原文的两种写法：统一成哪个由裁决层按术语库 / 人工 TM / 文件内多数定案。
+      terms: [{ source: String(list[0].source || "").trim(), variants: [...variants.keys()].slice(0, 6) }],
+      unify: [],
+      evidence: []
     });
   }
   const termUsage = new Map();
@@ -160,7 +253,11 @@ export function deterministicConsistencyFindings(segments = []) {
       ids: [...bucket.hits, ...bucket.misses].map((segment) => String(segment.id)).slice(0, 12),
       detail: `术语「${source}」的登记译法「${bucket.expected}」在 ${bucket.hits.length} 条里采用、在 ${bucket.misses.length} 条里未采用`,
       suggestion: "逐条确认未采用的地方是语境判断，还是漏用；确认后统一。",
-      source: "rule"
+      source: "rule",
+      // 术语允许按语境判断，所以这条只补充依据、不自动替换（裁决层按 report_only 处理）。
+      terms: [{ source, variants: [bucket.expected] }],
+      unify: [],
+      evidence: [{ kind: "term", ref: `${source} → ${bucket.expected}`, note: "术语库登记译法" }]
     });
   }
   return findings;
@@ -187,6 +284,8 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
   let protectedKept = 0;
   let termExpected = 0;
   let termHit = 0;
+  let fuzzyExpected = 0;
+  let fuzzyHit = 0;
   let forbiddenHits = 0;
   let factIssueCount = 0;
   let factIssueSegments = 0;
@@ -203,7 +302,7 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
     // "0 分段落"——那会让平均分与覆盖率同时失真（真实发生过）。
     const hasScore = result.qaScore !== null && result.qaScore !== undefined && result.qaScore !== ""
       && Number.isFinite(Number(result.qaScore));
-    if (hasScore) {
+    if (hasScore && !result.aiQa?.fallbackReason) {
       scores.push(Number(result.qaScore));
       modelQa += 1;
     }
@@ -220,11 +319,19 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
       protectedTotal += tokens.length;
       protectedKept += tokens.filter((token) => translation.includes(token)).length;
     }
+    // 采用率只算精确命中：模糊/智能命中只是提示，把它们算进"应采用的登记译法"会把
+    // 「语境判断未采用」误报成漏用，报告里就会出现 50% 这种吓人又不准的数字。
     for (const match of Array.isArray(result.matches) ? result.matches : []) {
       const expected = String(match?.expectedTarget || match?.term?.target || "").trim();
       if (!expected) continue;
-      termExpected += 1;
-      if (normalizeSource(translation).includes(normalizeSource(expected))) termHit += 1;
+      const hit = normalizeSource(translation).includes(normalizeSource(expected));
+      if (match?.mode === "exact") {
+        termExpected += 1;
+        if (hit) termHit += 1;
+      } else {
+        fuzzyExpected += 1;
+        if (hit) fuzzyHit += 1;
+      }
     }
     const reasons = [];
     if (segment.status === "error") reasons.push("翻译失败");
@@ -252,6 +359,7 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
     purposes: [...purposes.entries()].map(([purpose, count]) => ({ purpose, count })).sort((a, b) => b.count - a.count),
     coverage: {
       modelQa,
+      qaIncomplete: done.filter((segment) => segment.result?.aiQa?.fallbackReason).length,
       deterministicOnly: Math.max(0, done.length - modelQa),
       percent: done.length ? Math.round((modelQa / done.length) * 100) : 0
     },
@@ -268,6 +376,8 @@ export function buildQualityReport({ segments = [], brief = null, findings = [],
       expectedUses: termExpected,
       applied: termHit,
       adoptionRate: termExpected ? Math.round((termHit / termExpected) * 100) : null,
+      fuzzyExpected,
+      fuzzyApplied: fuzzyHit,
       basis: "recorded-matches"
     },
     facts: { issueCount: factIssueCount, segments: factIssueSegments },

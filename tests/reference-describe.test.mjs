@@ -71,8 +71,8 @@ test("describe 路由把描述写回 ingest_report 并失效索引", async () =>
   assert.ok(start >= 0, "服务端要有 describe 路由");
   const body = server.slice(start, server.indexOf('url.pathname.endsWith("/status")', start));
   assert.match(body, /await getReferenceDocument\(id\)/u);
-  assert.match(body, /const description = await describeReferenceWithModel\(/u);
-  assert.match(body, /ingestReport: \{ \.\.\.\(document\.ingestReport \|\| \{\}\), description,/u);
-  assert.match(body, /referenceIndex\.invalidate\(document\.projectId\)/u);
-  assert.match(body, /return json\(res, 409, \{ error: "这份资料没有可读正文/u);
+  assert.match(body, /const \{ description, document: updated \} = await describeReferenceDocumentById\(document\)/u);
+  assert.match(server, /ingestReport: \{ \.\.\.\(document\.ingestReport \|\| \{\}\), description,/u);
+  assert.match(server, /referenceIndex\.invalidate\(document\.projectId\)/u);
+  assert.match(server, /throw new Error\("这份资料没有可读正文，无法生成描述"\)/u);
 });

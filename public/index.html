@@ -78,18 +78,33 @@
         <section class="view active" id="view-workbench">
           <div class="locale-strip" id="workbenchLocales" aria-label="固定目标语言：简体中文"></div>
           <div class="translation-mode-switch" aria-label="翻译模式">
-            <button class="translation-mode active" data-translation-mode="single"><span>单句输入</span><small>手动输入即时处理</small></button>
-            <button class="translation-mode" data-translation-mode="batch"><span>粘贴 / 文件翻译</span><small>自动分句与合并导出</small></button>
+            <button class="translation-mode active" data-translation-mode="files"><span>文件列表</span><small>上传、进度、导出与状态</small></button>
+            <button class="translation-mode" data-translation-mode="single"><span>单句输入</span><small>手动输入即时处理</small></button>
+            <button class="translation-mode" data-translation-mode="batch"><span>当前文件</span><small>分句队列、语境档案与质量报告</small></button>
           </div>
           <div class="tier-row" id="tierRow">
             <label><span>质量档</span><select id="qualityTier"><option value="auto" selected>自动（按句段风险分档）</option><option value="fast">快速 · 单次直译 + 确定性检查</option><option value="standard">标准 · 初译 + 模型质检</option><option value="strict">严苛 · 多候选 + 多轮修订</option></select></label>
             <small class="tier-note">系统按每段的事实锚点、承诺措辞、长度与术语冲突自动选档，只向上升级；短标签走快速，长句与高风险走严苛。用途（语体/领域）由整份文件的语境分析标注，不再逐段手填。</small>
           </div>
-          <div id="singleWorkspace">
+          <div id="fileListWorkspace">
+            <article class="panel batch-files-panel">
+              <div class="panel-head">
+                <div><span class="card-kicker">SOURCE FILES</span><h2>待译文件</h2><p class="panel-caption">一个文件一条记录：翻译进度、语境分析、QA 待处理与人工审校回填都在这行里。点「打开」进入分句队列。</p></div>
+                <div class="batch-progress-summary"><span class="count" id="batchFileCount">0 个文件</span><button class="button ghost small" id="batchFilesRefresh" type="button">刷新</button></div>
+              </div>
+              <div class="task-toolbar batch-files-toolbar">
+                <label><span>状态</span><select id="batchFileStatus"><option value="">全部状态</option><option value="in_progress">翻译中</option><option value="review">QA 待处理</option><option value="needs_attention">存在失败</option><option value="ready">未开始</option><option value="completed">已完成</option></select></label>
+                <label class="task-search"><span>搜索文件</span><input id="batchFileSearch" placeholder="文件名" /></label>
+                <label class="button primary" for="batchFile" id="batchFileAddLabel">添加新文件</label>
+              </div>
+              <div class="batch-file-list" id="batchFileList"><div class="empty-list">正在读取待译文件……</div></div>
+            </article>
+          </div>
+          <div id="singleWorkspace" hidden>
           <div class="translation-grid">
             <article class="editor-card source-card">
               <div class="card-head"><div><span class="card-kicker">SOURCE · JA-JP</span><h2>日语原文</h2></div><span class="count" id="sourceCount">0 字</span></div>
-              <textarea id="sourceText" placeholder="手动输入日语单句；粘贴文本会自动切换到分句队列……">新しいプレミアムパスが登場！</textarea>
+              <textarea id="sourceText" placeholder="手动输入一句日语，即时得到译文；整份文件请到「文件列表」上传。">新しいプレミアムパスが登場！</textarea>
               <label class="context-field" for="neighborContext"><span>可选上下文</span><input id="neighborContext" placeholder="活动背景、角色关系或上一段内容" /></label>
             </article>
             <article class="editor-card target-card">
@@ -106,15 +121,27 @@
           </div>
 
           <div class="batch-workspace" id="batchWorkspace" hidden>
+            <div class="batch-back-row"><button class="button ghost small" id="batchBackToList" type="button">← 返回文件列表</button><span id="batchBackFilename"></span></div>
+            <div class="batch-tabs" id="batchTabs" role="tablist" aria-label="当前文件分区">
+              <button class="batch-tab active" type="button" role="tab" data-batch-tab="setup" aria-selected="true">文件与策略</button>
+              <button class="batch-tab" type="button" role="tab" data-batch-tab="queue" aria-selected="false">翻译队列<span class="batch-tab-badge" id="batchTabQueueBadge" hidden></span></button>
+              <button class="batch-tab" type="button" role="tab" data-batch-tab="brief" aria-selected="false">语境档案<span class="batch-tab-badge" id="batchTabBriefBadge" hidden></span></button>
+              <button class="batch-tab" type="button" role="tab" data-batch-tab="report" aria-selected="false">质量报告<span class="batch-tab-badge" id="batchTabReportBadge" hidden></span></button>
+              <button class="batch-tab" type="button" role="tab" data-batch-tab="terms" aria-selected="false">术语普查<span class="batch-tab-badge" id="batchTabTermsBadge" hidden></span></button>
+            </div>
+            <div class="batch-workflow" id="batchWorkflow" hidden>
+              <div class="batch-workflow-head"><strong id="batchWorkflowSummary"></strong><button class="button secondary small" id="batchRetryQa" type="button" hidden>重试未完成 AIQA</button></div>
+              <div class="batch-workflow-stages" id="batchWorkflowStages" aria-live="polite"></div>
+              <p id="batchWorkflowNote"></p>
+            </div>
+            <div class="batch-tab-panel" data-batch-panel="setup">
             <div class="batch-setup-grid">
               <article class="panel batch-source-panel">
-                <div class="panel-head"><div><span class="card-kicker">SOURCE DOCUMENT</span><h2>粘贴文本与文件</h2></div><span class="count" id="batchSourceMeta">尚未载入</span></div>
+                <div class="panel-head"><div><span class="card-kicker">SOURCE DOCUMENT</span><h2>待译文件</h2></div><span class="count" id="batchSourceMeta">尚未载入</span></div>
                 <label class="drop-zone batch-drop-zone" id="batchDropZone" for="batchFile">
                   <input id="batchFile" type="file" accept=".txt,.md,.docx,.xlsx,.csv,.xliff,.mqxliff" hidden />
-                  <span class="upload-mark">↑</span><strong id="batchFilePrompt">拖入或点击选择文件</strong><small id="batchFileMeta">拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 20MB</small>
+                  <span class="upload-mark">↑</span><strong id="batchFilePrompt">拖入或点击选择文件</strong><small id="batchFileMeta">拖入后自动识别；支持 TXT、Markdown、DOCX、XLSX、CSV、XLIFF、MQXLIFF，最大 20MB。单句或片段请用「单句输入」。</small>
                 </label>
-                <div class="batch-or"><span>或直接粘贴文本 · 粘贴后自动解析</span></div>
-                <textarea id="batchPasteText" class="batch-paste" placeholder="粘贴单句、公告、剧情或运营文案；系统会立即按完整句子生成队列。"></textarea>
               </article>
               <article class="panel batch-policy-panel">
                 <span class="card-kicker">SEGMENT POLICY</span><h2>分段与翻译策略</h2>
@@ -129,6 +156,8 @@
                 <div class="spreadsheet-analysis" id="spreadsheetAnalysis" hidden></div>
               </article>
             </div>
+            </div>
+            <div class="batch-tab-panel" data-batch-panel="queue" hidden>
             <article class="panel batch-queue-panel">
               <div class="panel-head">
                 <div><span class="card-kicker">TRANSLATION QUEUE</span><h2>分段队列</h2></div>
@@ -137,10 +166,15 @@
               <div class="batch-progress-track"><i id="batchProgressBar"></i></div>
               <div class="batch-qa-filter" id="batchQaFilter" hidden>
                 <div class="qa-filters" id="batchQaChips" role="group" aria-label="按 QA 状态筛选分段"></div>
+                <label class="task-search segment-search"><span>搜索分段</span><input id="batchSegmentSearch" placeholder="搜原文 / 译文 / ID / 注释" /></label>
+                <small class="batch-segment-count" id="batchSegmentCount">已显示 0 / 共 0 条</small>
                 <button class="button ghost small" id="batchJumpNext" type="button">跳到下一条待处理</button>
               </div>
-              <div class="batch-segments" id="batchSegments"><div class="empty-list batch-empty">粘贴文本或拖入文件后，会自动识别正文并生成分句队列。</div></div>
+              <div class="batch-segments" id="batchSegments"><div class="empty-list batch-empty">拖入或选择文件后，会自动识别正文并生成分句队列。</div></div>
             </article>
+            </div>
+            <div class="batch-tab-panel" data-batch-panel="brief" hidden>
+            <div class="batch-tab-empty" id="batchBriefEmpty">还没有语境档案：段落数达到阈值时，开始翻译前会自动通读全文做一次语境分析；跑完可在这里查看与编辑。</div>
             <article class="panel batch-brief-panel" id="batchBriefPanel" hidden>
               <div class="panel-head">
                 <div><span class="card-kicker">CONTEXT BRIEF</span><h2>语境档案</h2><p class="panel-caption" id="batchBriefSummary">翻译前通读全文得到的用途区间与格式注意点。</p></div>
@@ -156,14 +190,30 @@
                 <button class="button ghost small" id="batchBriefCancel" type="button">取消</button>
               </div>
             </article>
+            </div>
+            <div class="batch-tab-panel" data-batch-panel="report" hidden>
+            <div class="batch-tab-empty" id="batchReportEmpty">还没有质量报告：整批翻完后会自动跑一次跨条目一致性核对，有依据的漂移会当场统一。</div>
             <article class="panel batch-report-panel" id="batchReportPanel" hidden>
               <div class="panel-head">
                 <div><span class="card-kicker">QUALITY REPORT</span><h2>质量报告</h2><p class="panel-caption" id="batchReportSummary">整批完成后的质量指标与跨条目待核对清单。</p></div>
                 <div class="batch-progress-summary"><button class="button ghost small" id="batchConsistencyRun" type="button">重新核对</button></div>
               </div>
               <div class="batch-report-metrics" id="batchReportMetrics"></div>
+              <div class="batch-report-repair" id="batchReportRepair" hidden></div>
               <div class="batch-report-findings" id="batchReportFindings"></div>
             </article>
+            </div>
+            <div class="batch-tab-panel" data-batch-panel="terms" hidden>
+              <article class="panel batch-term-panel" id="batchTermSurveyPanel">
+                <div class="panel-head">
+                  <div><span class="card-kicker">TERM SURVEY</span><h2>术语普查</h2><p class="panel-caption" id="batchTermSurveySummary">整批翻完后自动找出"像术语但库里没有"的说法；回填人工终稿后再决定入库。</p></div>
+                  <div class="batch-progress-summary"><button class="button ghost small" id="batchTermSurveyRun" type="button">重新普查</button></div>
+                </div>
+                <div class="batch-term-chips" id="batchTermSurveyChips"></div>
+                <div class="qa-filters" id="batchTermSurveyFilters" role="group" aria-label="按状态筛选术语"></div>
+                <div class="batch-term-list" id="batchTermSurveyList"><div class="empty-list batch-empty">正在读取术语普查结果……</div></div>
+              </article>
+            </div>
           </div>
         </section>
 
@@ -322,16 +372,49 @@
         <section class="view" id="view-references">
           <article class="panel">
             <div class="panel-head"><div><p class="panel-caption">角色设定、剧本、故事梗概等。它们不随每次翻译注入提示词，只在模型主动查询时按片段返回。</p></div><div class="asset-count" id="referenceCount">0 条</div></div>
-            <div class="task-toolbar">
-              <label><span>资料库</span><select id="referenceLibrary"><option value="">全部资料库</option></select></label>
-              <label><span>状态</span><select id="referenceStatus"><option value="">全部状态</option><option value="ready">可用</option><option value="indexing">索引中</option><option value="failed">失败</option><option value="disabled">已停用</option></select></label>
-              <label><span>搜索</span><input id="referenceSearch" type="search" placeholder="按名称或文件名" /></label>
-              <button class="button secondary" id="refreshReferences" type="button">刷新</button>
-              <label class="button primary" for="referenceFileInput">上传参考资料</label>
-            <input id="referenceFileInput" type="file" accept=".txt,.md,.docx,.xlsx,.csv,.pdf,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp" multiple hidden />
+            <div class="reference-manager" id="referenceDropZone">
+              <div class="reference-drop-overlay" id="referenceDropOverlay" hidden>
+                <div><strong id="referenceDropOverlayTitle">文件拖入这里导入</strong><small id="referenceDropOverlayTarget"></small></div>
+              </div>
+              <aside class="reference-tree-panel">
+                <div class="reference-tree-head"><strong>目录</strong><button class="icon-button" id="referenceNewFolder" type="button" title="新建文件夹" aria-label="新建文件夹">＋</button></div>
+                <div class="reference-tree" id="referenceTree"><div class="empty-list">正在读取目录……</div></div>
+              </aside>
+              <div class="reference-content">
+                <div class="reference-root-dropzone" id="referenceRootDropZone" data-reference-folder-id="">
+                  <span class="reference-root-drop-icon" aria-hidden="true">⇥</span>
+                  <div><strong>拖入这里导入到项目根目录</strong><small>支持文件和整个文件夹；拖到下方目录或目录树节点则导入到对应文件夹</small></div>
+                </div>
+                <div class="reference-breadcrumb" id="referenceBreadcrumb"></div>
+                <div class="task-toolbar reference-toolbar">
+                  <label><span>状态</span><select id="referenceStatus"><option value="">全部状态</option><option value="ready">可用</option><option value="indexing">索引中</option><option value="failed">失败</option><option value="disabled">已停用</option></select></label>
+                  <label class="reference-search"><span>搜索</span><input id="referenceSearch" type="search" placeholder="按名称或文件名；会搜索当前目录及子目录" /></label>
+                  <div class="reference-vision-toggle" role="group" aria-label="上传时如何处理图片">
+                    <button type="button" data-reference-vision="all">文字 + 图片</button>
+                    <button type="button" data-reference-vision="none">仅文字</button>
+                  </div>
+                  <label class="reference-auto-scan" title="导入完成后自动生成一两句资料说明；失败的资料不会被删除">
+                    <input id="referenceAutoScan" type="checkbox" role="switch" checked />
+                    <span class="reference-auto-scan-track" aria-hidden="true"></span>
+                    <span>导入后自动 AI 扫描</span>
+                  </label>
+                  <label class="button secondary" for="referenceFolderInput">上传文件夹</label>
+                  <label class="button primary" for="referenceFileInput">上传文件</label>
+                  <button class="button secondary" id="refreshReferences" type="button">刷新</button>
+                  <input id="referenceFileInput" type="file" accept=".txt,.md,.docx,.xlsx,.csv,.pdf,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp" multiple hidden />
+                  <input id="referenceFolderInput" type="file" webkitdirectory directory multiple hidden />
+                </div>
+                <div class="reference-selection-bar" id="referenceSelectionBar">
+                  <span id="referenceSelectionText">已选 0 项</span>
+                  <button class="button ghost small" id="referenceSelectAll" type="button">全选当前结果</button>
+                  <button class="button ghost small" id="referenceClearSelection" type="button" disabled>清空</button>
+                  <button class="button primary small" id="referenceBatchDescribe" type="button" disabled>批量 AI 扫描</button>
+                </div>
+                <p class="panel-caption reference-upload-note" id="referenceUploadNote">支持 .txt / .md / .docx / .xlsx / .csv / .pdf / .pptx / .png / .jpg / .webp，单文件不超过 200MB。可拖入多个文件或整个文件夹；上传前用上方开关决定是否读取图片内容。</p>
+                <div class="reference-list" id="referenceList"><div class="empty-list">正在读取参考资料……</div></div>
+                <div class="reference-load-more"><button class="button ghost small" id="referenceLoadMore" type="button" hidden>加载更多</button></div>
+              </div>
             </div>
-            <p class="panel-caption" id="referenceUploadNote">支持 .txt / .md / .docx / .xlsx / .csv / .pdf / .pptx / .png / .jpg / .webp，单文件不超过 20MB。PDF 扫描页、文档内嵌图片（PPT 截图、DOCX 插图、XLSX 贴图）与单独上传的图片都会交给模型识图转录，单份资料最多 40 张；进度在任务中心与这里都能看到。</p>
-            <div class="reference-list" id="referenceList"><div class="empty-list">正在读取参考资料……</div></div>
           </article>
           <article class="panel" id="referenceDetailPanel" hidden>
             <div class="panel-head"><div><span class="card-kicker">REFERENCE DETAIL</span><h2 id="referenceDetailTitle">资料详情</h2><p class="panel-caption" id="referenceDetailMeta"></p></div><button class="button ghost small" id="closeReferenceDetail" type="button">关闭</button></div>
@@ -404,7 +487,7 @@
           <article class="panel style-guidance-panel">
             <div class="panel-head"><div><span class="card-kicker">STYLE GUIDANCE LIBRARY</span><h2 id="styleGuidanceTitle">简体中文翻译风格指导</h2></div><div class="asset-count" id="styleGuidanceCount">0 条规则</div></div>
             <div class="library-import-bar style-guide-import-bar">
-              <label class="library-file-button"><input id="styleGuideFile" type="file" accept=".txt,.md,.docx" hidden /><span class="library-file-cta">选择风格指南文件</span><small id="styleGuideFileName">支持 TXT / Markdown / DOCX，最大 5MB</small></label>
+              <label class="library-file-button" title="点击选择要导入的风格指南文件"><input id="styleGuideFile" type="file" accept=".txt,.md,.docx" hidden /><span class="upload-mark" aria-hidden="true">↑</span><span class="library-file-text"><strong class="library-file-cta">点击选择风格指南文件</strong><small id="styleGuideFileName">支持 TXT / Markdown / DOCX，最大 5MB</small></span></label>
               <button class="button primary" id="styleGuideImportButton" type="button" disabled>导入并立即启用</button>
               <small class="library-import-note" id="styleGuideImportNote">人工风格指南按你的原话生效，优先级高于自动蒸馏出的规则，只作用于当前项目。</small>
             </div>
@@ -435,122 +518,148 @@
             <div class="panel-head"><div><span class="card-kicker">REVIEW QUEUE · NOT A STYLE RULE</span><h2>AIQA 反例审核</h2><p class="panel-caption">这里是“错误译文 → 修正译文”的质量案例，不是风格指导。采纳后只用于后续翻译的同类错误提醒。</p></div><div class="asset-count" id="styleQaCount">0 条</div></div>
             <div class="style-qa-list" id="styleQaList"><div class="empty-list">当前没有待审核案例</div></div>
           </article>
+          <article class="panel learning-conflict-panel">
+            <div class="panel-head learning-section-head">
+              <div><span class="card-kicker">RULE CONFLICTS</span><h2>规则冲突审查</h2><p class="panel-caption">人工风格指南、蒸馏规范、技能附加规则与译者画像会往同一份提示词里写文字。这里按项目比对四方是否互相矛盾：<strong>人工指南优先</strong>于蒸馏规范，蒸馏规范优先于技能规则；能就地退休的只有蒸馏规则，未生效的候选技能可以一键停用。</p></div>
+              <div class="learning-conflict-actions">
+                <span class="asset-count subtle" id="styleConflictCount">尚未扫描</span>
+                <button class="button ghost small" type="button" id="styleConflictScan">立即扫描</button>
+              </div>
+            </div>
+            <div class="learning-conflict-scope">
+              <small id="styleConflictSources">尚未扫描：扫描会列出人工指南 / 蒸馏规范 / 技能规则 / 译者画像各有多少条参与比对。</small>
+            </div>
+            <div class="learning-conflict-list" id="styleConflictList"><div class="empty-list learning-empty">点击「立即扫描」检查该范围的规则冲突</div></div>
+          </article>
         </section>
 
         <section class="view" id="view-learning">
           <div class="locale-strip" id="learningLocales" aria-label="学习资产语言"></div>
           <div class="learning-scope-bar">
-            <div><span class="card-kicker">SKILL SCOPE</span><strong>翻译技能作用域</strong><small>固定为日语→简体中文。这里只决定"看哪个作用域的翻译技能与评测"；风格规范已经改成项目级（每项目一份），不受这里影响。</small></div>
-            <label><span>内容语体</span><select id="learningContentType"><option value="general">通用内容</option></select></label>
-            <label><span>业务领域</span><select id="learningDomain"><option value="general">通用</option><option value="game">游戏</option><option value="marketing">市场营销</option><option value="community">社区运营</option><option value="all">全部领域</option></select></label>
+            <div><span class="card-kicker">SKILL SCOPE</span><strong>翻译技能作用域：整个项目</strong><small>语体与领域由系统自动判定、只作参考（影响排序与提示词，不再隔离资产）。晋升流水线按项目结算：① 生效版本 → ② 候选 → ③ 评测 → ④ 门禁 → ⑤ 启用。</small></div>
           </div>
-          <div class="learning-scope-hint" id="learningScopeHint" hidden></div>
           <div class="learning-error" id="learningError" role="alert" hidden>
             <div><strong>学习中心暂时无法读取</strong><span id="learningErrorMessage">请稍后重试。</span></div>
             <button class="button ghost small" id="retryLearning" type="button">重新读取</button>
           </div>
 
-          <section class="learning-overview" aria-label="学习概览">
-            <article class="learning-stat-card">
-              <span class="learning-stat-icon trajectory" aria-hidden="true">↗</span>
-              <div><strong id="learningTrajectoryCount">—</strong><span>当前范围有效轨迹</span><small>仅统计已有最终译文的完成或复核轨迹</small></div>
-            </article>
-            <article class="learning-stat-card">
-              <span class="learning-stat-icon skill" aria-hidden="true">S</span>
-              <div><strong id="learningSkillCount">—</strong><span>当前范围技能版本</span><small>严格按语言、语体、领域与项目统计</small></div>
-            </article>
-            <article class="learning-stat-card">
-              <span class="learning-stat-icon pending" aria-hidden="true">◇</span>
-              <div><strong id="learningPendingCount">—</strong><span>尚未运行评测的候选</span><small>证据不足或未通过的候选不计入此数</small></div>
-            </article>
-          </section>
-
-          <article class="panel learning-champion-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">CURRENT CHAMPION</span><h2>当前生产技能</h2><p class="panel-caption">只有生效版本会影响生产翻译；候选版本始终在隔离评测中运行。</p></div>
-              <div class="asset-count" id="learningChampionStatus">未加载</div>
+          <div class="learning-pipeline" id="learningPipeline">
+            <div class="learning-pipeline-head">
+              <ol class="learning-steps" id="learningSteps"></ol>
+              <div class="learning-pipeline-chips" id="learningPipelineChips"></div>
             </div>
-            <div id="learningChampion"><div class="empty-list learning-empty">正在读取当前技能……</div></div>
-          </article>
 
-          <article class="panel learning-candidates-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">CHALLENGER QUEUE</span><h2>候选技能版本</h2><p class="panel-caption">系统从重复修订、成功轨迹和用户纠正中提出变更，批准前不会进入生产。</p></div>
-              <div class="asset-count subtle" id="learningCandidateCount">0 个候选</div>
-            </div>
-            <div class="learning-candidate-list" id="learningCandidateList"><div class="empty-list learning-empty">当前没有候选技能</div></div>
-          </article>
+            <section class="learning-step-section" id="learningStepChampion" hidden>
+              <article class="panel learning-champion-panel">
+                <div class="panel-head learning-section-head">
+                  <div><span class="card-kicker">STEP 1 · CURRENT CHAMPION</span><h2>当前生产技能</h2><p class="panel-caption">只有生效版本会影响生产翻译；候选版本始终在隔离评测中运行。</p></div>
+                  <div class="asset-count" id="learningChampionStatus">未加载</div>
+                </div>
+                <div id="learningChampion"><div class="empty-list learning-empty">正在读取当前技能……</div></div>
+              </article>
+            </section>
 
-          <article class="panel learning-evaluation-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">EVALUATION BOARD</span><h2>新旧版本评测对比</h2><p class="panel-caption">候选必须在独立样本上优于当前生效版本，并通过术语、QA 与退化检查。</p></div>
-              <div class="learning-legend"><span><i class="positive"></i>提升</span><span><i class="negative"></i>退化</span></div>
-            </div>
-            <div class="learning-evaluation-matrix" id="learningEvaluationMatrix"><div class="empty-list learning-empty">运行候选评测后展示对比指标</div></div>
-          </article>
+            <section class="learning-step-section" id="learningStepCandidates" hidden>
+              <article class="panel learning-candidates-panel">
+                <div class="panel-head learning-section-head">
+                  <div><span class="card-kicker">STEP 2 · CHALLENGER QUEUE</span><h2>候选技能版本</h2><p class="panel-caption">系统从人工终稿与外部审校改动中提出变更，批准前不会进入生产。</p></div>
+                  <div class="asset-count subtle" id="learningCandidateCount">0 个候选</div>
+                </div>
+                <div class="learning-candidate-list" id="learningCandidateList"><div class="empty-list learning-empty">当前没有候选技能</div></div>
+              </article>
+            </section>
 
-          <article class="panel learning-quality-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">RELEASE GATE</span><h2>固定 Gold Set 与失败回归</h2><p class="panel-caption">候选晋升前必须在这套不随人工终稿漂移的固定资产上真跑一遍。回归案例一票否决，Gold 术语或事实退化同样阻断发版。</p></div>
-              <div class="learning-quality-actions">
-                <span class="asset-count subtle" id="learningGateStatus">尚未运行</span>
-                <button class="button ghost small" type="button" id="learningGateRun">运行门禁</button>
+            <section class="learning-step-section" id="learningStepEvaluation" hidden>
+              <article class="panel learning-evaluation-panel">
+                <div class="panel-head learning-section-head">
+                  <div><span class="card-kicker">STEP 3 · EVALUATION BOARD</span><h2>新旧版本评测对比</h2><p class="panel-caption">候选必须在独立样本上优于当前生效版本，并通过术语、QA 与退化检查。</p></div>
+                  <div class="learning-legend"><span><i class="positive"></i>提升</span><span><i class="negative"></i>退化</span></div>
+                </div>
+                <div class="learning-evaluation-matrix" id="learningEvaluationMatrix"><div class="empty-list learning-empty">运行候选评测后展示对比指标</div></div>
+              </article>
+            </section>
+
+            <section class="learning-step-section" id="learningStepGate" hidden>
+              <article class="panel learning-quality-panel">
+                <div class="panel-head learning-section-head">
+                  <div><span class="card-kicker">STEP 4 · RELEASE GATE</span><h2>固定 Gold Set 与失败回归</h2><p class="panel-caption">候选晋升前必须在这套不随人工终稿漂移的固定资产上真跑一遍。回归案例一票否决，Gold 术语或事实退化同样阻断发版。</p></div>
+                  <div class="learning-quality-actions">
+                    <span class="asset-count subtle" id="learningGateStatus">尚未运行</span>
+                    <button class="button ghost small" type="button" id="learningGateRun">运行门禁</button>
+                  </div>
+                </div>
+                <div class="learning-quality-grid" id="learningQualityAssets"><div class="empty-list learning-empty">正在读取固定质量资产……</div></div>
+                <div class="learning-quality-toolbar">
+                  <button class="button ghost small" type="button" id="learningGoldSeed">从人工终稿建 Gold Set</button>
+                  <button class="button ghost small" type="button" id="learningRegressionBuild">按最新证据重建回归集</button>
+                  <span class="learning-quality-hint">回归案例自动来自外部审校回填的改动与人工采纳的 QA 失败案例，不再需要人工审批与署名。</span>
+                </div>
+                <div class="learning-quality-list" id="learningRegressionCandidates"></div>
+              </article>
+            </section>
+
+            <section class="learning-step-section" id="learningStepActivate" hidden>
+              <article class="panel learning-activate-panel">
+                <div class="panel-head learning-section-head">
+                  <div><span class="card-kicker">STEP 5 · PROMOTE</span><h2>启用候选</h2><p class="panel-caption">评测与门禁都通过后，这一步才会放行。资产版本更新后旧门禁结论自动作废，需要重跑。</p></div>
+                  <div class="asset-count" id="learningActivateStatus">未选择候选</div>
+                </div>
+                <div id="learningActivatePanel"><div class="empty-list learning-empty">先在第 2 步选一个候选版本</div></div>
+              </article>
+            </section>
+          </div>
+
+          <details class="learning-fold" id="learningFoldTraining">
+            <summary><span class="card-kicker">OPTIONAL</span><strong>训练与导出（非晋升必经）</strong><small>SFT / DPO 导出与微调登记；不参与上面的晋升判断</small></summary>
+            <article class="panel learning-export-panel">
+              <div class="panel-head learning-section-head">
+                <div><span class="card-kicker">TRAINING EXPORT</span><h2>SFT / DPO 数据导出</h2><p class="panel-caption">只导出人工采纳的终稿与人工批准的 QA 修订。命中固定评测资产的样本一律剔除，并在审计里写清丢了多少、为什么丢。</p></div>
+                <div class="asset-count subtle" id="learningExportSummary">尚未统计</div>
               </div>
-            </div>
-            <div class="learning-quality-grid" id="learningQualityAssets"><div class="empty-list learning-empty">正在读取固定质量资产……</div></div>
-            <div class="learning-quality-toolbar">
-              <button class="button ghost small" type="button" id="learningGoldSeed">从人工终稿建 Gold Set</button>
-              <button class="button ghost small" type="button" id="learningRegressionBuild">用已批准候选建回归集</button>
-              <span class="learning-quality-hint">Gold 样本只取人工采纳终稿；回归候选来自人工批准的 QA 失败案例，进集合前还要再过一道人工审批。</span>
-            </div>
-            <div class="learning-quality-list" id="learningRegressionCandidates"></div>
-          </article>
-
-          <article class="panel learning-export-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">TRAINING EXPORT</span><h2>SFT / DPO 数据导出</h2><p class="panel-caption">只导出人工采纳的终稿与人工批准的 QA 修订。命中固定评测资产的样本一律剔除，并在审计里写清丢了多少、为什么丢。</p></div>
-              <div class="asset-count subtle" id="learningExportSummary">尚未统计</div>
-            </div>
-            <div class="learning-quality-toolbar">
-              <button class="button ghost small" type="button" id="learningExportAudit">统计并审计</button>
-              <button class="button ghost small" type="button" id="learningExportSft">下载 SFT JSONL</button>
-              <button class="button ghost small" type="button" id="learningExportDpo">下载 DPO JSONL</button>
-            </div>
-            <div class="learning-export-report" id="learningExportReport"><div class="empty-list learning-empty">点击「统计并审计」查看当前范围可导出的数据量与清洗结果</div></div>
-          </article>
-
-          <article class="panel learning-training-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">FINE-TUNE PIPELINE</span><h2>微调与蒸馏流水线</h2><p class="panel-caption">建任务时把数据集连同内容指纹一起冻结，训练在外部执行，产出模型登记回来后必须先过固定 Gold Set 与失败回归，才能投入生产。</p></div>
-              <div class="asset-count subtle" id="learningTrainingCount">0 个任务</div>
-            </div>
-            <div class="learning-training-form">
-              <label><span>训练方法</span><select id="trainingMethod"><option value="sft">监督微调 SFT</option><option value="dpo">偏好优化 DPO</option><option value="distillation">蒸馏</option></select></label>
-              <label><span>基座模型</span><input id="trainingBaseModel" placeholder="例如 qwen3-14b-base" /></label>
-              <label><span>教师模型（仅蒸馏）</span><input id="trainingTeacherModel" placeholder="留空表示不做蒸馏" /></label>
-              <button class="button ghost small" type="button" id="trainingCreate">冻结数据并建任务</button>
-            </div>
-            <div class="learning-training-list" id="learningTrainingList"><div class="empty-list learning-empty">当前范围还没有微调任务</div></div>
-          </article>
-
-          <article class="panel learning-conflict-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">RULE CONFLICTS</span><h2>规则冲突审查</h2><p class="panel-caption">风格规范、技能附加规则与译者画像会往同一份提示词里写文字。这里比对三者是否互相矛盾，衡量证据强弱后给出处置建议。</p></div>
-              <div class="learning-conflict-actions">
-                <span class="asset-count subtle" id="learningConflictCount">尚未扫描</span>
-                <button class="button ghost small" type="button" id="learningConflictScan">立即扫描</button>
+              <div class="learning-quality-toolbar">
+                <button class="button ghost small" type="button" id="learningExportAudit">统计并审计</button>
+                <button class="button ghost small" type="button" id="learningExportSft">下载 SFT JSONL</button>
+                <button class="button ghost small" type="button" id="learningExportDpo">下载 DPO JSONL</button>
               </div>
-            </div>
-            <div class="learning-conflict-list" id="learningConflictList"><div class="empty-list learning-empty">点击「立即扫描」检查当前范围的规则冲突</div></div>
-          </article>
+              <div class="learning-export-report" id="learningExportReport"><div class="empty-list learning-empty">点击「统计并审计」查看当前范围可导出的数据量与清洗结果</div></div>
+            </article>
 
-          <article class="panel learning-evidence-panel">
-            <div class="panel-head learning-section-head">
-              <div><span class="card-kicker">TRACEABLE EVIDENCE</span><h2>来源证据与变更原因</h2><p class="panel-caption">每次进化都应能追溯到具体任务、QA 反例或人工反馈，而不是由模型凭空改写。</p></div>
-              <div class="asset-count subtle" id="learningEvidenceCount">0 条证据</div>
-            </div>
-            <div class="learning-evidence-list" id="learningEvidenceList"><div class="empty-list learning-empty">选定语言暂无学习证据</div></div>
-          </article>
+            <article class="panel learning-training-panel">
+              <div class="panel-head learning-section-head">
+                <div><span class="card-kicker">FINE-TUNE PIPELINE</span><h2>微调与蒸馏流水线</h2><p class="panel-caption">建任务时把数据集连同内容指纹一起冻结，训练在外部执行，产出模型登记回来后必须先过固定 Gold Set 与失败回归，才能投入生产。</p></div>
+                <div class="asset-count subtle" id="learningTrainingCount">0 个任务</div>
+              </div>
+              <div class="learning-training-form">
+                <label><span>训练方法</span><select id="trainingMethod"><option value="sft">监督微调 SFT</option><option value="dpo">偏好优化 DPO</option><option value="distillation">蒸馏</option></select></label>
+                <label><span>基座模型</span><input id="trainingBaseModel" placeholder="例如 qwen3-14b-base" /></label>
+                <label><span>教师模型（仅蒸馏）</span><input id="trainingTeacherModel" placeholder="留空表示不做蒸馏" /></label>
+                <button class="button ghost small" type="button" id="trainingCreate">冻结数据并建任务</button>
+              </div>
+              <div class="learning-training-list" id="learningTrainingList"><div class="empty-list learning-empty">当前范围还没有微调任务</div></div>
+              <div class="asset-more-bar" id="learningTrainingMoreBar" hidden><small id="learningTrainingMoreMeta"></small><button class="button ghost" id="learningTrainingMore" type="button">加载更多</button></div>
+            </article>
+          </details>
+
+          <details class="learning-fold" id="learningFoldEvidence">
+            <summary><span class="card-kicker">AUDIT</span><strong>来源证据与变更原因</strong><small id="learningEvidenceCount">0 条证据</small></summary>
+            <article class="panel learning-evidence-panel">
+              <div class="panel-head learning-section-head">
+                <div><span class="card-kicker">TRACEABLE EVIDENCE</span><h2>证据明细</h2><p class="panel-caption">每次进化都应能追溯到具体任务、QA 反例或人工反馈，而不是由模型凭空改写。</p></div>
+                <div class="learning-evidence-filters">
+                  <label><span>类型</span><select id="learningEvidenceKind">
+                    <option value="">全部</option>
+                    <option value="accepted">人工采纳轨迹</option>
+                    <option value="review">待复核轨迹</option>
+                    <option value="completed">完成轨迹</option>
+                  </select></label>
+                  <label><span>来源文件</span><select id="learningEvidenceFile"><option value="">全部文件</option></select></label>
+                  <label><span>搜索</span><input id="learningEvidenceSearch" type="search" placeholder="原文或终稿关键词" /></label>
+                </div>
+              </div>
+              <div class="learning-evidence-list" id="learningEvidenceList"><div class="empty-list learning-empty">选定语言暂无学习证据</div></div>
+              <div class="asset-more-bar" id="learningEvidenceMoreBar" hidden><small id="learningEvidenceMoreMeta"></small><button class="button ghost" id="learningEvidenceMore" type="button">加载更多</button></div>
+            </article>
+          </details>
         </section>
 
         <section class="view" id="view-logs">
@@ -593,7 +702,6 @@
           <label><span id="targetTermLabel">简体中文正式译法</span><input name="target" required /></label>
           <label><span>日语别名</span><input name="aliases" placeholder="用逗号分隔" /></label>
           <label><span>禁用译法</span><input name="forbidden" placeholder="用逗号分隔" /></label>
-          <label><span>适用语体</span><select name="contentType"></select></label>
         </div>
         <label><span>备注</span><textarea name="note" placeholder="命名来源、使用边界或地区说明"></textarea></label>
         <p class="panel-caption" id="assetDialogTarget"></p>
@@ -629,8 +737,15 @@
           <div class="import-progress-track"><i id="memoryImportProgressBar"></i></div>
           <p class="import-progress-note">写入在后台执行：这个窗口可以直接关掉，进度与结果都能在任务中心查到。</p>
         </div>
-        <div class="candidate-table-wrap" id="memoryImportPreview" hidden>
-          <table class="candidate-table"><thead><tr><th>写入</th><th>条目 ID</th><th>日语原文</th><th>简体中文译文</th><th>来源</th></tr></thead><tbody id="memoryImportPreviewBody"></tbody></table>
+        <div id="memoryImportPreview" hidden>
+          <div class="candidate-table-wrap">
+            <table class="candidate-table"><thead><tr><th>写入</th><th>条目 ID</th><th>日语原文</th><th>简体中文译文</th><th>来源</th></tr></thead><tbody id="memoryImportPreviewBody"></tbody></table>
+          </div>
+          <!-- 计数与「加载更多」放在滚动区外面：8 万条时它是唯一能说明"看到的是第几页"的地方。 -->
+          <div class="candidate-table-more">
+            <small id="memoryImportCount">已显示 0 / 共 0 条</small>
+            <button class="button secondary" id="memoryImportMore" type="button" hidden>加载更多</button>
+          </div>
           <div class="dialog-actions"><button class="button primary" id="memoryImportConfirm" type="button">确认写入目标 TM</button></div>
         </div>
       </div>
@@ -660,7 +775,7 @@
         <div class="dialog-head"><div><span class="card-kicker">COLUMN MAPPING</span><h2>确认表格的列含义</h2></div><button class="icon-button" type="button" data-close="batchColumnDialog" aria-label="关闭">×</button></div>
         <p class="panel-caption" id="batchColumnSummary">正在识别表格结构……</p>
         <div class="batch-column-body" id="batchColumnBody"></div>
-        <p class="batch-column-hint" id="batchColumnHint">只有标记为「日文原文」的列会送去翻译；「写回译文的列」决定导出时译文写到哪一列（不选就在原文列原位覆盖）；「已有译文」只作参考，「条目 ID」用于把译文写回记忆库时的身份匹配。</p>
+        <p class="batch-column-hint" id="batchColumnHint">只有标记为「日文原文」的列会送去翻译；「写回译文的列」决定导出时译文写到哪一列（不选会在原文件末尾新增一列「译文」，原文保持不变）；「已有译文」只作参考，「条目 ID」用于把译文写回记忆库时的身份匹配。</p>
         <div class="dialog-actions">
           <button class="button ghost" type="button" id="batchColumnReset">恢复自动识别</button>
           <button class="button ghost" type="button" data-close="batchColumnDialog">取消</button>
@@ -670,6 +785,23 @@
     </dialog>
     <input type="file" id="reviewImportFile" accept=".mqxliff,.xliff,.xlsx,.csv" hidden />
     <input type="file" id="batchSourceFile" accept=".docx,.xlsx,.csv,.xliff,.mqxliff" hidden />
+    <div class="reference-context-menu" id="referenceContextMenu" hidden></div>
+    <dialog id="referenceFolderDialog">
+      <form class="dialog-card reference-folder-card" id="referenceFolderForm">
+        <div class="dialog-head"><div><span class="card-kicker">REFERENCE FOLDER</span><h2 id="referenceFolderDialogTitle">新建文件夹</h2></div><button class="icon-button" type="button" data-close="referenceFolderDialog" aria-label="关闭">×</button></div>
+        <label><span>文件夹名称</span><input id="referenceFolderName" maxlength="120" required autocomplete="off" /></label>
+        <p class="batch-column-hint" id="referenceFolderHint"></p>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="referenceFolderDialog">取消</button><button class="button primary" type="submit">保存</button></div>
+      </form>
+    </dialog>
+    <dialog id="referenceMoveDialog">
+      <form class="dialog-card reference-folder-card" id="referenceMoveForm">
+        <div class="dialog-head"><div><span class="card-kicker">MOVE</span><h2>移动资料</h2></div><button class="icon-button" type="button" data-close="referenceMoveDialog" aria-label="关闭">×</button></div>
+        <label><span>目标文件夹</span><select id="referenceMoveTarget"></select></label>
+        <p class="batch-column-hint">文件夹不能移动到自身或它的子文件夹里。</p>
+        <div class="dialog-actions"><button class="button ghost" type="button" data-close="referenceMoveDialog">取消</button><button class="button primary" type="submit">移动</button></div>
+      </form>
+    </dialog>
     <dialog id="exportOptionsDialog">
       <div class="dialog-card export-dialog-card">
         <div class="dialog-head"><div><span class="card-kicker" id="exportOptionsKicker">EXPORT OPTIONS</span><h2 id="exportOptionsTitle">导出方式</h2></div><button class="icon-button" type="button" data-close="exportOptionsDialog" aria-label="关闭">×</button></div>

@@ -4,6 +4,19 @@ services:
   database:
     image: postgres:16-alpine
     restart: unless-stopped
+    # TM 单表 108MB、reference_chunks 42MB；默认 shared_buffers=128MB 装不下，
+    # 容器重启后的冷查询会反复读盘。这里按 Docker VM 的 15GB 上限给到 1GB。
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=4GB
+      - -c
+      - work_mem=16MB
+    # Postgres 的并行查询用 /dev/shm 做动态共享内存；Docker 默认只有 64MB，
+    # shared_buffers/work_mem 调大后会报 "could not resize shared memory segment"。
+    shm_size: "1gb"
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}

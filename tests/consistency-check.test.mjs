@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildQualityReport,
+  consistencyMessages,
   deterministicConsistencyFindings,
   mergeConsistencyFindings,
   parseConsistencyFindings,
@@ -72,7 +73,7 @@ test("批次质量报告：档位分布、质检覆盖率、术语采用率与�
       {
         id: "seg-1", source: "確認する", translation: "确认", status: "done",
         result: {
-          qualityTier: "fast", segmentPurpose: "ui", matches: [{ expectedTarget: "确认", term: { target: "确认" } }],
+          qualityTier: "fast", segmentPurpose: "ui", matches: [{ mode: "exact", expectedTarget: "确认", term: { target: "确认" } }],
           issues: []
         }
       },
@@ -81,7 +82,10 @@ test("批次质量报告：档位分布、质检覆盖率、术语采用率与�
         result: {
           qualityTier: "strict", segmentPurpose: "announcement", qaScore: 86,
           qualityUpgradeFrom: "standard",
-          matches: [{ expectedTarget: "结束", term: { target: "结束" } }],
+          matches: [
+            { mode: "exact", expectedTarget: "结束", term: { target: "结束" } },
+            { mode: "fuzzy", expectedTarget: "结束时刻", term: { target: "结束时刻" } }
+          ],
           issues: [{ type: "fact_date", severity: "error" }, { severity: "warning", type: "basic_tone" }]
         }
       },
@@ -95,6 +99,8 @@ test("批次质量报告：档位分布、质检覆盖率、术语采用率与�
   assert.equal(report.terms.expectedUses, 2);
   assert.equal(report.terms.applied, 2);
   assert.equal(report.terms.adoptionRate, 100);
+  assert.equal(report.terms.fuzzyExpected, 1, "模糊命中不计入采用率");
+  assert.equal(report.terms.fuzzyApplied, 0);
   assert.equal(report.facts.issueCount, 1);
   assert.equal(report.humanReview.suggested, 2);
   assert.ok(report.humanReview.reasons.some((item) => item.reason === "翻译失败"));
@@ -129,4 +135,46 @@ test("保护标记按原文重算，译文丢失即计入未保留", () => {
   });
   assert.equal(report.protectedTokens.total, 2);
   assert.equal(report.protectedTokens.preserved, 1);
+});
+
+test("一致性提示词带上风格指南、登记术语与 TM 译例", () => {
+  const messages = consistencyMessages({
+    filename: "sample.mqxliff",
+    locale: "zh-CN",
+    purpose: "ui",
+    pairs: [{ id: "seg-1", source: "無効", translation: "关闭" }],
+    evidence: {
+      style: { name: "UI 风格", version: 3, instruction: "按钮用两字动词", rules: ["不要用「请」"], registerPolicy: { promotional: 0.2 } },
+      terms: [{ source: "ナビマップ", target: "导览地图", mode: "exact" }],
+      tm: [{ source: "無効", target: "禁用", authority: "主 TM 人工条" }]
+    }
+  });
+  const system = messages.find((message) => message.role === "system").content;
+  const user = messages.find((message) => message.role === "user").content;
+  assert.match(system, /依据缺失/u, "证据不足时要求写明依据缺失，而不是自己发明统一值");
+  assert.match(system, /"unify"/u);
+  assert.match(user, /风格指南/u);
+  assert.match(user, /按钮用两字动词/u);
+  assert.match(user, /ナビマップ → 导览地图/u);
+  assert.match(user, /主 TM 人工条/u);
+});
+
+test("解析一致性发现：保留 terms / unify / evidence 并裁掉残缺项", () => {
+  const content = JSON.stringify({
+    findings: [{
+      type: "term_drift",
+      ids: ["seg-1", "seg-2"],
+      detail: "同一术语两种译法",
+      suggestion: "统一为禁用",
+      terms: [{ source: "無効", variants: ["禁用", "关闭", ""] }, { variants: ["没有源词"] }],
+      unify: [{ source: "無効", target: "禁用" }, { source: "無効" }],
+      evidence: [{ kind: "tm_master", ref: "無効 → 禁用" }, { note: "" }]
+    }]
+  });
+  const { findings } = parseConsistencyFindings(content, { validIds: ["seg-1", "seg-2"] });
+  assert.equal(findings.length, 1);
+  assert.deepEqual(findings[0].terms, [{ source: "無効", variants: ["禁用", "关闭"] }]);
+  assert.deepEqual(findings[0].unify, [{ source: "無効", target: "禁用" }]);
+  assert.equal(findings[0].evidence.length, 1);
+  assert.equal(findings[0].evidence[0].kind, "tm_master");
 });

@@ -1,5 +1,6 @@
 import { distillBatchStyleLearningWithModel, distillStyleProfileWithModel, distillUserProfileWithModel, getProviderConfig, reviewEvolutionWithModel } from "./provider.mjs";
-import { countStyleEvidence, getProjectStyleProfile, getQaRuns, getStyleEvidence, listStyleProfiles, saveStyleLearningRun, saveStyleProfile, saveUserProfile } from "./store.mjs";
+import { countStyleEvidence, getProjectStyleProfile, getQaRuns, listStyleProfiles, sampleStyleEvidence, saveStyleLearningRun, saveStyleProfile, saveUserProfile } from "./store.mjs";
+import { stratifyEvidenceSample } from "./evidence-sample.mjs";
 import { STYLE_DISTILL_GROWTH_WINDOW, STYLE_DISTILL_THRESHOLD, evaluateStyleDistillDecision, readStyleDistillState } from "./style-distill-gate.mjs";
 import { positiveEvidenceOnly, shapeDistillEvidence, stratifyEvidence } from "./style-delta.mjs";
 import { DEFAULT_STALE_ROUNDS, applyRulePatch, renderInstruction, summarizeRules } from "./style-rules.mjs";
@@ -35,12 +36,16 @@ function dedupeQaRuns(runs) {
 
 function batchExamples(evidence = []) {
   const seen = new Set();
-  return evidence.filter((item) => {
-    const key = `${item.source}\u0000${item.target}`;
-    if (!item.source || !item.target || seen.has(key)) return false;
+  const unique = (Array.isArray(evidence) ? evidence : []).filter((item) => {
+    const key = `${item?.source}\u0000${item?.target}`;
+    if (!item?.source || !item?.target || seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, 30).map((item) => ({ source: item.source, target: item.target, sourceRow: item.rowNumber || item.sourceRow || null }));
+  });
+  // 之前是"文件里前 30 条"：一次 7 万行的导入意味着浓缩只看开头两屏。
+  // 改成按来源文件分层的 30 条，覆盖整份文件的用词与句式。
+  return stratifyEvidenceSample(unique, { limit: 30, perFileCap: 8 })
+    .map((item) => ({ source: item.source, target: item.target, sourceRow: item.rowNumber || item.sourceRow || null }));
 }
 
 function evidenceTags(evidence = [], limit = 8) {
@@ -124,7 +129,9 @@ export async function distillStyleProfileIfReady({
   const contentType = PROJECT_STYLE_SCOPE.contentType;
   const domain = PROJECT_STYLE_SCOPE.domain;
   const [evidence, existingProfiles, totals] = await Promise.all([
-    getStyleEvidence(locale, { projectId, limit: 1_000 }),
+    // 分层取样而不是"最新 1000 条"：否则一次大导入就会把窗口占满，
+    // 人工采纳与别的语体的证据全被挤出去（见 src/evidence-sample.mjs）。
+    sampleStyleEvidence(locale, { projectId, limit: 1_000 }),
     listStyleProfiles(locale, null, { projectId }),
     // 抓取上限是 1000：拿列表长度当"池子有多大"，池子超过 1000 条后增长窗口就永远无法满足。
     countStyleEvidence(locale, { projectId }).catch(() => null)
@@ -180,7 +187,8 @@ export async function distillStyleProfileIfReady({
 }
 
 export async function distillUserProfileIfReady(locale, { threshold = PROFILE_THRESHOLD, projectId = "" } = {}) {
-  const evidence = await getStyleEvidence(locale, { projectId, limit: 1_000 });
+  // 译者画像只认人工采纳证据：取样必须保证"人工采纳"不被新导入的表格证据挤掉。
+  const evidence = await sampleStyleEvidence(locale, { projectId, limit: 1_000 });
   // 画像描述"这位译者会怎么写"，只能由正例构成；反例走风格规范那条线。
   const accepted = positiveEvidenceOnly(evidence).filter((item) => item.provenance === "human-accept");
   if (accepted.length < threshold) return { profile: null, acceptedCount: accepted.length, threshold };
@@ -197,7 +205,7 @@ export async function runEvolutionReview({
   // 风格侧全部按项目口径：证据、上一版规范、池子大小都不再按作用域切；
   // QA 反例仍按本批的语体与领域取（那是质量控制资产，不属于本次项目级化范围）。
   const [evidence, qaRunsRaw, previousProfile, projectTotals] = await Promise.all([
-    getStyleEvidence(locale, { projectId, limit: 1_000 }),
+    sampleStyleEvidence(locale, { projectId, limit: 1_000 }),
     getQaRuns(locale, { projectId, contentType, domain, limit: 60 }),
     getProjectStyleProfile(locale, { projectId }),
     countStyleEvidence(locale, { projectId }).catch(() => null)

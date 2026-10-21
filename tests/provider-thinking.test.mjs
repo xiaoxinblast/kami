@@ -25,6 +25,12 @@ globalThis.fetch = async (url, init) => {
 
 const { updateProviderConfig, evaluateTranslationWithModel, translateWithRoute } = await import("../src/provider.mjs");
 
+/**
+ * 测试要固定协议：本机 data/runtime/provider.json 可能存着 responses / anthropic 协议，
+ * 而这里的断言检查的是 OpenAI Chat Completions 的思考参数形状，不能依赖用户配置。
+ */
+const configure = (patch) => updateProviderConfig({ persist: false, protocol: "openai", ...patch });
+
 const contextPack = {
   source: "プレミアムパスを購入してください。",
   targetLocale: "zh-CN",
@@ -37,7 +43,7 @@ const contextPack = {
 };
 
 test("关闭思考只发 thinking.type=disabled，不带 reasoning_effort", async () => {
-  updateProviderConfig({ persist: false, model: "deepseek-flash", mainThinking: "disabled", mainEffort: "max" });
+  configure({ model: "deepseek-flash", mainThinking: "disabled", mainEffort: "max" });
   requests.length = 0;
   reply = aiqaReply;
   await evaluateTranslationWithModel({ contextPack, translation: "请购买高级通行证。" });
@@ -48,7 +54,7 @@ test("关闭思考只发 thinking.type=disabled，不带 reasoning_effort", asyn
 });
 
 test("开启思考时按强度发送 reasoning_effort", async () => {
-  updateProviderConfig({ persist: false, mainThinking: "enabled", mainEffort: "low" });
+  configure({ mainThinking: "enabled", mainEffort: "low" });
   requests.length = 0;
   await evaluateTranslationWithModel({ contextPack, translation: "请购买高级通行证。" });
   assert.equal(requests[0].body.reasoning_effort, "low");
@@ -56,8 +62,7 @@ test("开启思考时按强度发送 reasoning_effort", async () => {
 });
 
 test("机器翻译底模与高质量模型各用各的思考设置", async () => {
-  updateProviderConfig({
-    persist: false,
+  configure({
     model: "deepseek-flash",
     qualityModel: "deepseek-v4-pro",
     mtModel: "deepseek-flash",
@@ -77,7 +82,7 @@ test("机器翻译底模与高质量模型各用各的思考设置", async () =>
 });
 
 test("专用模型留空复用主模型时，思考设置仍按角色生效", async () => {
-  updateProviderConfig({ persist: false, model: "deepseek-flash", fastModel: "", mainThinking: "enabled", mainEffort: "max", fastThinking: "disabled" });
+  configure({ model: "deepseek-flash", fastModel: "", mainThinking: "enabled", mainEffort: "max", fastThinking: "disabled" });
   requests.length = 0;
   await translateWithRoute(contextPack, { routePlan: { route: "direct", model: "deepseek-flash", modelRole: "fast" } });
   assert.equal(requests[0].body.model, "deepseek-flash", "快速模型留空 → 复用主模型");
@@ -85,7 +90,7 @@ test("专用模型留空复用主模型时，思考设置仍按角色生效", as
 });
 
 test("上游不认思考参数时退回默认模式，并且不再重复尝试", async () => {
-  updateProviderConfig({ persist: false, mainThinking: "enabled", mainEffort: "max" });
+  configure({ mainThinking: "enabled", mainEffort: "max" });
   let rejected = false;
   reply = (body) => {
     if (Object.hasOwn(body, "reasoning_effort") && !rejected) {

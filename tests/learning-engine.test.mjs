@@ -13,6 +13,7 @@ import {
   normalizeLearningScope,
   normalizedEditDistance,
   pairedBenchmarkOrder,
+  scopesEqual,
   selectSkillHoldout,
   summarizeTrajectoryAttribution,
   validateCandidatePromotionState, effectiveStrategyValue } from "../src/learning-engine.mjs";
@@ -40,11 +41,22 @@ function sample(index, overrides = {}) {
   };
 }
 
-test("学习作用域强制包含 locale × contentType × domain × project", () => {
+test("学习作用域身份是 locale × project，语体/领域只作标签", () => {
   assert.deepEqual(normalizeLearningScope(scope), scope);
-  assert.match(learningScopeKey(scope), /ja-JP::marketing::game::wukong-global/);
+  assert.equal(learningScopeKey(scope), "ja-JP::wukong-global");
   assert.throws(() => normalizeLearningScope({ ...scope, project: "" }), /缺少 project/);
-  assert.throws(() => normalizeLearningScope({ ...scope, domain: "*" }), /不允许使用通配值/);
+  // 语体/领域缺省或写 "auto"/"*" 一律回落 general，不再报错（它们只是标签）。
+  assert.equal(normalizeLearningScope({ ...scope, domain: "*" }).domain, "general");
+  assert.equal(normalizeLearningScope({ locale: "ja-JP", project: "p" }).contentType, "general");
+  // 身份只看 locale+project：语体/领域不同不算不同作用域。
+  assert.equal(
+    learningScopeKey({ ...scope, contentType: "ui", domain: "auto" }),
+    learningScopeKey({ ...scope, contentType: "dialogue", domain: "general" })
+  );
+  assert.deepEqual(
+    scopesEqual({ ...scope, contentType: "ui", domain: "auto" }, { ...scope, contentType: "dialogue", domain: "game" }),
+    true
+  );
   assert.throws(
     () => assertExactLearningScope(scope, { ...scope, locale: "ko-KR" }, "候选技能"),
     /候选技能作用域不一致/

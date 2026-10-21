@@ -53,14 +53,17 @@ test("scopeRankOf 给出资产落在链上的第几档", () => {
   assert.equal(scopeRankOf({ contentType: "ui", domain: "game" }, { contentType: "dialogue", domain: "game" }), 4, "不在链上的给最差档");
 });
 
-test("翻译记忆按降级链取回并标注档位（同语体与通用都要进来）", async () => {
+test("翻译记忆按项目全量取回，语体/领域只标出档位作参考", async () => {
   requests.length = 0;
   const memories = await getDirectusMemories("zh-CN", { projectId: "project-a", contentType: "dialogue", domain: "game", scopeFallback: true, limit: -1 });
   const query = decodeURIComponent(requests.at(-1).query);
-  assert.ok(query.includes("[content_type][_in]=dialogue,general"), `语体要按链取：${query}`);
-  assert.ok(query.includes("[domain][_in]=game,general"), `领域要按链取：${query}`);
+  // 只看 filter 部分：fields= 里当然还会列出 content_type/domain 这两个字段名。
+  const filterKeys = [...new URLSearchParams(requests.at(-1).query).keys()].filter((key) => key.startsWith("filter["));
+  assert.equal(filterKeys.some((key) => key.includes("content_type")), false, `语体只作参考，不该进查询条件：${query}`);
+  assert.equal(filterKeys.some((key) => key.includes("[domain]")), false, `领域只作参考，不该进查询条件：${query}`);
+  assert.ok(query.includes("[project_id][_eq]=project-a"), "只按项目收窄");
   const byId = new Map(memories.map((item) => [item.id, item]));
-  assert.equal(byId.get("m-exact").scopeRank, 0);
+  assert.equal(byId.get("m-exact").scopeRank, 0, "同语体同领域仍然标 0，用来做排序加成");
   assert.equal(byId.get("m-general").scopeRank, 3);
 });
 

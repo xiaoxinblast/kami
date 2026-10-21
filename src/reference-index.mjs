@@ -8,7 +8,12 @@
 import { embedSource } from "./embedding.mjs";
 import { normalizeSource } from "./text.mjs";
 
-const DEFAULT_TTL_MS = 60_000;
+/**
+ * 缓存 10 分钟：参考资料增删/重扫都会显式 invalidate，TTL 只兜底"绕过工作台直接改
+ * Directus"的情况。原来的 60 秒会让长批次在每轮引用间隔超过一分钟时，重新拉取项目
+ * 全部分片（实测 5 页、约 35MB），把 Directus 拖到 20 秒以上。
+ */
+const DEFAULT_TTL_MS = 10 * 60_000;
 const VECTOR_WEIGHT = 0.6;
 const LEXICAL_WEIGHT = 0.4;
 const MIN_VECTOR_SCORE = 0.25;

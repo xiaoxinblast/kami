@@ -78,7 +78,8 @@ test("待译表格上传弹出列含义确认弹窗，并带映射解析", { ski
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForSelector(".nav-item");
     await page.getByRole("button", { name: "翻译", exact: true }).click();
-    await page.getByRole("button", { name: "粘贴 / 文件翻译" }).click();
+    // 翻译视图默认落文件列表；上传待译文件仍然走同一个 drop zone（在「当前文件」标签里）。
+    await page.getByRole("button", { name: "当前文件" }).click();
 
     await page.locator("#batchFile").setInputFiles({ name: "对白.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buffer: Buffer.from("test") });
     await page.waitForSelector("#batchColumnDialog[open]");

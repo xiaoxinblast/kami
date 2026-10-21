@@ -69,15 +69,15 @@ test("总数走 aggregate，且不拉取数据行", async () => {
   }
 });
 
-test("按语体/领域收窄时，计数与列表的过滤口径一致", async () => {
+test("语体/领域不再参与过滤：计数与列表都只按项目收窄", async () => {
   const stub = stubFetch({ data: [{ count: { id: "12" } }] });
   try {
     await countDirectusMemories("zh-CN", { projectId: "p1", contentType: "ui", domain: "game" });
     const url = new URL(stub.calls[0]);
-    assert.equal(url.searchParams.get("filter[_and][1][_or][0][content_type][_eq]"), "ui");
-    assert.equal(url.searchParams.get("filter[_and][1][_or][1][content_type][_eq]"), "general");
-    assert.equal(url.searchParams.get("filter[_and][2][_or][0][domain][_eq]"), "game");
-    assert.equal(url.searchParams.get("filter[_and][2][_or][1][domain][_eq]"), "general");
+    assert.equal(url.searchParams.get("filter[_and][0][project_id][_eq]"), "p1");
+    const filters = decodeURIComponent(url.search).toString();
+    assert.equal(/content_type/u.test(filters), false, "语体只作参考，不再进查询条件");
+    assert.equal(/\[domain\]/u.test(filters), false, "领域只作参考，不再进查询条件");
   } finally {
     stub.restore();
   }

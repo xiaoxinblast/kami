@@ -130,6 +130,23 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
     assert.equal(await page.locator("#styleGuideImportButton").textContent(), "导入并立即启用");
     assert.equal(await page.locator("#styleGuideImportButton").isDisabled(), true);
     assert.equal(await page.locator("#styleGuideFileName").textContent(), "支持 TXT / Markdown / DOCX，最大 5MB");
+    // 上传入口要一眼看出能点：虚线边框 + 上传图标 + 加粗动作文字，而不是一行灰提示。
+    const picker = page.locator(".library-file-button");
+    assert.equal(await picker.count(), 1, "风格指导页要有上传入口");
+    assert.match(await picker.innerText(), /点击选择风格指南文件/u);
+    assert.equal(await picker.locator(".upload-mark").count(), 1, "上传入口要有上传图标");
+    const pickerBox = await picker.evaluate((node) => {
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return { borderStyle: style.borderTopStyle, cursor: style.cursor, width: rect.width, height: rect.height };
+    });
+    assert.equal(pickerBox.borderStyle, "dashed", "上传入口要有可见边框");
+    assert.equal(pickerBox.cursor, "pointer");
+    assert.ok(pickerBox.width > 200 && pickerBox.height > 40, `上传入口不能塌成一行文字：${JSON.stringify(pickerBox)}`);
+    if (process.env.KAMI_UI_SCREENSHOTS) {
+      await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.locator(".style-guidance-panel").screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-guide-upload-entry.png`, animations: "disabled" });
+    }
     // 风格数据是异步拉的，等模块渲染完再断言，否则会读到"正在读取"的占位文案
     await page.waitForSelector("#manualGuideStatus .manual-guide-empty");
     assert.match(await page.locator("#manualGuideStatus").textContent(), /还没有人工风格指南/u, "没有指南时要有明确空状态");
@@ -139,6 +156,11 @@ test("人工风格指南导入后立即启用，并给出明确结果", { skip: 
     assert.match(await page.locator("#styleGuideFileName").textContent(), /品牌语气\.md/u);
     assert.match(await page.locator("#styleGuideImportNote").textContent(), /点右侧按钮导入并立即启用/u);
     assert.equal(await page.locator(".library-file-button.has-file").count(), 1, "选中的上传控件要有可见状态");
+    assert.equal(
+      await page.locator(".library-file-button.has-file").evaluate((node) => getComputedStyle(node).borderTopStyle),
+      "solid",
+      "选中文件后上传控件要换成实线状态"
+    );
 
     await page.locator("#styleGuideImportButton").click();
     await page.waitForSelector("#styleGuideImportNote.is-ok");

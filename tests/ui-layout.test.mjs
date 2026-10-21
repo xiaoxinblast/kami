@@ -18,11 +18,12 @@ test("列表类页面不再被写死的宽度上限截断（宽屏右侧不留�
   assert.doesNotMatch(styles, /\.import-learning-panel\s*\{[^}]*max-width/u);
 });
 
-test("质量档只在一处可选：批次模式隐藏顶部那一行，取值两边同步", () => {
+test("质量档只在一处可选：只有单句模式显示顶部那一行，取值两边同步", () => {
   // 批次页自己的质量档在「分段与翻译策略」面板里（context-brief 用例依赖它）。
   assert.match(html, /id="batchQualityTier"/u);
   assert.match(html, /<div class="tier-row" id="tierRow">/u);
-  assert.match(app, /if \(tierRow\) tierRow\.hidden = state\.translationMode === "batch";/u);
+  // 顶部那一行属于单句输入：文件列表与批次页各有自己的入口，不能同时出现两个开关。
+  assert.match(app, /if \(tierRow\) tierRow\.hidden = state\.translationMode !== "single";/u);
   assert.match(app, /function syncQualityTier\(value, source\)/u);
   assert.match(app, /syncQualityTier\(\$\("#batchQualityTier"\)\.value, \$\("#batchQualityTier"\)\);/u);
   assert.match(app, /syncQualityTier\(\$\("#qualityTier"\)\.value, \$\("#qualityTier"\)\);/u);
@@ -31,17 +32,15 @@ test("质量档只在一处可选：批次模式隐藏顶部那一行，取值�
   assert.match(app, /qualityTier: batchQualityTier\(\),/u);
 });
 
-test("学习中心常驻范围面板：每个范围多少条、来自哪个文件，点一下切换", () => {
-  assert.match(html, /<div class="learning-scope-hint" id="learningScopeHint" hidden><\/div>/u);
-  assert.match(app, /function renderLearningScopeHint\(scopeCounts, trajectoryCount\)/u);
-  assert.match(app, /data-learning-scope-content="\$\{escapeHtml\(item\.contentType\)\}"/u);
-  assert.match(app, /renderLearningScopeHint\(payload\.scopeCounts, trajectoryCount\);/u);
-  // 常驻：不再只在"当前范围空着"时才渲染；每个范围带上来源文件。
-  assert.match(app, /本项目各范围的轨迹/u);
-  assert.match(app, /learning-scope-files">\$\{item\.files\.length \? `来源：/u);
-  assert.match(app, /const sourceFile = String\(item\.sourceFile \|\| item\.assetRefs\?\.sourceFile \|\| ""\);/u);
-  assert.match(styles, /\.learning-scope-hint \{/u);
-  assert.match(styles, /\.learning-scope-row\.current \{/u);
+test("学习中心是项目级单流水线：没有范围选择器，也没有总览→进入流水线两级", () => {
+  assert.doesNotMatch(html, /id="learningOverview"/u);
+  assert.doesNotMatch(html, /id="learningContentType"/u);
+  assert.doesNotMatch(app, /renderLearningOverview|enterLearningScope/u);
+  assert.match(html, /<div class="learning-pipeline" id="learningPipeline">/u);
+  assert.match(app, /function learningInPipeline\(\) \{\n\s+return true;/u);
+  // 头部的 chips 仍要写清"多少条轨迹、其中多少条人工采纳"。
+  assert.match(app, /条轨迹（\$\{proposalCount\} 条人工采纳）/u);
+  assert.match(styles, /\.learning-pipeline-chips \{/u);
 });
 
 test("当前项目的轨迹算「当前范围」：前端不再只认 default 作用域", () => {

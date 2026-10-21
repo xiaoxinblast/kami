@@ -66,7 +66,17 @@ test("候选还没有评测时学习中心照常渲染", { skip: !process.env.KA
         evaluations: [], scopeCounts: [{ contentType: "general", domain: "general", count: 1 }],
         trajectories: [trajectory], evidence: [trajectory]
       };
+      else if (url.pathname === "/api/learning/overview") payload = {
+        locale: "zh-CN", project: "project-1",
+        scopes: [{
+          scope: { locale: "zh-CN", contentType: "general", domain: "general", project: "project-1" },
+          trajectoryCount: 1, files: [], champion: { id: champion.id, version: 1, name: champion.name },
+          candidateCount: 1, latestCandidate: { id: candidate.id, version: 2, status: "challenger", name: candidate.name },
+          assets: { goldSampleCount: 0, regressionCaseCount: 0, goldenVersions: [], regressionSuiteVersions: [] }, gate: null
+        }]
+      };
       else if (url.pathname === "/api/learning/conflict-scan") payload = { scope: {}, conflicts: [], reason: "尚未扫描" };
+      else if (url.pathname === "/api/learning/evidence") payload = { scope: {}, total: 0, limit: 20, offset: 0, hasMore: false, items: [] };
       else if (url.pathname === "/api/quality/assets") payload = { assets: [] };
       else if (url.pathname === "/api/quality/gate") payload = { latestRun: null, recentRuns: [], assets: {} };
       else if (url.pathname === "/api/training/runs") payload = { runs: [] };
@@ -76,6 +86,7 @@ test("候选还没有评测时学习中心照常渲染", { skip: !process.env.KA
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForSelector(".nav-item");
     await page.getByRole("button", { name: "学习中心" }).click();
+    // 学习中心是项目级单流水线：进页面直接就是五步流水线，没有范围可选。
     // 等"渲染完成"或"错误横幅出现"这两个结果之一：崩了要立刻给出可读的失败原因，而不是等到超时。
     await page.waitForFunction(() => document.querySelector("#learningCandidateList .learning-skill-card")
       || document.querySelector("#learningError")?.hidden === false);

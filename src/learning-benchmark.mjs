@@ -48,7 +48,9 @@ export async function runPairedSkillBenchmarks({
         challengerSample: result.status === "fulfilled" ? result.value.challenger[0] : null,
         championSamples: result.status === "fulfilled" ? result.value.champion : [],
         challengerSamples: result.status === "fulfilled" ? result.value.challenger : [],
-        error: result.status === "rejected" ? (result.reason?.message || String(result.reason || "评测失败")) : null
+        error: result.status === "rejected" ? (result.reason?.message || String(result.reason || "评测失败")) : null,
+        // 失败原因码：把"模型没产出译文"和"接口报错"分开，报告里才能给出可行动的分类。
+        errorCode: result.status === "rejected" ? String(result.reason?.code || "") : ""
       }, index);
     }
   });

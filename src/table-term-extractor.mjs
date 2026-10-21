@@ -5,7 +5,11 @@ import { ACTIVE_LOCALES, CONTENT_TYPES, LOCALES, assertLocale } from "./config.m
 import { classifyContent, inferContentTags, inferDomainFromText } from "./classifier.mjs";
 
 const HEADER_SCAN_LIMIT = 12;
-const MAX_ROWS = 10_000;
+// 单表读取上限：只是保护进程不被畸形表格拖死，不是"超出就少要点"的业务口径。
+// 旧值 10_000 会让一份 8.8 万行的过往译文（END過去作訳文.xlsx）只读进 9,791 条，
+// 而且不报错、不提示——静默丢 89% 的数据比慢更糟。真触发上限时必须由调用方
+// 通过 statistics.truncated / totalRows 明确告知用户。
+const MAX_ROWS = 200_000;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const DOMAINS = new Set(["game", "marketing", "community", "general"]);
 const SHEET_MODES = new Set(["dialogue", "glossary", "mixed"]);
@@ -403,6 +407,9 @@ function extractWorksheet(worksheet, requestedLocale, modelAnalysis, filename = 
   return {
     sheet: worksheet.name,
     rowsScanned: Math.max(0, Math.min(worksheet.rowCount, MAX_ROWS) - mapping.startRow + 1),
+    // 表格实际有多少行、这次是不是只读了前 MAX_ROWS 行：界面据此提示"被截断"。
+    totalRows: worksheet.rowCount,
+    truncated: worksheet.rowCount > MAX_ROWS,
     headerRow: mapping.startRow - 1 || null,
     sourceColumn: mapping.sourceColumn,
     targetColumns: mapping.targetColumns,
@@ -491,6 +498,9 @@ export async function extractTermPairs({ filename, base64, locale = "auto" }, { 
     candidates,
     statistics: {
       rowsScanned: sheets.reduce((sum, sheet) => sum + sheet.rowsScanned, 0),
+      rowLimit: MAX_ROWS,
+      totalRows: sheets.reduce((sum, sheet) => sum + sheet.totalRows, 0),
+      truncated: sheets.some((sheet) => sheet.truncated),
       candidates: candidates.length,
       ready: candidates.filter((item) => item.decision === "ready").length,
       review: candidates.filter((item) => item.decision === "review").length,

@@ -36,6 +36,9 @@ test("DOCX 之外的不支持格式直接报错，TXT 正常解析", async () =>
   assert.equal(parsed.format, "txt");
   assert.equal(parsed.characters > 0, true);
   await assert.rejects(() => extractReferenceFile({ filename: "guide.exe", base64: text }), /仅支持/u);
+  // 原始字节入口：浏览器直传与新版上传路由走的都是这条，不用再绕一遍 base64。
+  const fromBuffer = await extractReferenceFile({ filename: "setting.txt", buffer: Buffer.from("角色设定：林晚，女主角。", "utf8") });
+  assert.equal(fromBuffer.characters, parsed.characters);
 });
 
 /**
@@ -215,4 +218,29 @@ test("上游返回 tool_calls 时执行工具并回灌，第二轮给出最终�
   assert.equal(seen.length, 2, "第二次请求带上了工具结果");
   assert.ok(seen[1].messages.some((message) => message.role === "tool"));
   assert.equal(usageCalls, 2, "两轮 usage 都要计入成本");
+});
+
+test("参考资料索引默认缓存 10 分钟：期间不重复加载，invalidate 后立即刷新", async () => {
+  let clock = 1_000_000;
+  let loads = 0;
+  const index = createReferenceIndex({
+    now: () => clock,
+    loader: async () => {
+      loads += 1;
+      return [item("a", "林晚是主角，习惯自称“我”。")];
+    }
+  });
+  await index.search({ projectId: "p-ttl", query: "林晚", limit: 3 });
+  assert.equal(loads, 1);
+  // 旧实现 60 秒 TTL：两分钟后这里会重新拉一遍整个项目的分片。
+  clock += 2 * 60_000;
+  await index.search({ projectId: "p-ttl", query: "林晚", limit: 3 });
+  assert.equal(loads, 1, "两分钟内不应重新拉取整项目分片");
+  index.invalidate("p-ttl");
+  await index.search({ projectId: "p-ttl", query: "林晚", limit: 3 });
+  assert.equal(loads, 2, "显式 invalidate 后必须立即刷新");
+  // TTL 仍然兜底：绕过工作台直接改 Directus 的情况最多滞后 10 分钟。
+  clock += 11 * 60_000;
+  await index.search({ projectId: "p-ttl", query: "林晚", limit: 3 });
+  assert.equal(loads, 3, "超过 TTL 后仍要重新加载");
 });

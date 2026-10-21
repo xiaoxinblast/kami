@@ -5,6 +5,7 @@ import {
   createRegressionCandidateFromQaCase,
   decideRegressionCandidate,
   normalizeGoldSet,
+  normalizeRegressionCandidate,
   selectActiveGoldSamples,
   selectActiveGoldSets,
   selectActiveRegressionCases
@@ -32,10 +33,10 @@ function goldSet(overrides = {}) {
   };
 }
 
-test("Gold Set 固定版本、精确作用域并生成稳定指纹", () => {
+test("Gold Set 固定版本、项目级作用域并生成稳定指纹", () => {
   const input = goldSet({ metadata: { z: 2, a: 1 } });
   const normalized = normalizeGoldSet(input);
-  assert.equal(normalized.scopeKey, "ja-JP::announcement::game::wukong");
+  assert.equal(normalized.scopeKey, "ja-JP::wukong", "语体/领域只作参考，资产按语言×项目结算");
   assert.equal(normalized.samples[0].referenceTargets[0], "イベントは8月20日に終了します。");
   assert.equal(normalized.samples[0].requiredTerms[0].target, "イベント");
   assert.match(normalized.fingerprint, /^[a-f0-9]{64}$/u);
@@ -101,10 +102,12 @@ function approvedQaCase(overrides = {}) {
   };
 }
 
-test("人工批准 QA 失败案例先成为候选，经第二次人工批准后才能进入回归集", () => {
+test("未批准的候选不能进入回归集，批准后按来源保留审批记录", () => {
   const candidate = createRegressionCandidateFromQaCase(approvedQaCase(), { createdBy: "system" });
   assert.equal(candidate.status, "pending");
   assert.equal(candidate.sourceQaCaseId, "qa-100");
+  assert.equal(candidate.sourceKind, "qa_case");
+  assert.equal(candidate.sourceKey, "qa:qa-100");
   assert.equal(candidate.scope.project, "wukong");
   assert.throws(() => buildRegressionSuite({
     id: "reg-v1", seriesId: "reg-ja-announcement", version: 1, name: "公告失败回归", scope,
@@ -123,6 +126,58 @@ test("人工批准 QA 失败案例先成为候选，经第二次人工批准后�
   assert.equal(suite.cases[0].expectedTranslation, "イベント報酬は終了後に配布されます。");
   const selected = selectActiveRegressionCases([suite], { scope });
   assert.equal(selected[0].regressionSuiteVersion, 1);
+});
+
+test("外部审校回填的案例不需要 QA 案例 ID，来源身份由批次与段落承担", () => {
+  const external = normalizeRegressionCandidate({
+    id: "regression-external:batch-9:seg-3",
+    status: "approved",
+    sourceKind: "external_review",
+    sourceRef: { batchId: "batch-9", segmentId: "seg-3", sourceFile: "review.xlsx", sourceRow: 12 },
+    scope,
+    source: "浄璃の架",
+    failingTranslation: "净璃架",
+    expectedTranslation: "净璃之架",
+    editDistance: 0.4,
+    issues: [{ category: "external_review_edit", severity: "minor", message: "外部审校改动（归一化编辑距离 0.40）" }],
+    approval: { decision: "approve", reviewer: "", decidedAt: "2026-09-26T00:00:00Z" }
+  });
+  assert.equal(external.sourceQaCaseId, "");
+  assert.equal(external.sourceKey, "external:batch-9:seg-3");
+  assert.equal(external.editDistance, 0.4);
+  const suite = buildRegressionSuite({
+    id: "reg-v2", seriesId: "reg-ja-announcement", version: 2, name: "公告失败回归", scope,
+    status: "active", enabled: true, candidates: [external]
+  });
+  assert.equal(suite.cases[0].sourceKind, "external_review");
+  assert.equal(suite.cases[0].sourceRef.segmentId, "seg-3");
+  assert.equal(suite.cases[0].editDistance, 0.4);
+});
+
+test("同一个来源只能进一条案例，去重按来源键而不是 QA 案例 ID", () => {
+  const make = (id) => ({
+    id,
+    status: "approved",
+    sourceKind: "external_review",
+    sourceRef: { batchId: "batch-9", segmentId: "seg-3" },
+    scope,
+    source: "浄璃の架",
+    failingTranslation: "净璃架",
+    expectedTranslation: "净璃之架",
+    approval: { decision: "approve" }
+  });
+  assert.throws(() => buildRegressionSuite({
+    id: "reg-v3", version: 3, name: "公告失败回归", scope,
+    status: "active", enabled: true, candidates: [make("case-a"), make("case-b")]
+  }), /重复来源案例/u);
+});
+
+test("审批不再强制署名：空署名的批准记录仍然可用", () => {
+  const candidate = createRegressionCandidateFromQaCase(approvedQaCase());
+  const approved = decideRegressionCandidate(candidate, { decision: "approve", decidedAt: "2026-09-26T00:00:00Z" });
+  assert.equal(approved.status, "approved");
+  assert.equal(approved.approval.reviewer, "");
+  assert.equal(approved.approval.decision, "approve");
 });
 
 test("机器案例不能直入候选，拒绝的候选不能进入套件", () => {

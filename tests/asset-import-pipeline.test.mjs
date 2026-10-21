@@ -46,9 +46,12 @@ test("导入任务在开始就带上批次号，服务重启后「继续导入�
     server.indexOf('url.pathname === "/api/batch/columns"')
   );
   assert.match(resumeRoute, /payload: \{ batchId, filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false \}/u);
-  // 后台链路写队列拿到批次号后立刻补写，TM 导入同理。
-  assert.match(server, /persistedBatchId = persisted\.batchId;/u);
+  // 资产导入的后台链路写队列拿到批次号后立刻补写任务载荷。
   assert.match(server, /payload: \{ batchId: batch, filename, purpose, aiCleaning, styleEvidence, termLibraryId, tmLibraryId, resumable: false \}/u);
+  // TM 导入走"队列后置"：批次号在建任务时就定下来写进载荷，审计在导入成功后写。
+  assert.match(server, /payload: \{ batchId, filename, tmLibraryId, resumable: true \}/u);
+  const storeFile = await read("../src/store.mjs");
+  assert.match(storeFile, /export async function saveTmImportAudit\(input = \{\}\)/u);
 });
 
 test("中断：跑批循环在分块边界停下，任务标成可继续而不是一直进行中", async () => {
@@ -82,8 +85,8 @@ test("服务重启后：批次任务与导入任务都会标成可继续", async
   assert.match(recovery, /item\.type === "batch_translation" && item\.status === "in_progress"/u);
   assert.match(recovery, /message: "服务重启导致中断，可在任务中心继续翻译"/u);
   assert.match(recovery, /payload: \{ \.\.\.\(task\.payload \|\| \{\}\), batchId: run\.batchId, filename: run\.filename, resumable: true \}/u);
-  // 导入：in_progress 的 term_import / asset_import 标成 needs_attention + resumable
-  assert.match(server, /\["term_import", "asset_import"\]\.includes\(task\.type\)/u);
+  // 导入与参考资料后台任务：in_progress 的都要收尾，不能重启后永远转圈
+  assert.match(server, /\["term_import", "asset_import", "reference_ingest", "reference_describe", "reference_folder_delete"\]\.includes\(task\.type\)/u);
 });
 
 test("术语导入不再逐条拉整库，改为一次索引 + 分块写入", async () => {
@@ -128,11 +131,23 @@ test("确认导入立刻返回任务号，审核队列写入放到后台并带�
   assert.match(job, /payload: \{\s*\n\s*batchId: batch \|\| batchId,/u);
   // 队列写入本身要能报进度：createItemsInChunks -> saveImportPreview -> store 透传回调。
   const directusStore = await read("../src/directus-store.mjs");
-  assert.match(directusStore, /async function createItemsInChunks\(path, records, \{ onProgress \} = \{\}\)/u);
+  assert.match(directusStore, /export async function saveDirectusTmImportAudit\(/u);
+  assert.match(directusStore, /async function createItemsInChunks\(path, records, \{ onProgress, maxItems \} = \{\}\)/u);
   assert.match(directusStore, /onProgress\?\.\(\{ completed: saved\.length, total: records\.length \}\)/u);
   assert.match(directusStore, /export async function saveDirectusImportPreview\(input, \{ onProgress \} = \{\}\)/u);
   const store = await read("../src/store.mjs");
   assert.match(store, /export async function saveImportPreview\(input, options\)/u);
+});
+
+test("批量写入一律按 2,000 条分块：7 万条一次请求会撞 Directus 超时", async () => {
+  // 真机踩过：72,099 条风格证据走一个请求 → `Directus请求超时（120 秒）` → 整批证据 100% 失败。
+  const directusStore = await read("../src/directus-store.mjs");
+  assert.match(directusStore, /const BULK_INSERT_CHUNK_ITEMS = 2_000;/u);
+  assert.match(directusStore, /async function createItemsInChunks\(path, records, \{ onProgress, maxItems \} = \{\}\)/u);
+  assert.match(directusStore, /chunkDirectusRecords\(records, maxItems \? \{ maxItems \} : undefined\)/u);
+  const chunked = directusStore.match(/maxItems: BULK_INSERT_CHUNK_ITEMS/gu) || [];
+  assert.ok(chunked.length >= 5, `证据/审计/审核队列/术语/记忆都要分块（当前 ${chunked.length} 处）`);
+  assert.match(directusStore, /createItemsInChunks\("\/items\/style_evidence", creates\.map\(\(entry\) => entry\.body\), \{ maxItems: BULK_INSERT_CHUNK_ITEMS \}\)/u);
 });
 
 test("术语注释取自原表，记账信息移出 note", async () => {
@@ -212,17 +227,23 @@ test("人工 TM 导入支持后台任务：接口立刻返回任务号，页面�
   const server = await read("../server.mjs");
   const routeIndex = server.indexOf('url.pathname === "/api/tm-import/commit"');
   assert.ok(routeIndex > 0);
-  const route = server.slice(routeIndex, routeIndex + 1400);
+  const route = server.slice(routeIndex, routeIndex + 2400);
+  // 候选从预检缓存读回来：浏览器只回批次号与取消勾选的序号（8 万条候选约 49MB）。
+  assert.match(route, /const resolved = await resolveTmImportCandidates\(body\);/u);
   assert.match(route, /if \(body\.background === true\) \{/u);
   assert.match(route, /type: "term_import"/u);
   assert.match(route, /runTmImportInBackground\(/u);
   assert.match(route, /return json\(res, 202, \{ taskId: task\.id/u);
-  // 后台执行体自带进度：写审核队列按条数报，入库沿用 commitTermImport 的内部百分比。
+  // 后台执行体：先把候选写进主 TM（进度沿用 commitTermImport 的内部百分比），
+  // 成功之后才写审计；失败时库里一行都不留，预检缓存保留给「继续导入」。
   const job = server.slice(server.indexOf("async function runTmImportInBackground"), server.indexOf("async function previewTermImport"));
-  assert.match(job, /正在写入审核队列：0 \/ \$\{candidates\.length\}/u);
-  assert.match(job, /countProgressReport\(report, 2, 10\)/u);
-  assert.match(job, /scaleProgressReport\(report, 10, 92\)/u);
-  assert.match(job, /payload: \{\s*\n\s*batchId: persisted\.batchId,/u);
+  assert.match(job, /scaleProgressReport\(report, 6, 90\)/u);
+  assert.match(job, /\{ skipQueueCompletion: true \}/u);
+  assert.match(job, /await saveTmImportAudit\(\{/u);
+  assert.match(job, /releasePreviewCaches\(auditBatchId\)/u);
+  assert.doesNotMatch(job, /saveImportPreview\(/u, "TM 导入不再先写审核队列");
+  assert.match(job, /payload: \{ batchId: auditBatchId, filename, error: error\.message, resumable: true \}/u);
+  assert.match(server, /async function releasePreviewCaches\(batchId\)/u);
   // 进度辅助函数与资产导入共用一份实现。
   assert.match(server, /function scaleProgressReport\(report, from, to\)/u);
   assert.match(server, /function countProgressReport\(report, from, to\)/u);
@@ -230,6 +251,9 @@ test("人工 TM 导入支持后台任务：接口立刻返回任务号，页面�
   const app = await read("../public/app.js");
   assert.match(app, /styleEvidence: state\.memoryStyleEvidence, tmLibraryId: state\.memoryImportTargetId \|\| "", background: true/u);
   assert.match(app, /#memoryImportProgressText/u);
+  // 「继续导入」按任务类型分流：TM 导入读预检缓存重跑，资产导入走原来的审核队列续传。
+  assert.match(app, /if \(task\.taskType === "term_import"\) \{/u);
+  assert.match(app, /api\("\/api\/tm-import\/commit", \{ method: "POST", body: JSON\.stringify\(\{\s*\n\s*\.\.\.projectPayload\(\),\s*\n\s*batchId,/u);
   // 复核确认那条路径也跟同一批次的进度，不再只有按钮文字。
   assert.match(app, /const backgroundTaskId = state\.importPreview\.backgroundTaskId \|\| "";/u);
   const html = await read("../public/index.html");

@@ -1,5 +1,11 @@
 import { splitBatchSubBatches, splitTranslationGroups } from "./batch-document.mjs";
 import { contextBriefSlice, purposeForIndex } from "./context-brief.mjs";
+import { createCheckpointWriter } from "./checkpoint-writer.mjs";
+import { isTransientConnectionError, retryTransient } from "./transient-errors.mjs";
+import { isIncompleteBatchQa } from "../public/batch-status.js";
+
+/** 连接层失败自动重试一次：等 2 秒再试，内容层错误不重试。 */
+const SEGMENT_RETRY_DELAY_MS = 2_000;
 
 function compactResult(result) {
   if (!result) return null;
@@ -19,7 +25,7 @@ function compactResult(result) {
       humanDecisions: (result.aiQa.humanDecisions || []).slice(0, 30)
     } : null,
     // 本段实际用的用途与质量档：批次页、质量报告与人工复核都要能回溯到"为什么这样跑"。
-    segmentPurpose: result.classification?.contentType || "",
+    segmentPurpose: result.classification?.contentType || result.segmentPurpose || "",
     qualityTier: result.qualityTier || "",
     tierReason: clip(result.tierReason || "", 200),
     qualityUpgradeFrom: result.qualityUpgradeFrom || "",
@@ -94,7 +100,8 @@ export async function runServerBatch(batchId, {
   run.contentType = contentType || "general";
   run.runState = "running";
   run.subBatches = checkpointSubBatches(subBatches, run.segments);
-  await saveRun(run);
+  const checkpoint = createCheckpointWriter({ save: () => saveRun(run) });
+  await checkpoint.commit();
 
   for (const subBatch of subBatches) {
     for (const segmentId of subBatch.segmentIds) {
@@ -104,20 +111,22 @@ export async function runServerBatch(batchId, {
         run.runState = "paused";
         run.runnerOptions = { ...options, cancelled: true };
         run.subBatches = checkpointSubBatches(subBatches, run.segments);
-        await saveRun(run);
+        await checkpoint.commit();
         return run;
       }
       if (shouldPause()) {
         run.runState = "paused";
         run.subBatches = checkpointSubBatches(subBatches, run.segments);
-        await saveRun(run);
+        await checkpoint.commit();
         return run;
       }
       const segment = run.segments.find((item) => item.id === segmentId);
       if (!segment || segment.selected === false || segment.status === "done") continue;
       segment.status = "running";
       segment.error = "";
-      await saveRun(run);
+      // "这段正在翻"只更新内存：每段都整行写一次会把 Directus 压出压力保护，
+      // 真正的断点由段落结果那次 commit 保证。
+      await checkpoint.mark();
       const position = run.segments.indexOf(segment);
       // 用途按语境档案的区间继承；档案没覆盖到的段落回落文件级用途。
       const segmentPurpose = purposeForIndex(brief, position, contentType || "general");
@@ -137,7 +146,7 @@ export async function runServerBatch(batchId, {
         .slice(-anchorCount)
         .map((item) => ({ source: item.source, target: item.translation }));
       try {
-        const result = await translateSegment({
+        const translateOnce = () => translateSegment({
           projectId: run.projectId,
           source: segment.source,
           locale: run.locale,
@@ -160,6 +169,13 @@ export async function runServerBatch(batchId, {
           reflect: options.reflect !== false,
           useModelClassification: false
         });
+        // 连接层失败（网络抖动 / 模型 502-504）先自动重试一次再判失败；
+        // 内容层错误（空译文、格式、校验）不重试，避免白花模型额度。
+        const result = await retryTransient(translateOnce, {
+          attempts: 2,
+          delayMs: SEGMENT_RETRY_DELAY_MS,
+          onRetry: (error) => console.warn(`[Kami] 第 ${position + 1} 段连接失败，自动重试一次：${error.message}`)
+        });
         segment.translation = result.translation;
         segment.result = compactResult(result);
         segment.status = "done";
@@ -169,17 +185,60 @@ export async function runServerBatch(batchId, {
         segment.error = String(error?.message || error);
       }
       run.subBatches = checkpointSubBatches(subBatches, run.segments);
-      await saveRun(run);
+      await checkpoint.commit();
     }
   }
 
   const failed = selected.filter((segment) => segment.status === "error").length;
   run.runState = failed ? "needs_attention" : "completed";
+  run.runnerOptions = { ...run.runnerOptions, translationCompletedAt: new Date().toISOString() };
   run.subBatches = checkpointSubBatches(subBatches, run.segments);
-  await saveRun(run);
+  await checkpoint.commit();
   // 交付前闭环先跑：一致性核对 + 质量报告是用户翻完立刻要看的结论；
   // 风格学习与复盘（review）会调多次模型，排在后面免得把报告拖到几分钟后。
-  if (!failed) await finalize(run);
+  if (selected.some((segment) => segment.status === "done" && segment.translation)) await finalize(run);
   if (!failed) await review(run);
   return run;
+}
+
+/** 只重跑已有译文中未完成的 AIQA，逐段保存；成功段与翻译失败段不改。 */
+export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSegment, segmentIds = null, shouldCancel = () => false, report = async () => {} } = {}) {
+  let run = await loadRun(batchId);
+  if (!run) throw new Error("未找到批次任务");
+  const ids = segmentIds ? new Set(segmentIds.map(String)) : null;
+  const targets = run.segments.filter((segment) => isIncompleteBatchQa(segment) && (!ids || ids.has(String(segment.id))));
+  let completed = 0;
+  let failed = 0;
+  await report({ completed, failed, total: targets.length });
+  for (const target of targets) {
+    if (shouldCancel()) break;
+    run = await loadRun(batchId);
+    const segment = run?.segments.find((item) => item.id === target.id);
+    if (!segment) break;
+    if (isIncompleteBatchQa(segment)) {
+      const originalTranslation = segment.translation;
+      let update;
+      try {
+        const qa = await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
+          locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
+          domain: run.domain || "auto", batchId, aiQa: true });
+        const translation = qa.translation || originalTranslation;
+        update = { ...segment, translation, accepted: translation === originalTranslation ? segment.accepted : false,
+          result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation }) } };
+      } catch (error) {
+        update = { ...segment, result: { ...segment.result, aiQa: { ...segment.result?.aiQa, fallbackReason: String(error.message || error) } } };
+      }
+      // 回写前重新读取，不能覆盖并发编辑或用户已经修好的 QA。
+      run = await loadRun(batchId);
+      const current = run?.segments.find((item) => item.id === segment.id);
+      if (current && current.translation === originalTranslation && isIncompleteBatchQa(current)) {
+        run.segments = run.segments.map((item) => item.id === segment.id ? update : item);
+        await saveRun(run);
+      }
+      if (isIncompleteBatchQa(run?.segments.find((item) => item.id === segment.id) || update)) failed += 1;
+    }
+    completed += 1;
+    await report({ completed, failed, total: targets.length });
+  }
+  return { run, completed, failed, total: targets.length, cancelled: shouldCancel() };
 }

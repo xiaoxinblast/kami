@@ -110,6 +110,9 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
     await page.waitForSelector(".nav-item");
 
     // ① 翻译页：只剩质量档，语体 / 领域下拉已经删除
+    // 默认落在文件列表：单句输入要显式切到「单句输入」标签。
+    await page.getByRole("button", { name: "单句输入" }).click();
+    await page.waitForSelector("#singleWorkspace:not([hidden])");
     assert.equal(await page.locator("#view-workbench #qualityTier").count(), 1);
     assert.equal(await page.locator("#view-workbench #contentType").count(), 0, "语体下拉必须消失");
     assert.equal(await page.locator("#view-workbench #domain").count(), 0, "领域下拉必须消失");
@@ -167,11 +170,15 @@ test("翻译页只留质量档，结果里能看到用途与本次命中的作�
       // 风格页：项目级单池 + 语体分布折叠。
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/style-pool-project-level.png`, fullPage: true, animations: "disabled" });
     }
-    // ⑥ 学习中心：作用域栏只服务翻译技能，不再声称管风格
+    // ⑥ 学习中心：项目级作用域栏，明确写出语体/领域由系统自动判定、只作参考
     await page.locator('.nav-item[data-view="learning"]').click();
     const scopeBar = await page.locator(".learning-scope-bar").textContent();
     assert.match(scopeBar, /翻译技能作用域/u);
-    assert.match(scopeBar, /风格规范已经改成项目级/u);
+    assert.match(scopeBar, /整个项目/u);
+    assert.match(scopeBar, /语体与领域由系统自动判定、只作参考/u);
+    // 界面上不再有任何语体/领域选择器。
+    assert.equal(await page.locator("#learningContentType").count(), 0);
+    assert.equal(await page.locator("#learningDomain").count(), 0);
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/learning-skill-scope-bar.png`, animations: "disabled" });

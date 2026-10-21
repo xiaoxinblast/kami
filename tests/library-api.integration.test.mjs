@@ -206,3 +206,132 @@ test("库页面能用：条目按库过滤、条目编辑删除、库导出、�
     await request(`${appUrl}/api/projects/${encodeURIComponent(projectId)}?purge=1`, { method: "DELETE" });
   }
 });
+
+/**
+ * 参考资料的真实入库链路：上传（原始字节）→ 预扫 → 解析 → 分块入库 → 删除时连存档一起清掉。
+ *
+ * 单测只覆盖解析器本身，服务端这条流水线（文档记录、预扫阶段、片段落库、原文件路径）
+ * 只有跑真实例才能验到——实测就因为这里残留了一个未定义的 projectId 变量，
+ * 大文件上传后直接 failed，而单测全绿。
+ */
+test("参考资料：上传后能预扫并入库，删除时连原文件存档一起清掉", { skip: !enabled, timeout: 120_000 }, async () => {
+  const project = await request(`${appUrl}/api/projects`, {
+    method: "POST",
+    body: JSON.stringify({ name: `参考资料接口测试 ${randomUUID().slice(0, 8)}` })
+  });
+  const projectId = project.project.id;
+  const text = `角色设定：林晚是主角，习惯自称“我”。\n她的搭档叫陆遥。\n${"补充设定。".repeat(40)}`;
+  try {
+    const upload = await request(`${appUrl}/api/references/file?projectId=${encodeURIComponent(projectId)}&filename=${encodeURIComponent("setting.txt")}&name=${encodeURIComponent("setting")}`, {
+      method: "POST",
+      headers: { "content-type": "text/plain; charset=utf-8" },
+      body: Buffer.from(text, "utf8")
+    });
+    assert.ok(upload.documentId, "上传要立刻返回 documentId（解析在后台）");
+
+    let document = null;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const list = await request(`${appUrl}/api/references?projectId=${encodeURIComponent(projectId)}&limit=10`);
+      const found = list.items.find((item) => item.id === upload.documentId);
+      if (found && found.status === "ready") { document = found; break; }
+      if (found?.status === "failed") throw new Error(`资料导入失败：${found.error}`);
+    }
+    assert.ok(document, "资料应在 1 分钟内就绪");
+    assert.ok(document.chunkCount > 0, "文本资料要有可检索片段");
+    assert.match(document.ingestReport.stage, /ready/u);
+    assert.ok(document.ingestReport.bytes > 0, "导入报告要记下原文件大小");
+    assert.equal(document.ingestReport.sourcePath, `uploads/references/${upload.documentId}.txt`);
+
+    const chunks = await request(`${appUrl}/api/references/${encodeURIComponent(upload.documentId)}/chunks?limit=5`);
+    assert.ok(chunks.items.some((chunk) => String(chunk.text).includes("林晚")), "片段里要有正文");
+
+    await request(`${appUrl}/api/references/${encodeURIComponent(upload.documentId)}`, { method: "DELETE" });
+    const after = await request(`${appUrl}/api/references?projectId=${encodeURIComponent(projectId)}&limit=10`);
+    assert.equal(after.total, 0, "删除后列表里不该还有这条资料");
+    if (upload.taskId) await request(`${appUrl}/api/background-tasks/${encodeURIComponent(upload.taskId)}`, { method: "DELETE" }).catch(() => {});
+  } finally {
+    await request(`${appUrl}/api/projects/${encodeURIComponent(projectId)}?purge=1`, { method: "DELETE" });
+  }
+});
+
+test("参考资料目录：拖入文件树、同名覆盖、移动与递归删除都落到真实存储", { skip: !enabled, timeout: 120_000 }, async () => {
+  const project = await request(`${appUrl}/api/projects`, {
+    method: "POST",
+    body: JSON.stringify({ name: `参考资料目录测试 ${randomUUID().slice(0, 8)}` })
+  });
+  const projectId = project.project.id;
+  const waitReady = async (documentId) => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const list = await request(`${appUrl}/api/references?projectId=${encodeURIComponent(projectId)}&limit=50`);
+      const found = list.items.find((item) => item.id === documentId);
+      if (found?.status === "ready") return found;
+      if (found?.status === "failed") throw new Error(found.error || "参考资料导入失败");
+    }
+    throw new Error("参考资料未在预期时间内就绪");
+  };
+  try {
+    const root = (await request(`${appUrl}/api/reference-folders`, {
+      method: "POST",
+      body: JSON.stringify({ projectId, name: "设定集" })
+    })).folder;
+    const ensured = await request(`${appUrl}/api/reference-folders/ensure`, {
+      method: "POST",
+      body: JSON.stringify({ projectId, parentId: root.id, paths: [["角色"], ["角色", "表情"]] })
+    });
+    const characterFolder = ensured.items[0].folderId;
+    assert.equal(ensured.folders.filter((folder) => folder.parentId === root.id).length, 1);
+
+    const upload = await request(`${appUrl}/api/references/file?projectId=${encodeURIComponent(projectId)}&folderId=${encodeURIComponent(characterFolder)}&filename=setting.txt&vision=none`, {
+      method: "POST",
+      headers: { "content-type": "text/plain; charset=utf-8" },
+      body: Buffer.from("第一版：林晚是主角。", "utf8")
+    });
+    assert.equal(upload.visionMode, "none");
+    assert.equal(upload.replaced, false);
+    const ready = await waitReady(upload.documentId);
+    assert.equal(ready.folderId, characterFolder);
+    assert.equal(ready.ingestReport.visionEnabled, false);
+
+    const replacement = await request(`${appUrl}/api/references/file?projectId=${encodeURIComponent(projectId)}&folderId=${encodeURIComponent(characterFolder)}&filename=setting.txt&vision=all`, {
+      method: "POST",
+      headers: { "content-type": "text/plain; charset=utf-8" },
+      body: Buffer.from("第二版：林晚与陆遥是搭档。", "utf8")
+    });
+    assert.equal(replacement.documentId, upload.documentId, "同目录同名文件要覆盖同一条资料");
+    assert.equal(replacement.replaced, true);
+    const replaced = await waitReady(upload.documentId);
+    const chunks = await request(`${appUrl}/api/references/${encodeURIComponent(upload.documentId)}/chunks?limit=10`);
+    assert.match(chunks.items.map((item) => item.text).join("\n"), /陆遥/u);
+
+    await request(`${appUrl}/api/references/${encodeURIComponent(upload.documentId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ folderId: root.id })
+    });
+    const inRootFolder = await request(`${appUrl}/api/references?projectId=${encodeURIComponent(projectId)}&folderId=${encodeURIComponent(root.id)}&limit=10`);
+    assert.equal(inRootFolder.total, 1);
+
+    await request(`${appUrl}/api/references/${encodeURIComponent(upload.documentId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ folderId: characterFolder })
+    });
+    const deletion = await request(`${appUrl}/api/reference-folders/${encodeURIComponent(root.id)}`, { method: "DELETE" });
+    let deleteTask = null;
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      deleteTask = await request(`${appUrl}/api/background-tasks/${encodeURIComponent(deletion.taskId)}`);
+      if (["completed", "failed", "needs_attention"].includes(deleteTask.status)) break;
+    }
+    assert.equal(deleteTask?.status, "completed", JSON.stringify(deleteTask?.progress || {}));
+    const after = await request(`${appUrl}/api/references?projectId=${encodeURIComponent(projectId)}&limit=10`);
+    assert.equal(after.total, 0, "递归删除文件夹要连同资料一起清掉");
+    const foldersAfter = await request(`${appUrl}/api/reference-folders?projectId=${encodeURIComponent(projectId)}`);
+    assert.equal(foldersAfter.items.length, 0);
+    await request(`${appUrl}/api/background-tasks/${encodeURIComponent(deletion.taskId)}`, { method: "DELETE" }).catch(() => {});
+    await request(`${appUrl}/api/background-tasks/${encodeURIComponent(replacement.taskId)}`, { method: "DELETE" }).catch(() => {});
+    await request(`${appUrl}/api/background-tasks/${encodeURIComponent(upload.taskId)}`, { method: "DELETE" }).catch(() => {});
+  } finally {
+    await request(`${appUrl}/api/projects/${encodeURIComponent(projectId)}?purge=1`, { method: "DELETE" });
+  }
+});

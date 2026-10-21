@@ -9,7 +9,7 @@ function fixture() {
   };
 }
 
-test("服务端按真实 subBatches 执行并逐段保存检查点", async () => {
+test("服务端按真实 subBatches 执行，每段结果落盘一次（不再逐段写两遍）", async () => {
   const run = fixture();
   const snapshots = [];
   const calls = [];
@@ -24,7 +24,19 @@ test("服务端按真实 subBatches 执行并逐段保存检查点", async () =>
   assert.deepEqual(result.subBatches.map((batch) => batch.entries), [2, 1]);
   assert.deepEqual(result.subBatches.map((batch) => batch.status), ["completed", "completed"]);
   assert.equal(calls.length, 3);
-  assert.ok(snapshots.length >= 7, "启动、每段运行前后和完成状态都应持久化");
+  // 落盘节流：初始 1 次 + 每段结果 1 次 + 收尾 1 次。旧行为是每段写两遍（running + 结果），
+  // 78 段的批次会打出上百次大 JSON 写入，把 Directus 压出压力保护。
+  assert.equal(snapshots.length, 5, "初始 + 三段结果 + 收尾");
+  assert.deepEqual(
+    snapshots.map((snapshot) => snapshot.segments.filter((segment) => segment.status === "done").length),
+    [0, 1, 2, 3, 3],
+    "每段完成都必须落盘，才能从断点继续"
+  );
+  assert.equal(
+    snapshots.some((snapshot) => snapshot.segments.some((segment) => segment.status === "running")),
+    false,
+    "快速段落不再为「正在翻」多写一次整行"
+  );
 });
 
 test("中断请求在当前段完成后停止，留下已中断标记且已完成段保留", async () => {

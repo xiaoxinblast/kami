@@ -34,21 +34,35 @@ export function createConflictScanner({ deps, maxPairs = MAX_ADJUDICATED_PAIRS, 
 
     const sources = await deps.loadScopeRules(scope);
     const rules = collectPromptRules(sources);
+    // 面板要能说清这次比对了哪几方、各有多少条：人工指南 > 蒸馏规范 > 技能规则 > 译者画像。
+    const sourceSummary = {
+      guide: rules.filter((rule) => rule.origin === "guide").length,
+      style: rules.filter((rule) => rule.origin === "style").length,
+      profile: rules.filter((rule) => rule.origin === "profile").length,
+      skills: [...new Map(rules.filter((rule) => rule.origin === "skill")
+        .map((rule) => [rule.skillId, { id: rule.skillId, version: rule.skillVersion, status: rule.skillStatus, count: 0 }]))
+        .values()].map((entry) => ({
+          ...entry,
+          count: rules.filter((rule) => rule.origin === "skill" && rule.skillId === entry.id).length
+        })),
+      guideName: String(sources?.humanGuide?.name || "")
+    };
+    const withSources = (report) => ({ ...report, sources: sourceSummary });
     if (rules.length < 2) {
       // 规则化之前的存量规范只有一整段散文，没有可逐条比对的单位。这在真实
       // 语料上是常态而不是例外，所以要说清楚原因，不能只报「不足两条」。
       const legacy = !Array.isArray(sources?.styleProfile?.rules) || sources.styleProfile.rules.length === 0;
       const reason = legacy && String(sources?.styleProfile?.instruction || "").trim()
-        ? "该作用域的风格规范还是规则化之前的整段散文，无法逐条比对；下次蒸馏会把它拆成规则后自动纳入"
-        : "该作用域可比较的规则不足两条";
+        ? "该项目的风格规范还是规则化之前的整段散文，无法逐条比对；下次蒸馏会把它拆成规则后自动纳入"
+        : "该项目可比较的规则不足两条";
       // "没什么可比"本身就是结论，要留下来，否则刷新页面就变回"尚未扫描"。
-      const report = empty(rules.length, 0, reason);
+      const report = withSources(empty(rules.length, 0, reason));
       await deps.recordReport(report);
       return report;
     }
     const candidates = findConflictCandidates(rules, { maxPairs });
     if (!candidates.length) {
-      const report = empty(rules.length, 0, "没有谈论同一方面的规则对");
+      const report = withSources(empty(rules.length, 0, "没有谈论同一方面的规则对"));
       await deps.recordReport(report);
       return report;
     }
@@ -59,7 +73,7 @@ export function createConflictScanner({ deps, maxPairs = MAX_ADJUDICATED_PAIRS, 
     } catch (error) {
       // 模型不可用时不要把候选当成结论：候选是刻意放宽的，直接上报会全是误报，
       // 也不落报告——没有结论就不该覆盖上一次真正跑出来的那一份。
-      return empty(rules.length, candidates.length, `冲突审查模型不可用：${error.message}`);
+      return withSources(empty(rules.length, candidates.length, `冲突审查模型不可用：${error.message}`));
     }
 
     const conflicts = verdicts
@@ -76,18 +90,20 @@ export function createConflictScanner({ deps, maxPairs = MAX_ADJUDICATED_PAIRS, 
           action: plan.action,
           reason: plan.reason,
           ruleId: plan.ruleId || "",
+          skillId: plan.skillId || "",
+          skillVersion: Number(plan.loser?.skillVersion) || 0,
           winner: plan.winner ? { originLabel: plan.winner.originLabel, rule: plan.winner.rule } : null
         };
       });
 
-    const report = {
+    const report = withSources({
       scope,
       scannedRules: rules.length,
       candidates: candidates.length,
       adjudicated: verdicts.length,
       conflicts,
       scannedAt: now()
-    };
+    });
     await deps.recordReport(report);
     return report;
   }

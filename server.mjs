@@ -1,7 +1,7 @@
 import http from "node:http";
 import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import v8 from "node:v8";
@@ -10,15 +10,21 @@ import { classifyContent, descriptorFromContext, inferContentTags, resolveDomain
 import { buildContextPack } from "./src/context-pack.mjs";
 import { refineCorpus } from "./src/corpus.mjs";
 import { matchTerms } from "./src/matcher.mjs";
-import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig } from "./src/provider.mjs";
+import { resolveSegmentMatches } from "./src/batch-matches.mjs";
+import { createTokenCache } from "./src/token-cache.mjs";
+import { settleReadSections } from "./src/read-sections.mjs";
+import { createMatcherPool } from "./src/matcher-pool.mjs";
+import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, resolveSurveyTargetsWithModel, reviewGateFailuresWithModel, surveyTermsWithModel, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig } from "./src/provider.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
-import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
-import { chunkReferencePages, extractReferenceFile, scanReferenceRisk } from "./src/reference-materials.mjs";
+import { DATA_ROOT, completeImport, countStyleEvidence, countStyleEvidenceFiles, countLearningTrajectoriesByFile, deleteAsset, deleteLibraryEntries, deleteMemory, getAsset, getAssets, getAssetGenerationToken, getAssetStats, getImportPreview, getLibraryStats, getMemories, getStyleLearningRun, listLibraryEntries, listLibraryFiles, listStyleEvidenceFiles, updateMemory, getQaCases, findQaCase, getQaRuns, getStoreMetadata, getStyleEvidence, getStyleLearningRuns, getStyleProfile, getProjectStyleProfile, getUserProfile, initializeStore, rebuildEmbeddings, saveAsset, saveAssets, saveCorpus, saveImportPreview, saveMemories, saveMemory, saveQaCase, saveQaRun, saveStyleEvidence, saveStyleEvidences, loadStyleEvidenceIndex, saveStyleLearningRun, saveStyleProfileEvaluation, findStyleProfile, demoteMemories, approveQaCase, saveBatchRun, getBatchRun, listBatchRuns, listStyleProfiles, activateStyleProfile, rejectStyleProfile, listPendingQaCases, disposeQaCase, saveLearningTrajectory, listLearningTrajectories, countLearningTrajectoriesByScope, getLearningTrajectory, updateLearningTrajectory, saveTranslationSkill, listTranslationSkills, getTranslationSkill, updateTranslationSkill, activateTranslationSkill, rollbackTranslationSkill, saveSkillEvaluation, listSkillEvaluations, saveQaTask, getQaTask, listQaTasks, deleteQaTask, saveBackgroundTask, getBackgroundTask, listBackgroundTasks, deleteBackgroundTask, updateStyleProfileRules, saveQualityAsset, listQualityAssets, getQualityAsset, updateQualityAsset, saveQualityRun, listQualityRuns, updateQualityRun, saveTrainingRun, listTrainingRuns, getTrainingRun, getProjects, getProject, saveProject, deleteProject, purgeProject, getResourceLibraries, saveResourceLibrary, deleteResourceLibrary, saveReferenceDocument, getReferenceDocument, listReferenceDocuments, updateReferenceDocument, deleteReferenceDocument, saveReferenceFolder, getReferenceFolder, listReferenceFolders, deleteReferenceFolder, replaceReferenceChunks, listReferenceChunks, listReferenceChunksForProject, updateReferenceChunk } from "./src/store.mjs";
+import { MAX_REFERENCE_FILE_BYTES, chunkReferencePages, extractReferenceFile, planReferenceExtraction, scanReferenceRisk } from "./src/reference-materials.mjs";
+import { getMemoryCandidates, sampleStyleEvidence, saveTmImportAudit } from "./src/store.mjs";
 import { buildReferenceToolRunner as assembleReferenceToolRunner, createProjectReferenceIndex } from "./src/reference-context.mjs";
 import { canDeleteQaIssues, deleteQaIssue } from "./src/qa-issue-deletion.mjs";
 import { applyModelDecisions, classifyImportCandidate, classifyImportRowKind, expandNestedTermCandidates, extractTermPairs, markExistingTermCandidates, termMatchKey } from "./src/table-term-extractor.mjs";
+import { deletePreviewCache, readPreviewCandidates, readPreviewPage, writePreviewCache } from "./src/tm-preview-cache.mjs";
 import { buildSuggestionCandidates, resolveTermSuggestions } from "./src/term-suggestions.mjs";
 import { narrowByDomain, normalizeMemoryText, rankQaCases, rankTranslationMemories, scopeMachineDraftsToFile, splitReferenceAuthority } from "./src/translation-memory.mjs";
 import { embedSource } from "./src/embedding.mjs";
@@ -34,6 +40,7 @@ import { externalReviewTrajectoryPatch, linkExternalReviewTrajectories, matchRev
 import { DEFAULT_TRANSLATION_STRATEGY, createDefaultTranslationSkill, effectiveStrategyValue, evaluateSkillPromotion, normalizedEditDistance, selectSkillHoldout, summarizeTrajectoryAttribution, validateCandidatePromotionState } from "./src/learning-engine.mjs";
 import { benchmarkTranslationSkill, createBenchmarkSnapshot } from "./src/skill-benchmark.mjs";
 import { createEvaluationJobRunner } from "./src/evaluation-jobs.mjs";
+import { createLearningJobTaskBridge } from "./src/learning-task-bridge.mjs";
 import { detectBatchVerse } from "./src/batch-verse.mjs";
 import { createAutoProposer } from "./src/auto-proposal.mjs";
 import { createConflictScanner } from "./src/conflict-scan.mjs";
@@ -42,22 +49,30 @@ import { SETTING_SPECS, TITLE_BRACKET_CHOICES, settingGroups } from "./src/setti
 import { environmentOverrides, getSettings, resetSettings, saveSettings } from "./src/settings-store.mjs";
 import { classifyChange, isNegativeEvidence, positiveEvidenceOnly } from "./src/style-delta.mjs";
 import { NO_STYLE_PROFILE_ID, STYLE_MIN_EVALUATION_SAMPLES, STYLE_PROMOTION_GUARDRAILS, benchmarkStyleVariant, selectStyleHoldout, styleVariant, validateStylePromotionState } from "./src/style-benchmark.mjs";
-import { proposeChallengerSkill, selectProposalTrajectories } from "./src/skill-proposal.mjs";
+import { proposeChallengerFromGateReview, proposeChallengerSkill, selectProposalTrajectories } from "./src/skill-proposal.mjs";
 import { checkFactSchema, detectDeliveryContext, extractFactSchema } from "./src/fact-schema.mjs";
 import { applyProjectQaPolicy, projectRuleMetadata } from "./src/project-config.mjs";
 import { assessTranslationRisk, decideQualityRoute, qualityThresholdForRisk, selectTranslationRoute, TRANSLATION_ROUTES } from "./src/translation-routing.mjs";
 import { QUALITY_TIERS, describeTierStrength, planQualityTier, resolveManualTier, selectQualityTier } from "./src/quality-tier.mjs";
 import { CONTEXT_BRIEF_MIN_SEGMENTS, contextBriefEntries, mergeContextBrief, purposeForIndex, splitContextChunks, summarizeContextBrief } from "./src/context-brief.mjs";
-import { buildQualityReport, deterministicConsistencyFindings, mergeConsistencyFindings, splitConsistencyChunks } from "./src/consistency-check.mjs";
+import { CONSISTENCY_EVIDENCE_LIMITS, buildQualityReport, deterministicConsistencyFindings, mergeConsistencyFindings, splitConsistencyChunks } from "./src/consistency-check.mjs";
+import { REPAIR_EVIDENCE_LABELS, REPAIR_SKIP_REASONS, planConsistencyRepairs, summarizeSourceGroups } from "./src/consistency-repair.mjs";
+import { normalizeSource } from "./src/text.mjs";
 import { deriveTermCandidatesFromHumanFinal, MEMORY_PURPOSES } from "./src/asset-governance.mjs";
 import { buildReviewReceipt, normalizeReviewDecision } from "./src/review-receipt.mjs";
 import { createRegressionCandidateFromQaCase, decideRegressionCandidate, normalizeGoldSet, normalizeRegressionSuite } from "./src/gold-regression.mjs";
-import { decideReleaseGate, evaluateGoldRun, evaluateRegressionRun, resolveGateAssets } from "./src/quality-gate.mjs";
+import { buildGateQueue, decideReleaseGate, evaluateGoldRun, evaluateRegressionRun, gateRefreshDecision, gateRunCoversAssets, resolveGateAssets, selectGateCases, selectGateTargetSkill } from "./src/quality-gate.mjs";
+import { deriveExternalReviewCases, mergeRegressionSources, regressionCaseSetDigest } from "./src/regression-sources.mjs";
+import { alignSurveyToHumanFinal, decideTermWrite, normalizeSurveyTerms, pendingCandidateFromUnresolved, pendingReason, surveyPairs } from "./src/term-survey.mjs";
+import { buildTermSurveyView } from "./src/term-survey-view.mjs";
+import { chunkGateFailures, gateFailureCases, mergeGateReviewReports, termInputsFromReview } from "./src/gate-review.mjs";
 import { buildTrainingExport, datasetToJsonl } from "./src/training-export.mjs";
 import { advanceTrainingRun, buildTrainingManifest, canTransition, createTrainingRun, freezeTrainingDataset } from "./src/training-pipeline.mjs";
 import { WorkbenchSessionMonitor, shutdownDockerDesktop } from "./src/workbench-lifecycle.mjs";
+import { BACKGROUND_TASK_STALE_MS, interruptedTaskPatch, selectStaleRunningTasks } from "./src/background-task-sweep.mjs";
 import { extractStyleGuideFile } from "./src/style-guide-import.mjs";
-import { runServerBatch } from "./src/batch-runner.mjs";
+import { runServerBatch, retryServerBatchQa } from "./src/batch-runner.mjs";
+import { buildBatchWorkflow, isIncompleteBatchQa, mergeBatchTaskRows } from "./public/batch-status.js";
 
 const PUBLIC_ROOT = fileURLToPath(new URL("./public", import.meta.url));
 const PROJECT_ROOT = fileURLToPath(new URL("./", import.meta.url));
@@ -69,10 +84,14 @@ const MAX_BODY_BYTES = 15 * 1024 * 1024;
 const IMPORT_BODY_BYTES = 48 * 1024 * 1024;
 /** 所有导入入口统一的单文件上限（前端同值，两边都要有）。 */
 const IMPORT_FILE_BYTES = 20 * 1024 * 1024;
+/** TM 预检只把前 N 条样例发给浏览器，其余按页取：8 万行表格有 8 万条候选。 */
+const TM_PREVIEW_SAMPLE = 200;
 const TERM_AI_CONCURRENCY = 5;
 const TERM_AI_BATCH_SIZE = 24;
 /** 术语批量写入的分块大小；导入 5000+ 条时逐条写会拖到分钟级。 */
 const TERM_WRITE_BATCH_SIZE = 200;
+/** 翻译记忆与风格证据的批量写入块大小：逐条写一次 8 万条的导入要 4 万次往返。 */
+const MEMORY_WRITE_BATCH_SIZE = 200;
 /** 跳过明细只保留前若干条，其余按原因计数。 */
 const SKIPPED_DETAIL_LIMIT = 200;
 /** 记忆库列表一页的条数与单页上限：一次渲染上万行 DOM 会卡，页面按页追加。 */
@@ -96,6 +115,9 @@ const BACKGROUND_TASK_TERMINAL_STATUSES = new Set(["completed", "failed", "revie
 let workbenchSessionMonitor = null;
 let workbenchShutdownStarted = false;
 const batchWorkers = new Map();
+const batchQaWorkers = new Map();
+const batchQaStarts = new Map();
+const batchWorkflowWrites = new Map();
 /**
  * 正在本进程内执行的后台任务。
  * 任务中心点「中断」只置一个标记，跑批的循环在下一处分块边界停下来：
@@ -155,7 +177,7 @@ function json(res, status, payload) {
  *
  * 任务执行期间同时挂住工作台收尾判定：长任务不能在页面关闭宽限期里被杀掉。
  */
-async function createBackgroundTask({ type, title, locale = "", projectId = "", progress = {} }) {
+async function createBackgroundTask({ type, title, locale = "", projectId = "", progress = {}, payload = {} }) {
   const task = await saveBackgroundTask({
     type,
     projectId,
@@ -163,7 +185,7 @@ async function createBackgroundTask({ type, title, locale = "", projectId = "", 
     locale,
     status: "in_progress",
     progress: { percent: 0, phase: "queued", message: "已进入后台队列", completed: 0, total: 0, ...progress },
-    payload: {}
+    payload: payload || {}
   });
   workbenchSessionMonitor?.hold(backgroundTaskHoldId(task.id));
   return task;
@@ -197,6 +219,26 @@ async function updateBackgroundTaskProgress(id, update) {
 
 function backgroundTaskHoldId(id) {
   return `task:${id}`;
+}
+
+/**
+ * 收掉"上一轮被打断、库里还挂着进行中"的后台任务。
+ *
+ * 任务只在进程内存里推进：工作台重启（或被关掉）后，跑到一半的门禁/导入就没人再管了，
+ * 但库里那行仍是 in_progress，任务中心会一直转圈、用户也不知道该不该等。
+ * 判定只看"多久没有进度更新"，正在跑的任务几十秒就会写一次，不会误伤。
+ */
+async function sweepStaleBackgroundTasks({ reason = "startup" } = {}) {
+  const tasks = await listBackgroundTasks({ limit: 500 }).catch(() => []);
+  const stale = selectStaleRunningTasks(tasks, { now: Date.now(), staleMs: BACKGROUND_TASK_STALE_MS });
+  for (const task of stale) {
+    await updateBackgroundTaskProgress(task.id, interruptedTaskPatch(task)).catch(() => {});
+    workbenchSessionMonitor?.release(backgroundTaskHoldId(task.id));
+  }
+  if (stale.length) {
+    logInfo("已把长时间没有进度的后台任务标记为中断", { reason, count: stale.length, ids: stale.map((task) => task.id) });
+  }
+  return stale.length;
 }
 
 /**
@@ -246,45 +288,143 @@ async function loadGateAssets(scope) {
  * 用受测技能把固定资产整体跑一遍。走的是评测同一条基准链路，因此 Gold 样本
  * 自身的终稿不会通过记忆或问题库回流成为它自己的答案。
  */
-async function runQualityGate({ scope, skill, triggeredBy = "", onProgress = null }) {
+async function runQualityGate({ scope, skill, triggeredBy = "", onProgress = null, shouldCancel = null }) {
   const assets = await loadGateAssets(scope);
-  const queue = [
-    ...assets.samples.map((item) => ({ kind: "gold", item })),
-    ...assets.cases.map((item) => ({ kind: "regression", item }))
-  ];
+  // 回归案例会随每次审校回填累积，按改动幅度封顶取前 N 条；Gold 样本是固定的，不封顶。
+  const gateCases = selectGateCases(assets.cases, getSettings().learning.gateRegressionCaseLimit);
+  // 同一条原文只翻一次：Gold 与回归重叠、回归集内部同句都合并成一次执行，
+  // 但每一项仍然各自按自己的规则判定，结论口径不变。
+  const dedupeEnabled = getSettings().learning.gateDedupeSources !== false;
+  const queue = buildGateQueue({ samples: assets.samples, cases: gateCases, dedupe: dedupeEnabled });
   const goldResults = [];
   const regressionResults = [];
   const failures = [];
+  let cancelled = "";
+  let executed = 0;
   if (queue.length) {
     const snapshot = await createBenchmarkSnapshot(
       scope,
-      queue.map(({ item }) => ({ id: item.id, source: item.source })),
+      queue.map((entry) => ({ id: entry.key, source: entry.source })),
       { promptVersion: TRANSLATION_PROMPT_VERSION }
     );
     for (const [index, entry] of queue.entries()) {
-      if (onProgress && (await onProgress(index, queue.length, entry)) === false) break;
+      // 中断在样本边界生效：已经跑完的样本全部保留，剩下的按"未执行"如实记录。
+      if (shouldCancel?.()) { cancelled = "已按用户要求中断本次门禁执行"; break; }
+      if (onProgress && (await onProgress(index, queue.length, entry)) === false) {
+        cancelled = "后台任务记录已被删除，本次门禁执行已中止";
+        break;
+      }
       try {
-        const benchmark = await benchmarkTranslationSkill(skill, { id: entry.item.id, source: entry.item.source }, { snapshot });
-        const record = { id: entry.item.id, translation: benchmark.translation, qaScore: benchmark.qaScore, hardErrorCount: benchmark.hardErrorCount, latencyMs: benchmark.latencyMs, costUsd: benchmark.costUsd };
-        if (entry.kind === "gold") goldResults.push(record);
-        else regressionResults.push(record);
+        const benchmark = await benchmarkTranslationSkill(skill, { id: entry.key, source: entry.source }, { snapshot });
+        executed += 1;
+        const record = { translation: benchmark.translation, qaScore: benchmark.qaScore, hardErrorCount: benchmark.hardErrorCount, latencyMs: benchmark.latencyMs, costUsd: benchmark.costUsd };
+        for (const sample of entry.gold) goldResults.push({ ...record, id: sample.id });
+        for (const item of entry.regression) regressionResults.push({ ...record, id: item.id });
       } catch (error) {
         // 执行失败的样本保持"未执行"，由门禁判定为不完整而不是默认通过。
-        failures.push({ id: entry.item.id, kind: entry.kind, message: error.message });
+        for (const sample of entry.gold) failures.push({ id: sample.id, kind: "gold", message: error.message });
+        for (const item of entry.regression) failures.push({ id: item.id, kind: "regression", message: error.message });
       }
     }
   }
   const gold = evaluateGoldRun({ samples: assets.samples, results: goldResults });
-  const regression = evaluateRegressionRun({ cases: assets.cases, results: regressionResults });
-  const gate = decideReleaseGate({ regression, gold });
+  const regression = evaluateRegressionRun({ cases: gateCases, results: regressionResults });
+  const gate = decideReleaseGate({
+    regression,
+    gold,
+    thresholds: { regressionPassRate: getSettings().learning.gateRegressionPassRate }
+  });
+  if (cancelled) {
+    // 中断产生的记录必须说清"结论无效"，而不是伪装成一次失败的质量判定。
+    gate.decision = "block";
+    gate.allowed = false;
+    gate.blocking = [{ code: "gate_interrupted", message: `${cancelled}：已执行 ${executed} / ${queue.length} 个样本，结论无效` }, ...gate.blocking];
+  }
   return {
     gate,
     gold,
     regression,
     executionFailures: failures,
+    cancelled,
+    dedupe: { enabled: dedupeEnabled, executions: queue.length, planned: assets.samples.length + gateCases.length },
+    gateCaseLimit: getSettings().learning.gateRegressionCaseLimit,
+    regressionCaseTotal: assets.cases.length,
     assetVersions: { goldSets: assets.goldSetVersions, regressionSuites: assets.regressionSuiteVersions },
     triggeredBy
   };
+}
+
+/**
+ * 派生当前作用域的全部回归案例：外部审校回填改动 + 人工批准的 QA 失败案例。
+ * 外部案例不单独落库，它们是回归集的派生输入，来源始终可回溯到轨迹与批次段落。
+ */
+async function loadDerivedRegressionCases(scope) {
+  const [trajectories, qaRecords] = await Promise.all([
+    listLearningTrajectories({ ...scope, limit: 1_000 }),
+    listQualityAssets({ ...scope, kind: "regression_candidate", status: "approved", limit: 500 })
+  ]);
+  // 旧轨迹没有 humanDecision.machineTranslation：回退到批次段落里记的 previousTranslation。
+  const batchIds = [...new Set(trajectories
+    .filter((item) => item.humanDecision?.accepted === true && !item.humanDecision?.machineTranslation && item.batchId)
+    .map((item) => String(item.batchId)))];
+  const batchSegments = new Map();
+  await Promise.all(batchIds.map(async (batchId) => {
+    try {
+      const run = await getBatchRun(batchId);
+      if (run?.segments) batchSegments.set(batchId, run.segments);
+    } catch { /* 批次已删除：这条轨迹只能计数上报，不能凭空补一个机器稿 */ }
+  }));
+  const derived = deriveExternalReviewCases({
+    trajectories,
+    batchSegments,
+    scope,
+    minEditDistance: getSettings().learning.regressionEditDistance,
+    now: new Date().toISOString()
+  });
+  const merged = mergeRegressionSources({
+    externalCases: derived.cases,
+    qaCandidates: qaRecords.map((item) => item.payload).filter(Boolean)
+  });
+  return { ...merged, externalStats: derived.stats };
+}
+
+/**
+ * 按当前证据重建回归集。内容没变就复用现版本，避免每跑一次回填就堆一个空版本。
+ * 返回 { asset, changed, stats, reason }：reason 说明为什么没有案例可入集。
+ */
+async function refreshRegressionSuite(scope, { reason = "", changeNote = "" } = {}) {
+  const { cases, stats, externalStats } = await loadDerivedRegressionCases(scope);
+  if (!cases.length) {
+    return { asset: null, changed: false, stats, externalStats, reason: reason || "当前作用域没有审校改动或已批准的 QA 案例" };
+  }
+  const digest = regressionCaseSetDigest(cases);
+  const seriesId = `regression:${scope.locale}:${scope.contentType}:${scope.domain}:${scope.project}`;
+  const existing = await listQualityAssets({ ...scope, kind: "regression_suite", seriesId, limit: 500 });
+  const active = existing
+    .filter((item) => item.enabled && item.status === "active")
+    .sort((left, right) => (Number(right.version) || 0) - (Number(left.version) || 0))[0];
+  if (active?.payload?.metadata?.casesDigest === digest) {
+    return { asset: active, changed: false, stats, externalStats, reason: "回归集内容未变化" };
+  }
+  const version = await nextQualityAssetVersion(scope, "regression_suite", seriesId);
+  const payload = normalizeRegressionSuite({
+    id: `${seriesId}#v${version}`,
+    seriesId,
+    version,
+    scope,
+    name: `${scope.locale} 失败回归集`,
+    description: "由外部审校回填改动与人工批准的 QA 失败案例自动派生",
+    status: "active",
+    enabled: true,
+    candidates: cases,
+    createdAt: new Date().toISOString(),
+    changeNote: changeNote || `自动重建：审校改动 ${externalStats.included} 条 · QA 案例 ${stats.qa} 条`,
+    metadata: { casesDigest: digest, sources: stats, externalStats }
+  });
+  const saved = await saveQualityAsset({ kind: "regression_suite", scope, payload, status: payload.status, enabled: payload.enabled });
+  const activated = await activateQualityAsset(saved);
+  logInfo("回归集已按最新证据重建", { version, cases: cases.length, ...stats, reason });
+  return { asset: activated, changed: true, stats, externalStats, reason: reason || "auto" };
 }
 
 /** 把一次门禁运行落成可追溯的记录。 */
@@ -306,11 +446,156 @@ async function persistQualityRun({ scope, skill, result, triggeredBy }) {
       gold: { ...result.gold, samples: result.gold.samples.slice(0, 100) },
       regression: { ...result.regression, cases: result.regression.cases.slice(0, 100) },
       warnings: result.gate.warnings,
-      executionFailures: result.executionFailures
+      executionFailures: result.executionFailures,
+      dedupe: result.dedupe || null
     },
     blocking: result.gate.blocking,
     triggeredBy
   });
+}
+
+/** 正在跑门禁的技能：手动与自动触发共用，避免同一候选被重复跑两遍。 */
+const qualityGateInFlight = new Set();
+
+/**
+ * 门禁统一入口：手动按钮与自动触发都走这里，保证进度上报、留档与并发去重一致。
+ * 返回后台任务；真正跑模型的部分在后台继续。
+ */
+async function startQualityGateRun({ scope, skill, triggeredBy = "manual", reason = "manual" }) {
+  const assets = await loadGateAssets(scope);
+  const gateCases = selectGateCases(assets.cases, getSettings().learning.gateRegressionCaseLimit);
+  const total = assets.samples.length + gateCases.length;
+  if (!total) {
+    const error = new Error("当前作用域没有启用的 Gold Set 或回归集，先建立固定评测资产");
+    error.statusCode = 400;
+    throw error;
+  }
+  const task = await createBackgroundTask({
+    type: "quality-gate",
+    title: `质量门禁 · ${scope.locale} · ${skill.name || skill.id}`,
+    projectId: scope.project,
+    locale: scope.locale,
+    progress: { total, message: `准备执行 ${total} 个固定样本` }
+  });
+  // 注册进本进程的运行表：任务中心的「中断」才能真正停住门禁，
+  // 而不是把任务标成中断、循环却继续往下跑。
+  const control = beginBackgroundRun(task.id);
+  qualityGateInFlight.add(String(skill.id));
+  (async () => {
+    try {
+      const result = await runQualityGate({
+        scope,
+        skill,
+        triggeredBy,
+        shouldCancel: () => control.cancelRequested,
+        onProgress: async (index, count) => updateBackgroundTaskProgress(task.id, {
+          progress: { phase: "running", message: `正在执行第 ${index + 1} / ${count} 个固定样本`, percent: Math.round((index / Math.max(count, 1)) * 90), completed: index, total: count }
+        })
+      });
+      const run = await persistQualityRun({ scope, skill, result, triggeredBy });
+      if (result.cancelled) {
+        await updateBackgroundTaskProgress(task.id, {
+          status: "needs_attention",
+          progress: { ...(task.progress || {}), phase: "cancelled", message: result.cancelled, completed: result.regression.total - (result.regression.missing?.length || 0), total },
+          payload: { qualityRunId: run.id, decision: result.gate.decision, blocking: result.gate.blocking, skillId: skill.id, interrupted: true }
+        });
+        logInfo("质量门禁被中断，已留存部分结果", { skillId: skill.id, runId: run.id, blocking: result.gate.blocking?.[0]?.message || "" });
+        return;
+      }
+      await updateBackgroundTaskProgress(task.id, {
+        status: "completed",
+        progress: { phase: "completed", message: `门禁结论：${result.gate.decision}`, percent: 100, completed: total, total },
+        payload: { qualityRunId: run.id, decision: result.gate.decision, blocking: result.gate.blocking, skillId: skill.id }
+      });
+    } catch (error) {
+      console.error("质量门禁后台任务失败", error);
+      await updateBackgroundTaskProgress(task.id, {
+        status: "failed",
+        progress: { phase: "failed", message: `门禁执行失败：${error.message}`, percent: 100 },
+        payload: { error: error.message }
+      }).catch(() => {});
+    } finally {
+      endBackgroundRun(task.id);
+      qualityGateInFlight.delete(String(skill.id));
+      // 任务行可能已被删除（那时上面的进度更新会失败）：hold 必须在这里兜底释放，
+      // 否则会话收尾判定会一直被这条不存在的任务挂住。
+      workbenchSessionMonitor?.release(backgroundTaskHoldId(task.id));
+    }
+  })();
+  logInfo("质量门禁已进入任务中心", { skillId: skill.id, total, reason });
+  return { task, total };
+}
+
+/**
+ * 审校回填或新候选生成后自动跑门禁：目标只认该作用域最新的候选。
+ * 没有待晋升候选时不空跑生效版本——门禁是给候选发通行证的，不是刷新面板数字的工具。
+ */
+const autoGateScopes = new Set();
+
+function triggerQualityGateRefresh(scope, { reason = "auto" } = {}) {
+  if (!getSettings().learning.autoGateEnabled) return;
+  const key = learningScopeKeyOf(scope);
+  if (autoGateScopes.has(key)) return;
+  autoGateScopes.add(key);
+  void (async () => {
+    try {
+      const skills = await listTranslationSkills({ ...scope, limit: 100 });
+      const assets = await loadGateAssets(scope);
+      const target = selectGateTargetSkill(skills);
+      const [latest] = target ? await listQualityRuns({ ...scope, skillId: target.id, limit: 10 }) : [];
+      const decision = gateRefreshDecision({
+        enabled: getSettings().learning.autoGateEnabled,
+        skills,
+        assets,
+        latestRun: latest || null,
+        inFlight: Boolean(target && qualityGateInFlight.has(String(target.id)))
+      });
+      if (!decision.run || !decision.skill) return;
+      await startQualityGateRun({ scope, skill: decision.skill, triggeredBy: `auto:${reason}`, reason });
+    } catch (error) {
+      console.error("自动质量门禁失败", error);
+    } finally {
+      autoGateScopes.delete(key);
+    }
+  })();
+}
+
+/**
+ * QA 案例被采纳后自动并入回归集：采纳动作本身就是那道人工闸门，
+ * 不再要求第二次审批与署名。回归集内容有变化才出新版本。
+ */
+async function admitApprovedQaCase(qaCaseId) {
+  const qaCase = await findQaCase(qaCaseId);
+  if (!qaCase) return { skipped: "not_found" };
+  const scope = learningScope({
+    locale: qaCase.locale,
+    contentType: qaCase.contentType || "general",
+    domain: qaCase.domain || "general",
+    project: qaCase.projectId || qaCase.project || "default"
+  });
+  const existing = await listQualityAssets({ ...scope, kind: "regression_candidate", sourceQaCaseId: qaCaseId, limit: 10 });
+  let asset = existing[0] || null;
+  if (!asset) {
+    const candidate = createRegressionCandidateFromQaCase({ ...qaCase, scope }, {
+      scope,
+      createdAt: new Date().toISOString(),
+      createdBy: "qa-approval"
+    });
+    const approved = decideRegressionCandidate(candidate, {
+      decision: "approve",
+      decidedAt: new Date().toISOString(),
+      note: "QA 案例采纳后自动并入回归集"
+    });
+    asset = await saveQualityAsset({ kind: "regression_candidate", scope, payload: approved, status: approved.status, enabled: false });
+  }
+  const suite = await refreshRegressionSuite(scope, { reason: "qa-case-approved", changeNote: "QA 案例采纳后自动并入" });
+  triggerQualityGateRefresh(scope, { reason: "qa-case-approved" });
+  return {
+    candidateId: asset?.id || "",
+    suiteVersion: suite.asset?.version || null,
+    suiteChanged: Boolean(suite.changed),
+    cases: suite.stats?.total || 0
+  };
 }
 
 /**
@@ -331,18 +616,174 @@ function buildReferenceToolRunner({ projectId = "", onActivity = null, skill = n
 }
 
 /**
- * 参考资料导入：解析 → 分块 → 向量化 → 入库。扫描页交给模型识图。
+ * 参考资料上传后的落盘位置：data/uploads/references/<documentId><ext>。
+ * 路径记在文档的 ingest_report 里，目录树则单独存 reference_folders。
  */
-async function ingestReferenceDocument({ projectId, libraryId, name, kind, contentType, domain, filename, base64, onProgress = null }) {
-  const document = await saveReferenceDocument({
-    projectId, libraryId, name, kind, contentType, domain,
-    sourceFile: filename, sourceFormat: "", status: "indexing"
+const REFERENCE_UPLOAD_DIRECTORY = join("uploads", "references");
+const REFERENCE_FOLDER_MAX_NAME = 120;
+const REFERENCE_FOLDER_INVALID_NAME = /[<>:"/\\|?*\u0000-\u001f]/u;
+
+function referenceFilePath(documentId, extension = "") {
+  return join(DATA_ROOT, REFERENCE_UPLOAD_DIRECTORY, `${documentId}${extension}`);
+}
+
+function referenceRelativePath(documentId, extension = "") {
+  return `${REFERENCE_UPLOAD_DIRECTORY}/${documentId}${extension}`.replace(/\\/gu, "/");
+}
+
+/**
+ * 把请求体流式写到磁盘。
+ *
+ * 200MB 的资料不能先读进内存再 base64（浏览器实测 14 倍膨胀，服务端同样会顶满堆）：
+ * 这里边收边写，超限立即中止并删掉半成品，返回 413 + 明说上限是多少。
+ */
+async function writeRequestBodyToFile(req, { path, limitBytes = MAX_REFERENCE_FILE_BYTES } = {}) {
+  await mkdir(join(DATA_ROOT, REFERENCE_UPLOAD_DIRECTORY), { recursive: true });
+  const handle = await open(path, "w");
+  let bytes = 0;
+  try {
+    for await (const chunk of req) {
+      bytes += chunk.length;
+      if (bytes > limitBytes) {
+        await handle.close().catch(() => {});
+        await rm(path, { force: true }).catch(() => {});
+        const error = new Error(`单个参考资料不能超过 ${Math.round(limitBytes / 1024 / 1024)}MB（当前已超过，请压缩或拆分后再上传）`);
+        error.statusCode = 413;
+        throw error;
+      }
+      await handle.write(chunk);
+    }
+  } finally {
+    await handle.close().catch(() => {});
+  }
+  return bytes;
+}
+
+function normalizeReferenceFolderName(value) {
+  const name = String(value || "").trim().replace(/\s+/gu, " ");
+  if (!name) throw Object.assign(new Error("文件夹名称不能为空"), { statusCode: 400 });
+  if (name.length > REFERENCE_FOLDER_MAX_NAME) {
+    throw Object.assign(new Error(`文件夹名称不能超过 ${REFERENCE_FOLDER_MAX_NAME} 个字符`), { statusCode: 400 });
+  }
+  if (name === "." || name === ".." || REFERENCE_FOLDER_INVALID_NAME.test(name)) {
+    throw Object.assign(new Error("文件夹名称不能包含 / \\ : * ? \" < > | 等路径保留字符"), { statusCode: 400 });
+  }
+  return name;
+}
+
+async function referenceFoldersForProject(projectId) {
+  return await listReferenceFolders({ projectId: String(projectId || "").trim() });
+}
+
+function referenceFolderDescendantIds(folders, rootId) {
+  const ids = [];
+  const queue = [String(rootId || "")];
+  const seen = new Set();
+  while (queue.length) {
+    const parentId = queue.shift();
+    for (const folder of folders) {
+      if (String(folder.parentId || "") !== parentId) continue;
+      if (seen.has(String(folder.id))) continue;
+      seen.add(String(folder.id));
+      ids.push(String(folder.id));
+      queue.push(String(folder.id));
+    }
+  }
+  return ids;
+}
+
+async function assertReferenceFolder(projectId, folderId) {
+  const normalized = String(folderId || "").trim();
+  if (!normalized) return null;
+  const folder = await getReferenceFolder(normalized);
+  if (!folder || folder.projectId !== String(projectId || "").trim()) {
+    throw Object.assign(new Error("文件夹不存在或不属于当前项目"), { statusCode: 404 });
+  }
+  return folder;
+}
+
+async function assertReferenceFolderNameAvailable({ projectId, parentId = "", name, exceptId = "" }) {
+  const normalizedParent = String(parentId || "").trim();
+  await assertReferenceFolder(projectId, normalizedParent);
+  const siblings = (await referenceFoldersForProject(projectId))
+    .filter((folder) => String(folder.parentId || "") === normalizedParent && String(folder.id) !== String(exceptId || ""));
+  const key = normalizeReferenceFolderName(name).toLocaleLowerCase("zh-CN");
+  if (siblings.some((folder) => String(folder.name || "").toLocaleLowerCase("zh-CN") === key)) {
+    throw Object.assign(new Error("同一层已经有一个同名文件夹"), { statusCode: 409 });
+  }
+}
+
+async function ensureReferenceFolderPath({ projectId, parentId = "", path = [] }) {
+  const segments = (Array.isArray(path) ? path : String(path || "").split("/"))
+    .map((segment) => String(segment || "").trim())
+    .filter(Boolean);
+  let currentParent = String(parentId || "").trim();
+  await assertReferenceFolder(projectId, currentParent);
+  const folders = await referenceFoldersForProject(projectId);
+  for (const raw of segments) {
+    const name = normalizeReferenceFolderName(raw);
+    let folder = folders.find((item) => String(item.parentId || "") === currentParent
+      && String(item.name || "").toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"));
+    if (!folder) {
+      folder = await saveReferenceFolder({ projectId, parentId: currentParent, name });
+      folders.push(folder);
+    }
+    currentParent = folder.id;
+  }
+  return { folderId: currentParent, folders };
+}
+
+async function referenceFolderScopeIds(projectId, folderId, { recursive = false } = {}) {
+  const rootId = String(folderId || "").trim();
+  await assertReferenceFolder(projectId, rootId);
+  const folders = await referenceFoldersForProject(projectId);
+  const descendants = referenceFolderDescendantIds(folders, rootId);
+  return recursive ? [rootId, ...descendants] : [rootId];
+}
+
+async function deleteReferenceDocumentCompletely(documentId) {
+  const document = await getReferenceDocument(documentId);
+  const removed = await deleteReferenceDocument(documentId);
+  if (!removed) return false;
+  const sourcePath = String(document?.ingestReport?.sourcePath || "");
+  if (sourcePath.startsWith(`${REFERENCE_UPLOAD_DIRECTORY}/`) && !sourcePath.includes("..")) {
+    await rm(join(DATA_ROOT, sourcePath), { force: true }).catch(() => {});
+  }
+  return true;
+}
+
+async function describeReferenceDocumentById(document) {
+  const { items } = await listReferenceChunks({ documentId: document.id, limit: 200 });
+  const text = items
+    .slice()
+    .sort((left, right) => (Number(left.ordinal) || 0) - (Number(right.ordinal) || 0))
+    .map((chunk) => String(chunk.text || "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 6_000);
+  if (!text) throw new Error("这份资料没有可读正文，无法生成描述");
+  const description = await describeReferenceWithModel({ name: document.name, kind: document.kind, text });
+  const updated = await updateReferenceDocument(document.id, {
+    ingestReport: { ...(document.ingestReport || {}), description, describedAt: new Date().toISOString() }
   });
+  referenceIndex.invalidate(document.projectId);
+  return { description, document: updated };
+}
+
+/**
+ * 参考资料导入：解析 → 分块 → 向量化 → 入库。扫描页与内嵌图片交给模型识图。
+ *
+ * 0 个片段是合法结果：用户选「只读文字」时，一份纯扫描件确实解析不出正文——
+ * 这时资料照样入库（保留原文件与报告），只是暂时不可检索。
+ */
+async function ingestReferenceDocument({ document, vision = true, plan = null, onProgress = null }) {
+  const filename = document.sourceFile || document.name || "资料";
   try {
     onProgress?.({ phase: "parsing", message: "正在解析参考资料", percent: 5 });
     const parsed = await extractReferenceFile({
       filename,
-      base64,
+      path: join(DATA_ROOT, String(document.ingestReport?.sourcePath || "")),
+      vision,
       onScannedPage: async ({ label, render, mediaType = "image/png" }) => {
         onProgress?.({ phase: "vision", message: `${label || "这一页"}：没有文字层，正在用模型识图`, percent: 20 });
         const image = await render();
@@ -350,7 +791,9 @@ async function ingestReferenceDocument({ projectId, libraryId, name, kind, conte
       }
     });
     const chunks = chunkReferencePages(parsed.pages);
-    if (!chunks.length) throw new Error("没有解析出可用文字内容");
+    if (!chunks.length && parsed.characters === 0) {
+      onProgress?.({ phase: "indexing", message: vision ? "没有解析出可用文字内容" : "已按「只读文字」导入：这份资料没有文字层", percent: 90 });
+    }
     const prepared = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
@@ -360,12 +803,12 @@ async function ingestReferenceDocument({ projectId, libraryId, name, kind, conte
       } catch {
         embedding = null;
       }
-      prepared.push({ ...chunk, embedding, risk: scanReferenceRisk(chunk.text), allowed: false, projectId });
+      prepared.push({ ...chunk, embedding, risk: scanReferenceRisk(chunk.text), allowed: false, projectId: document.projectId });
       if (index % 20 === 0 || index === chunks.length - 1) {
         onProgress?.({ phase: "indexing", message: `正在向量化片段 ${index + 1} / ${chunks.length}`, percent: 30 + Math.round((index / chunks.length) * 60) });
       }
     }
-    await replaceReferenceChunks(document.id, { projectId, chunks: prepared });
+    await replaceReferenceChunks(document.id, { projectId: document.projectId, chunks: prepared });
     const updated = await updateReferenceDocument(document.id, {
       status: "ready",
       sourceFormat: parsed.format,
@@ -373,16 +816,21 @@ async function ingestReferenceDocument({ projectId, libraryId, name, kind, conte
       chunkCount: prepared.length,
       error: "",
       ingestReport: {
+        ...(document.ingestReport || {}),
         format: parsed.format,
+        stage: "ready",
+        bytes: parsed.bytes,
         pages: parsed.pages.length,
         visionPages: parsed.pages.filter((page) => page.origin === "vision").length,
         visionImages: parsed.visionImages,
         skippedImages: parsed.skippedImages,
-        cappedImages: parsed.cappedImages,
+        visionSkippedByUser: parsed.visionSkippedByUser,
+        visionEnabled: vision === true,
+        plan,
         riskChunks: prepared.filter((chunk) => chunk.risk).length
       }
     });
-    referenceIndex.invalidate(projectId);
+    referenceIndex.invalidate(document.projectId);
     return updated;
   } catch (error) {
     await updateReferenceDocument(document.id, { status: "failed", error: String(error.message || error).slice(0, 500) }).catch(() => {});
@@ -390,17 +838,179 @@ async function ingestReferenceDocument({ projectId, libraryId, name, kind, conte
   }
 }
 
-async function runReferenceIngestInBackground({ taskId, projectId, libraryId, name, kind, contentType, domain, filename, base64 }) {
+/** 预扫结果直接写进文档报告，用于进度显示与导入统计。 */
+async function saveReferencePlan(document, plan, stage) {
+  return await updateReferenceDocument(document.id, {
+    ingestReport: { ...(document.ingestReport || {}), plan, stage, bytes: plan.bytes }
+  });
+}
+
+/** 同一份资料只能有一个写回者：覆盖重导时排队，旧任务不能把新结果覆盖掉。 */
+const referenceIngestQueues = new Map();
+
+function enqueueReferenceIngest({ taskId, documentId, visionMode = "all", autoScan = false }) {
+  const previous = referenceIngestQueues.get(String(documentId)) || Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(() => runReferenceIngestInBackground({ taskId, documentId, visionMode, autoScan }))
+    .catch((error) => console.error("[Kami] 参考资料导入失败", error))
+    .finally(() => {
+      if (referenceIngestQueues.get(String(documentId)) === next) referenceIngestQueues.delete(String(documentId));
+    });
+  referenceIngestQueues.set(String(documentId), next);
+  return next;
+}
+
+/**
+ * 上传参考资料的公共入口：落盘 → 建/复用文档记录 → 起后台任务（预扫 + 入库）。
+ *
+ * 原始字节入口边收边写（200MB 不进内存）；JSON 入口是给脚本用的，解出来的字节也统一
+ * 落到同一位置，后续解析/重试/删除都只认这份存档。
+ */
+async function startReferenceUpload({ body, params, req }) {
+  const read = (key) => String(body?.[key] ?? params?.get(key) ?? "").trim();
+  const projectId = read("projectId");
+  if (!projectId) throw Object.assign(new Error("请先选择项目"), { statusCode: 400 });
+  const filename = read("filename");
+  if (!filename) throw Object.assign(new Error("缺少文件名"), { statusCode: 400 });
+  const folderId = read("folderId");
+  await assertReferenceFolder(projectId, folderId);
+  const extension = extname(filename).toLowerCase();
+  const existing = (await listReferenceDocuments({ projectId, folderIds: [folderId], limit: 0 })).items
+    .find((item) => String(item.sourceFile || "").toLocaleLowerCase("zh-CN") === filename.toLocaleLowerCase("zh-CN"));
+  const document = existing
+    ? await updateReferenceDocument(existing.id, {
+      libraryId: read("libraryId"),
+      folderId,
+      name: read("name") || filename.replace(/\.[^.]+$/u, ""),
+      kind: read("kind") || existing.kind || "other",
+      contentType: read("contentType"),
+      domain: read("domain"),
+      sourceFile: filename,
+      sourceFormat: "",
+      characters: 0,
+      chunkCount: 0,
+      status: "indexing",
+      error: "",
+      ingestReport: null
+    })
+    : await saveReferenceDocument({
+      projectId,
+      libraryId: read("libraryId"),
+      folderId,
+      name: read("name") || filename.replace(/\.[^.]+$/u, ""),
+      kind: read("kind") || "other",
+      contentType: read("contentType"),
+      domain: read("domain"),
+      sourceFile: filename,
+      sourceFormat: "",
+      status: "indexing"
+    });
+  const absolute = referenceFilePath(document.id, extension);
+  let bytes = 0;
+  try {
+    if (body) {
+      const buffer = Buffer.from(String(body.base64 || "").replace(/^data:[^;]+;base64,/u, ""), "base64");
+      if (!buffer.length) throw Object.assign(new Error("文件内容为空"), { statusCode: 400 });
+      if (buffer.length > MAX_REFERENCE_FILE_BYTES) {
+        throw Object.assign(new Error(`单个参考资料不能超过 ${Math.round(MAX_REFERENCE_FILE_BYTES / 1024 / 1024)}MB`), { statusCode: 413 });
+      }
+      await mkdir(join(DATA_ROOT, REFERENCE_UPLOAD_DIRECTORY), { recursive: true });
+      await writeFile(absolute, buffer);
+      bytes = buffer.length;
+    } else {
+      bytes = await writeRequestBodyToFile(req, { path: absolute });
+      if (!bytes) throw Object.assign(new Error("文件内容为空"), { statusCode: 400 });
+    }
+  } catch (error) {
+    if (existing) await updateReferenceDocument(document.id, { status: "failed", error: String(error.message || error).slice(0, 500) }).catch(() => {});
+    else await deleteReferenceDocument(document.id).catch(() => {});
+    throw error;
+  }
+  if (existing) {
+    await replaceReferenceChunks(document.id, { projectId, chunks: [] }).catch(() => {});
+    referenceIndex.invalidate(projectId);
+  }
+  await updateReferenceDocument(document.id, {
+    ingestReport: { sourcePath: referenceRelativePath(document.id, extension), bytes, stage: "planning" }
+  });
+  const task = await createBackgroundTask({
+    type: "reference_ingest",
+    title: `参考资料导入：${filename}`,
+    locale: ACTIVE_LOCALES[0],
+    projectId,
+    progress: { phase: "queued", message: "等待预扫", percent: 1 }
+  });
+  const rawVision = body?.vision ?? params?.get("vision");
+  const visionMode = String(rawVision).trim().toLowerCase() === "none" || rawVision === false ? "none" : "all";
+  const rawAutoScan = body?.autoScan ?? params?.get("autoScan");
+  const autoScan = !(rawAutoScan === false || ["0", "false", "off", "no"].includes(String(rawAutoScan ?? "").trim().toLowerCase()));
+  enqueueReferenceIngest({ taskId: task.id, documentId: document.id, visionMode, autoScan });
+  return { taskId: task.id, backgroundTaskId: task.id, documentId: document.id, filename, bytes, folderId, visionMode, autoScan, replaced: Boolean(existing) };
+}
+
+async function runReferenceIngestInBackground({ taskId, documentId, visionMode = "all", autoScan = false }) {
   const control = beginBackgroundRun(taskId);
   try {
-    const document = await ingestReferenceDocument({
-      projectId, libraryId, name, kind, contentType, domain, filename, base64,
-      onProgress: (update) => updateBackgroundTaskProgress(taskId, { progress: update }).catch(() => {})
+    const task = await getBackgroundTask(taskId);
+    if (!task || task.status !== "in_progress") return;
+    let document = await getReferenceDocument(documentId);
+    if (!document) throw new Error("资料记录已不存在");
+    let plan = document.ingestReport?.plan || null;
+    if (!plan) {
+      await updateBackgroundTaskProgress(taskId, { progress: { phase: "planning", message: "正在预扫页数与图片张数", percent: 3, completed: 0, total: 0 } });
+      plan = await planReferenceExtraction({ filename: document.sourceFile || document.name, path: join(DATA_ROOT, String(document.ingestReport?.sourcePath || "")) });
+      document = await saveReferencePlan(document, plan, "planning");
+    }
+    const vision = visionMode !== "none";
+    await updateBackgroundTaskProgress(taskId, {
+      progress: {
+        phase: "parsing",
+        message: vision
+          ? `预扫完成：${plan.pages} 页 / ${plan.images} 张图，约 ${plan.estimatedVisionCalls} 次识图`
+          : `预扫完成：${plan.pages} 页，仅读取文字层`,
+        percent: 5,
+        completed: 0,
+        total: Math.max(0, vision ? plan.estimatedVisionCalls : plan.pages)
+      }
     });
+    document = await updateReferenceDocument(document.id, { ingestReport: { ...(document.ingestReport || {}), stage: "parsing" } });
+    const ingested = await ingestReferenceDocument({
+      document,
+      vision,
+      plan,
+      onProgress: (update) => {
+        if (control.cancelRequested) throw cancellationError();
+        updateBackgroundTaskProgress(taskId, { progress: update }).catch(() => {});
+      }
+    });
+    let autoScanError = "";
+    if (autoScan) {
+      if (!ingested.chunkCount) {
+        autoScanError = "没有可读正文，已跳过资料说明";
+      } else {
+        await updateBackgroundTaskProgress(taskId, {
+          progress: { phase: "describing", message: "正在生成资料说明", percent: 96, completed: ingested.chunkCount, total: ingested.chunkCount }
+        });
+        try {
+          const latest = await getReferenceDocument(documentId);
+          if (latest) await describeReferenceDocumentById(latest);
+        } catch (error) {
+          autoScanError = String(error.message || error);
+        }
+      }
+    }
+    const completedMessage = ingested.chunkCount
+      ? `参考资料已就绪：${ingested.chunkCount} 个片段${autoScan ? autoScanError ? ` · 自动扫描：${autoScanError}` : " · 已生成资料说明" : ""}`
+      : `资料已保存：只读文字模式下没有可检索正文${autoScanError ? ` · ${autoScanError}` : ""}`;
     await updateBackgroundTaskProgress(taskId, {
       status: "completed",
-      progress: { phase: "completed", message: `参考资料已就绪：${document.chunkCount} 个片段`, percent: 100, completed: document.chunkCount, total: document.chunkCount },
-      payload: { documentId: document.id, name: document.name, chunkCount: document.chunkCount, characters: document.characters }
+      progress: {
+        phase: "completed",
+        message: completedMessage,
+        percent: 100, completed: ingested.chunkCount, total: ingested.chunkCount
+      },
+      payload: { documentId: ingested.id, name: ingested.name, chunkCount: ingested.chunkCount, characters: ingested.characters, autoScan, autoScanError }
     });
   } catch (error) {
     const cancelled = isCancellation(error);
@@ -408,6 +1018,131 @@ async function runReferenceIngestInBackground({ taskId, projectId, libraryId, na
       status: cancelled ? "needs_attention" : "failed",
       progress: { phase: cancelled ? "cancelled" : "failed", message: error.message, percent: 100 },
       payload: { error: error.message }
+    }).catch(() => {});
+  } finally {
+    endBackgroundRun(taskId, control);
+  }
+}
+
+async function runReferenceDescribeBatchInBackground({ taskId, documents }) {
+  const control = beginBackgroundRun(taskId);
+  const summary = { scanned: 0, skipped: 0, failed: 0, failures: [] };
+  try {
+    for (let index = 0; index < documents.length; index += 1) {
+      if (control.cancelRequested) throw cancellationError("已按用户要求中断资料 AI 扫描");
+      const document = documents[index];
+      try {
+        await describeReferenceDocumentById(document);
+        summary.scanned += 1;
+      } catch (error) {
+        summary.failed += 1;
+        summary.failures.push({ id: document.id, name: document.name, error: String(error.message || error) });
+      }
+      await updateBackgroundTaskProgress(taskId, {
+        progress: {
+          phase: "describing",
+          message: `AI 扫描：${index + 1} / ${documents.length}（成功 ${summary.scanned}，失败 ${summary.failed}）`,
+          percent: Math.round(((index + 1) / documents.length) * 100),
+          completed: index + 1,
+          total: documents.length
+        }
+      });
+    }
+    await updateBackgroundTaskProgress(taskId, {
+      status: summary.scanned || summary.skipped ? "completed" : "failed",
+      progress: {
+        phase: summary.scanned || summary.skipped ? "completed" : "failed",
+        message: `AI 扫描完成：成功 ${summary.scanned}，失败 ${summary.failed}`,
+        percent: 100,
+        completed: documents.length,
+        total: documents.length
+      },
+      payload: summary
+    });
+  } catch (error) {
+    await updateBackgroundTaskProgress(taskId, {
+      status: "needs_attention",
+      progress: { phase: "cancelled", message: error.message, percent: 100 },
+      payload: { ...summary, error: error.message }
+    }).catch(() => {});
+  } finally {
+    endBackgroundRun(taskId, control);
+  }
+}
+
+async function runReferenceFolderDeleteInBackground({ taskId, folder }) {
+  const control = beginBackgroundRun(taskId);
+  try {
+    const folders = await referenceFoldersForProject(folder.projectId);
+    const folderIds = [folder.id, ...referenceFolderDescendantIds(folders, folder.id)];
+    const { items: documents } = await listReferenceDocuments({
+      projectId: folder.projectId,
+      folderIds,
+      limit: 0
+    });
+    const failures = [];
+    for (let index = 0; index < documents.length; index += 1) {
+      if (control.cancelRequested) throw cancellationError("已按用户要求中断目录删除");
+      const document = documents[index];
+      try {
+        await deleteReferenceDocumentCompletely(document.id);
+      } catch (error) {
+        failures.push({ id: document.id, name: document.name, error: String(error.message || error) });
+      }
+      await updateBackgroundTaskProgress(taskId, {
+        progress: {
+          phase: "deleting",
+          message: `正在删除资料：${index + 1} / ${documents.length}`,
+          percent: Math.round(((index + 1) / Math.max(1, documents.length + folderIds.length)) * 100),
+          completed: index + 1,
+          total: documents.length + folderIds.length
+        }
+      });
+    }
+    if (failures.length) {
+      await updateBackgroundTaskProgress(taskId, {
+        status: "needs_attention",
+        progress: {
+          phase: "delete_failed",
+          message: `目录删除未完成：${failures.length} 份资料删除失败`,
+          percent: 100,
+          completed: documents.length - failures.length,
+          total: documents.length + folderIds.length
+        },
+        payload: { folderId: folder.id, failures }
+      });
+      return;
+    }
+    const byId = new Map(folders.map((item) => [item.id, item]));
+    const depth = (item) => {
+      let value = 0;
+      let current = item;
+      while (current?.parentId && byId.has(current.parentId)) {
+        value += 1;
+        current = byId.get(current.parentId);
+      }
+      return value;
+    };
+    for (const target of folders.filter((item) => folderIds.includes(item.id)).sort((left, right) => depth(right) - depth(left))) {
+      await deleteReferenceFolder(target.id);
+    }
+    referenceIndex.invalidate(folder.projectId);
+    await updateBackgroundTaskProgress(taskId, {
+      status: "completed",
+      progress: {
+        phase: "completed",
+        message: `已删除文件夹与 ${documents.length} 份资料`,
+        percent: 100,
+        completed: documents.length + folderIds.length,
+        total: documents.length + folderIds.length
+      },
+      payload: { folderId: folder.id, deletedDocuments: documents.length, deletedFolders: folderIds.length }
+    });
+  } catch (error) {
+    await updateBackgroundTaskProgress(taskId, {
+      status: "needs_attention",
+      progress: { phase: "cancelled", message: error.message, percent: 100 },
+      payload: { folderId: folder.id, error: error.message }
     }).catch(() => {});
   } finally {
     endBackgroundRun(taskId, control);
@@ -578,6 +1313,34 @@ async function readJsonBody(req, { limitBytes = MAX_BODY_BYTES } = {}) {
   }
 }
 
+/**
+ * 读取原始字节请求体（文件直接当 body 发，不走 JSON + base64）。
+ *
+ * base64 会把体积放大 1/3，而且浏览器要先在内存里拼出整份 base64 字符串：
+ * 实测 20MB 的文件就能把渲染进程推到 ~280MB，大一点的资料直接把页面顶成
+ * "Out of Memory"。原始字节上传既不吃浏览器内存，也不吃 1/3 的体积。
+ */
+async function readRawBody(req, { limitBytes = IMPORT_FILE_BYTES } = {}) {
+  const chunks = [];
+  let size = 0;
+  let overflowed = false;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limitBytes) {
+      overflowed = true;
+      chunks.length = 0;
+      continue;
+    }
+    chunks.push(chunk);
+  }
+  if (overflowed) {
+    const error = new Error(`单个参考资料不能超过 ${Math.round(limitBytes / 1024 / 1024)}MB`);
+    error.statusCode = 413;
+    throw error;
+  }
+  return Buffer.concat(chunks);
+}
+
 function readWorkbenchSessionId(body) {
   const id = String(body?.id || "").trim();
   if (!WORKBENCH_SESSION_ID_PATTERN.test(id)) {
@@ -618,7 +1381,35 @@ function concreteDomain(value, { text = "", contentType = "general" } = {}) {
  * the library metadata that is shown to the model and used for conflict order.
  * A project id is an isolation boundary: an unassigned/disabled library entry
  * must not leak into another project's match candidates. */
+/**
+ * 项目资产（术语库）缓存：一次 5,800+ 条术语约 285ms / 2.6MB，而翻译、QA、导出、
+ * 批次详情每个请求都要它。术语写入会计入代际 token，写入后立即失效；TTL 只兜底
+ * 「绕过工作台直接改 Directus」的情况。
+ */
+const projectAssetsCache = createTokenCache({ ttlMs: 30_000 });
+
 async function getProjectAssets(locale, projectId = "") {
+  const key = `${locale}\u0000${String(projectId || "")}`;
+  return projectAssetsCache.get(key, getAssetGenerationToken(), () => loadProjectAssets(locale, projectId));
+}
+
+/**
+ * 翻译主路径的术语匹配交给 worker：5,800+ 条术语、长句滑窗一次要数秒，
+ * 放在主线程会让批次进度、/api/health 和 UI 轮询全部排队。
+ * worker 失败/超时时回退同步匹配，保证译文不受影响。
+ */
+const matcherPool = createMatcherPool();
+
+async function matchTermsForTranslation(text, assets, options) {
+  try {
+    return await matcherPool.match(text, assets, options);
+  } catch (error) {
+    console.warn(`[Kami] 术语匹配 worker 失败，回退同步：${error.message}`);
+    return matchTerms(text, assets, options);
+  }
+}
+
+async function loadProjectAssets(locale, projectId = "") {
   const normalizedProjectId = String(projectId || "").trim();
   const assets = await getAssets(locale, { projectId: normalizedProjectId });
   if (!normalizedProjectId) return { assets, libraries: [] };
@@ -647,10 +1438,17 @@ async function runAiQaLoop({ contextPack, initialTranslation, matches, locale, c
   const queryEmbedding = await embedSource(contextPack.source);
   let references = providedReferences;
   if (!references) {
-    const [memories, libraries] = await Promise.all([
-      getMemories(locale, { contentType, domain, limit: -1, scopeFallback: true, projectId }),
-      projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
-    ]);
+    const libraries = projectId ? await getResourceLibraries(projectId, { kind: "translation_memory" }) : [];
+    // 先粗筛候选再精排：整库打分在 8 万条时每段要十几秒（见 src/memory-index.mjs）。
+    const memories = await getMemoryCandidates(locale, {
+      projectId,
+      source: contextPack.source,
+      limit: getSettings().retrieval.candidatePoolSize,
+      scopeFallback: true,
+      contentType,
+      domain,
+      libraryIds: libraries.filter((library) => library.enabled).map((library) => library.id)
+    });
     const librariesById = new Map(libraries.map((library) => [library.id, library]));
     const scopedMemories = memories.map((memory) => {
       const library = librariesById.get(memory.libraryId);
@@ -1050,11 +1848,15 @@ async function runAssetImportInBackground({ taskId, projectId, batchId, filename
 }
 
 /**
- * 人工 TM 导入的后台执行体：先写审核队列，再分库写入主 TM 与风格学习。
- * 9332 条的导入要跑好几分钟，同步请求会让界面一直只有一句静止提示，
- * 所以走后台任务，进度写进任务记录（任务中心）与内存进度表（页面轮询）。
+ * 人工 TM 导入的后台执行体：先写主 TM 与风格学习，**成功之后**才写审计。
+ *
+ * 队列后置的理由：老的"先写 term_candidates"每次都把整份候选先落库，
+ * 7 万条就是十几万次行写入的代价，而且任何失败（503、没建库、进程被杀）
+ * 都会留下几万条 pending 垃圾。现在失败路径库里一行不写，
+ * "继续导入"改读本地预检缓存（`data/runtime/tm-preview`，7 天）。
  */
-async function runTmImportInBackground({ taskId, projectId, filename, batchId, candidates, styleEvidence, sourceFileType, tmLibraryId = "" }) {
+async function runTmImportInBackground({ taskId, projectId, filename, batchId, candidates, styleEvidence, sourceFileType, tmLibraryId = "", requestedLocale = "zh-CN" }) {
+  const auditBatchId = String(batchId || randomUUID());
   let progressWrites = Promise.resolve();
   const control = beginBackgroundRun(taskId);
   const shouldCancel = () => control.cancelRequested;
@@ -1065,26 +1867,27 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
       .catch(() => {});
   };
   try {
-    report({ phase: "queueing", message: `正在写入审核队列：0 / ${candidates.length}`, percent: 2, completed: 0, total: candidates.length });
-    const persisted = await saveImportPreview({
+    // 批次号在建任务时就定下来，并立刻写进任务载荷：失败/重启后「继续导入」靠它找预检缓存。
+    await updateBackgroundTaskProgress(taskId, { payload: { batchId: auditBatchId, filename, tmLibraryId, resumable: true } }).catch(() => {});
+    report({ phase: "importing", message: `开始写入主 TM：共 ${candidates.length} 条`, percent: 6, completed: 0, total: candidates.length });
+    const result = await commitTermImport(
+      { projectId, batchId: auditBatchId, filename, candidates, styleEvidence, tmLibraryId },
+      scaleProgressReport(report, 6, 90),
+      shouldCancel,
+      { skipQueueCompletion: true }
+    );
+    report({ phase: "auditing", message: "正在写导入审计", percent: 94, completed: candidates.length, total: candidates.length });
+    await saveTmImportAudit({
+      batchId: auditBatchId,
       filename,
       fileType: sourceFileType || "tm",
-      requestedLocale: "zh-CN",
       projectId,
+      requestedLocale,
+      summary: result.summary,
       candidates,
-      statistics: { rowsScanned: candidates.length, pairedRows: candidates.length },
-      fileMode: "tm",
-      ai: { used: false, requested: false }
-    }, { onProgress: countProgressReport(report, 2, 10) });
-    // 批次号立刻写进任务载荷：服务重启打断时任务中心仍能靠它「继续导入」。
-    persistedBatchId = persisted.batchId;
-    await updateBackgroundTaskProgress(taskId, { payload: { batchId: persisted.batchId, filename, tmLibraryId, resumable: false } }).catch(() => {});
-    report({ phase: "importing", message: `审核队列就绪（${persisted.candidates.length} 条），开始写入主 TM`, percent: 10, completed: 0, total: persisted.candidates.length });
-    const result = await commitTermImport(
-      { projectId, batchId: persisted.batchId, filename, candidates: persisted.candidates, styleEvidence, tmLibraryId },
-      scaleProgressReport(report, 10, 92),
-      shouldCancel
-    );
+      decisions: result.decisions
+    });
+    await releasePreviewCaches(auditBatchId);
     await progressWrites;
     const summary = result.summary;
     await updateBackgroundTaskProgress(taskId, {
@@ -1094,17 +1897,18 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
         message: `导入完成：术语 ${summary.terms} 条、主 TM ${summary.memories} 条、跳过 ${summary.skipped} 条`,
         percent: 100,
         completed: summary.imported,
-        total: persisted.candidates.length
+        total: candidates.length
       },
       payload: {
-        batchId: persisted.batchId,
+        batchId: auditBatchId,
         filename,
         summary,
         skippedDetails: summary.skippedDetails || [],
-        styleProfiles: (result.styleProfiles || []).length
+        styleProfiles: (result.styleProfiles || []).length,
+        resumable: false
       }
     });
-    reportImportProgress(taskId, { status: "completed", phase: "completed", message: "导入完成", percent: 100, completed: summary.imported, total: persisted.candidates.length });
+    reportImportProgress(taskId, { status: "completed", phase: "completed", message: "导入完成", percent: 100, completed: summary.imported, total: candidates.length });
     console.log(`[Kami] 人工 TM 导入完成：${filename} · 主 TM ${summary.memories} 条 · 跳过 ${summary.skipped} 条`);
   } catch (error) {
     await progressWrites.catch(() => {});
@@ -1118,7 +1922,8 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
         completed: 0,
         total: candidates.length
       },
-      payload: { batchId: persistedBatchId, filename, error: error.message, resumable: Boolean(persistedBatchId) }
+      // 预检缓存留着：任务中心的「继续导入」用它重跑（记忆/证据按原文去重，不会写重）。
+      payload: { batchId: auditBatchId, filename, error: error.message, resumable: true }
     }).catch(() => {});
     reportImportProgress(taskId, { status: cancelled ? "needs_attention" : "failed", phase: cancelled ? "cancelled" : "failed", message: error.message, error: cancelled ? "" : error.message, percent: cancelled ? undefined : 100 });
     console.error(cancelled ? `[Kami] 人工 TM 导入已中断：${filename} · ${error.message}` : `[Kami] 人工 TM 导入失败：${filename} · ${error.message}`);
@@ -1126,6 +1931,62 @@ async function runTmImportInBackground({ taskId, projectId, filename, batchId, c
     endBackgroundRun(taskId);
     scheduleImportProgressCleanup(taskId);
   }
+}
+
+/** 预检缓存只在导入成功后删除；失败时留着给「继续导入」重跑。 */
+async function releasePreviewCaches(batchId) {
+  for (const id of String(batchId || "").split(",").map((value) => value.trim()).filter(Boolean)) {
+    await deletePreviewCache(id).catch(() => {});
+  }
+}
+
+/**
+ * 解析一次 TM 导入实际要写入的候选。
+ *
+ * 新流程：预检把候选留在服务端（`data/runtime/tm-preview`），前端只回传批次号
+ * 与被取消勾选的序号，服务端读回来合成最终候选。8 万条候选约 49MB，
+ * 走浏览器来回传既慢又会撞上请求体上限。
+ * 兼容路径：请求体里直接带 `candidates`（老客户端、接口测试）时按原样使用。
+ */
+async function resolveTmImportCandidates(body = {}) {
+  const deselectSet = (value) => new Set((Array.isArray(value) ? value : [])
+    .map((item) => Math.trunc(Number(item)))
+    .filter((item) => Number.isFinite(item) && item >= 0));
+  const applySelection = (storedCandidates, deselected) => storedCandidates
+    .map((candidate, index) => ({ ...candidate, selected: candidate?.selected !== false && !deselected.has(index) }));
+  const batches = Array.isArray(body.batches) ? body.batches.filter((item) => item?.batchId) : [];
+  if (batches.length) {
+    const candidates = [];
+    const batchIds = [];
+    let sourceFileType = "";
+    for (const batch of batches) {
+      const batchId = String(batch.batchId);
+      const stored = await readPreviewCandidates(batchId);
+      if (!stored) return { candidates: [], error: "预检缓存已过期，请重新预检后再导入" };
+      if (!sourceFileType && batch.sourceFileType) sourceFileType = String(batch.sourceFileType);
+      candidates.push(...applySelection(stored, deselectSet(batch.deselected)));
+      batchIds.push(batchId);
+    }
+    return { candidates, batchId: batchIds.join(","), sourceFileType };
+  }
+  if (body.batchId && !Array.isArray(body.candidates)) {
+    const batchId = String(body.batchId);
+    const stored = await readPreviewCandidates(batchId);
+    if (!stored) return { candidates: [], error: "预检缓存已过期，请重新预检后再导入" };
+    return {
+      candidates: applySelection(stored, deselectSet(body.deselected)),
+      batchId,
+      sourceFileType: String(body.sourceFileType || "")
+    };
+  }
+  if (Array.isArray(body.candidates) && body.candidates.length) {
+    return {
+      candidates: body.candidates.map((candidate) => ({ ...candidate, selected: candidate?.selected !== false })),
+      batchId: String(body.batchId || ""),
+      sourceFileType: String(body.sourceFileType || "")
+    };
+  }
+  return { candidates: [], error: "TM 导入批次或候选无效" };
 }
 
 async function previewTermImport(body, onProgress = () => {}) {
@@ -1326,7 +2187,13 @@ async function buildLibraryExport({ kind, locale, libraryName = "库", items = [
   };
 }
 
-async function commitTermImport(body, onProgress = null, shouldCancel = null) {
+/**
+ * 写入 TM / 术语。`options.skipQueueCompletion` 给"队列后置"的 TM 导入用：
+ * 那些调用方没有先写 term_candidates（候选直接来自预检缓存），所以不能再去按
+ * candidateId 回写队列状态，改由调用方在成功后写审计行（saveTmImportAudit）。
+ */
+async function commitTermImport(body, onProgress = null, shouldCancel = null, options = {}) {
+  const skipQueueCompletion = options.skipQueueCompletion === true;
   if (!body.batchId || !Array.isArray(body.candidates)) {
     const error = new Error("导入批次或候选数据无效");
     error.statusCode = 400;
@@ -1397,6 +2264,96 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null) {
   };
   // 术语成批写入：逐条 POST 在几千条规模下同样拖慢整批。
   const pendingTerms = [];
+  // 翻译记忆与风格证据同样成批写：逐条写时"每条都拉一次全项目证据"是平方级开销，
+  // 一份 8 万行的过往译文按老实现根本跑不完。
+  const pendingMemories = [];
+  const pendingEvidence = [];
+  const styleEvidenceIndexes = new Map();
+  const styleEvidenceIndexFor = async (locale) => {
+    if (!styleEvidenceIndexes.has(locale)) {
+      styleEvidenceIndexes.set(locale, await loadStyleEvidenceIndex(locale, { projectId }));
+    }
+    return styleEvidenceIndexes.get(locale);
+  };
+  const flushEvidence = async () => {
+    const batch = pendingEvidence.splice(0, pendingEvidence.length);
+    if (!batch.length) return;
+    const groups = new Map();
+    for (const entry of batch) {
+      const list = groups.get(entry.locale) || [];
+      list.push(entry);
+      groups.set(entry.locale, list);
+    }
+    for (const [locale, entries] of groups.entries()) {
+      const index = await styleEvidenceIndexFor(locale);
+      let saved = [];
+      try {
+        saved = await saveStyleEvidences(entries.map((entry) => entry.input), { index });
+      } catch (error) {
+        for (const entry of entries) recordSkip({ source: entry.input.source, locale, reason: `风格证据写入失败：${error.message}` });
+        continue;
+      }
+      entries.forEach((entry, position) => {
+        const result = saved[position];
+        if (!result?.id) {
+          recordSkip({ source: entry.input.source, locale, reason: result?.error || "风格证据写入失败" });
+          return;
+        }
+        const scopeKey = `${locale}\u0000${entry.input.contentType}\u0000${entry.input.domain}`;
+        const group = styleEvidenceByScope.get(scopeKey) || [];
+        group.push({ ...entry.candidate, evidenceId: result.id });
+        styleEvidenceByScope.set(scopeKey, group);
+      });
+    }
+  };
+  const flushMemories = async () => {
+    const batch = pendingMemories.splice(0, pendingMemories.length);
+    if (!batch.length) return;
+    const groups = new Map();
+    for (const entry of batch) {
+      const list = groups.get(entry.locale) || [];
+      list.push(entry);
+      groups.set(entry.locale, list);
+    }
+    for (const [locale, entries] of groups.entries()) {
+      let saved = [];
+      try {
+        saved = await saveMemories(locale, entries.map((entry) => entry.input));
+      } catch (error) {
+        for (const entry of entries) {
+          entry.decision.status = "rejected";
+          recordSkip({ source: entry.input.source, locale, reason: `写入失败：${error.message}` });
+        }
+        continue;
+      }
+      for (const [position, entry] of entries.entries()) {
+        const result = saved[position];
+        if (!result?.id) {
+          entry.decision.status = "rejected";
+          recordSkip({ source: entry.input.source, locale, reason: result?.error || "写入翻译记忆失败" });
+          continue;
+        }
+        imported.push({ id: result.id, source: entry.input.source, target: entry.input.target, locale, assetType: "memory", contentType: entry.input.contentType, domain: entry.input.domain });
+        if (entry.evidence) pendingEvidence.push({ locale, input: entry.evidence, candidate: entry.candidate });
+        if (entry.linkedTrajectory) {
+          try {
+            const patch = externalReviewTrajectoryPatch({
+              trajectory: entry.linkedTrajectory,
+              target: entry.input.target,
+              sourceFile: entry.sourceFile,
+              sourceRow: entry.sourceRow,
+              matchMethod: entry.trajectoryMethod
+            });
+            await updateLearningTrajectory(entry.linkedTrajectory.id, patch);
+            trajectoryLinks.push({ candidateIndex: entry.candidateIndex, trajectoryId: entry.linkedTrajectory.id, source: entry.input.source, method: entry.trajectoryMethod });
+            triggerAutoProposal({ locale: entry.linkedTrajectory.locale, contentType: entry.linkedTrajectory.contentType, domain: entry.linkedTrajectory.domain, project: entry.linkedTrajectory.project });
+          } catch (error) {
+            trajectoryLinkFailures.push({ candidateIndex: entry.candidateIndex, trajectoryId: entry.linkedTrajectory.id, source: entry.input.source, reason: error.message });
+          }
+        }
+      }
+    }
+  };
   let termsWritten = 0;
   const flushTerms = async () => {
     if (!pendingTerms.length) return;
@@ -1454,39 +2411,43 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null) {
           ? String(linkedTrajectory.finalTranslation || linkedTrajectory.initialTranslation || "").trim()
           : "";
         if (projectId && !masterTm) throw new Error("当前项目没有启用主 TM，无法写入人工确认译文");
-        const memory = await saveMemory(locale, {
-          source, target, domain, contentType,
-          contentTags,
-          qualityStatus: "human_approved", qaScore: 100, provenance: "table-import", sourceFile,
-          batchId: body.batchId, sourceRow: candidate.rowNumber, projectId, project: projectId, libraryId: masterTm?.id || "",
-          entryId: candidate.entryId || "", entryKey: candidate.entryKey || "",
-          previousSource: candidate.previousSource || "", nextSource: candidate.nextSource || ""
-        });
         const allowStyleEvidence = candidate.styleEvidence === true || (candidate.styleEvidence === undefined && body.styleEvidence !== false);
-        const evidence = allowStyleEvidence ? await saveStyleEvidence({
-          locale, source, target, contentType: evidenceContentType, domain: evidenceDomain,
-          contentTags,
-          machineTranslation,
-          entryKey: candidate.entryKey || "",
-          batchId: body.batchId, sourceFile, sourceRow: candidate.sourceRow || candidate.rowNumber, projectId, status: "accepted", provenance: linkedTrajectory ? "external-review-import" : "table-import"
-        }) : null;
-        if (evidence) {
-          const scopeKey = `${locale}\u0000${evidenceContentType}\u0000${evidenceDomain}`;
-          const evidenceGroup = styleEvidenceByScope.get(scopeKey) || [];
-          evidenceGroup.push({ ...candidate, evidenceId: evidence.id });
-          styleEvidenceByScope.set(scopeKey, evidenceGroup);
-        }
-        if (linkedTrajectory) {
-          try {
-            const patch = externalReviewTrajectoryPatch({ trajectory: linkedTrajectory, target, sourceFile, sourceRow: candidate.sourceRow || candidate.rowNumber, matchMethod: trajectoryLink.method });
-            await updateLearningTrajectory(linkedTrajectory.id, patch);
-            trajectoryLinks.push({ candidateIndex, trajectoryId: linkedTrajectory.id, source, method: trajectoryLink.method });
-            triggerAutoProposal({ locale: linkedTrajectory.locale, contentType: linkedTrajectory.contentType, domain: linkedTrajectory.domain, project: linkedTrajectory.project });
-          } catch (error) {
-            trajectoryLinkFailures.push({ candidateIndex, trajectoryId: linkedTrajectory.id, source, reason: error.message });
+        // 攒够一批再写：单条写入是"查重 + 写入"两次往返，8 万条就是 16 万次。
+        pendingMemories.push({
+          candidateIndex,
+          decision,
+          locale,
+          candidate,
+          linkedTrajectory,
+          trajectoryMethod: trajectoryLink?.method || "",
+          sourceFile,
+          sourceRow: candidate.sourceRow || candidate.rowNumber,
+          evidence: allowStyleEvidence ? {
+            locale,
+            source,
+            target,
+            contentType: evidenceContentType,
+            domain: evidenceDomain,
+            contentTags,
+            machineTranslation,
+            entryKey: candidate.entryKey || "",
+            batchId: body.batchId,
+            sourceFile,
+            sourceRow: candidate.sourceRow || candidate.rowNumber,
+            projectId,
+            status: "accepted",
+            provenance: linkedTrajectory ? "external-review-import" : "table-import"
+          } : null,
+          input: {
+            source, target, domain, contentType,
+            contentTags,
+            qualityStatus: "human_approved", qaScore: 100, provenance: "table-import", sourceFile,
+            batchId: body.batchId, sourceRow: candidate.rowNumber, projectId, project: projectId, libraryId: masterTm?.id || "",
+            entryId: candidate.entryId || "", entryKey: candidate.entryKey || "",
+            previousSource: candidate.previousSource || "", nextSource: candidate.nextSource || ""
           }
-        }
-        imported.push({ id: memory.id, source, target, locale, assetType: "memory", contentType, domain });
+        });
+        if (pendingMemories.length >= MEMORY_WRITE_BATCH_SIZE) await flushMemories();
       } else {
         if (projectId && !termLibrary) throw new Error("当前项目没有启用术语库，无法写入术语");
         const index = await loadTermIndex(locale);
@@ -1533,6 +2494,8 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null) {
       report({ phase: "importing", message: `正在入库：${done} / ${total}`, percent: 10 + Math.round((done / Math.max(total, 1)) * 70), completed: done, total });
     }
   }
+  await flushMemories();
+  await flushEvidence();
   await flushTerms();
   report({ phase: "distilling", message: "风格学习与蒸馏", percent: 88, completed: done, total });
   const styleProfiles = [];
@@ -1600,12 +2563,12 @@ async function commitTermImport(body, onProgress = null, shouldCancel = null) {
     skippedDetails: skipped,
     completedAt: new Date().toISOString()
   };
-  await completeImport(body.batchId, decisions, summary);
-  return { batchId: body.batchId, imported, skipped, batchLearning, styleProfiles, styleFallbacks, trajectoryLinks, trajectoryMatch: { ambiguous: trajectoryMatch.ambiguous, unmatched: trajectoryMatch.unmatched, alreadyAccepted: trajectoryMatch.alreadyAccepted }, trajectoryLinkFailures, summary };
+  if (!skipQueueCompletion) await completeImport(body.batchId, decisions, summary);
+  return { batchId: body.batchId, imported, skipped, batchLearning, styleProfiles, styleFallbacks, trajectoryLinks, trajectoryMatch: { ambiguous: trajectoryMatch.ambiguous, unmatched: trajectoryMatch.unmatched, alreadyAccepted: trajectoryMatch.alreadyAccepted }, trajectoryLinkFailures, summary, decisions };
 }
 
-async function translateBatchSegment(body) {
-  const response = await fetch(`http://127.0.0.1:${PORT}/api/translate`, {
+async function translateBatchSegment(body, path = "/api/translate") {
+  const response = await fetch(`http://127.0.0.1:${PORT}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
@@ -1622,6 +2585,272 @@ async function translateBatchSegment(body) {
  * （provenance=external-review-import）并按既有规则接回学习轨迹；未匹配和有歧义的照实报出来，
  * 不猜、不静默丢弃。
  */
+
+/**
+ * 回填时把"翻译期术语普查"的结果用人工终稿确认，并按策略入库。
+ *
+ * 分工是刻意的：模型只负责"哪个词像术语"，译法一律以人工终稿为准。
+ * 自动入库仅限"库里没有该源词 + 终稿逐字保留了 AI 建议译法"，其余进待审核批次。
+ */
+async function applyTermSurveyToReview({ run, projectId, filename, applied, scope }) {
+  const stats = { surveyed: 0, confirmed: 0, resolved: 0, autoWritten: 0, pendingReview: 0, skipped: 0, libraryName: "", warning: "", batchId: "" };
+  const surveyed = Array.isArray(run?.runnerOptions?.termSurvey?.terms) ? run.runnerOptions.termSurvey.terms : [];
+  if (!surveyed.length) return stats;
+  stats.surveyed = surveyed.length;
+  const pairs = applied.map(({ segment, pair }) => ({
+    id: String(segment.id || ""),
+    source: String(pair.source || ""),
+    machineTranslation: String(segment.result?.humanReview?.previousTranslation || ""),
+    humanFinal: String(pair.target || "")
+  }));
+  const aligned = alignSurveyToHumanFinal({ terms: surveyed, pairs });
+  stats.confirmed = aligned.confirmed.length;
+  stats.skipped = aligned.noEvidence.length;
+  let resolved = [];
+  if (aligned.unresolved.length) {
+    try {
+      for (let index = 0; index < aligned.unresolved.length; index += 20) {
+        const chunk = aligned.unresolved.slice(index, index + 20);
+        const outcome = await resolveSurveyTargetsWithModel({ locale: run.locale, scope, items: chunk });
+        resolved.push(...(outcome?.matches || []));
+      }
+    } catch (error) {
+      // 模型不可用不能变成"凭空入库"：这一批全部转待审核，由人工核对终稿。
+      stats.warning = `术语对齐模型不可用，本批全部转待审核：${error.message}`;
+    }
+    stats.resolved = resolved.length;
+  }
+  const inputs = [...aligned.confirmed, ...resolved];
+  // 模型没能给出结论的（含模型不可用）一律进待审核，绝不静默丢弃。
+  const resolvedKeys = new Set(resolved.map((item) => String(item.source || "").trim()));
+  const presetPending = aligned.unresolved
+    .filter((item) => !resolvedKeys.has(String(item.source || "").trim()))
+    .map((item) => pendingCandidateFromUnresolved(item, {
+      locale: run.locale,
+      contentType: run.contentType || "general",
+      domain: run.domain || "general",
+      project: projectId,
+      batchId: run.batchId,
+      filename
+    }))
+    .filter(Boolean);
+  const written = inputs.length || presetPending.length
+    ? await persistTermCandidateInputs({
+      locale: run.locale,
+      projectId,
+      contentType: run.contentType || "general",
+      domain: run.domain || "general",
+      batchId: run.batchId,
+      filename,
+      inputs,
+      presetPending,
+      sourceLabel: "翻译期术语普查"
+    })
+    : { autoWritten: 0, pendingReview: 0, unmatched: 0, libraryName: "", warning: "", batchId: "", items: [] };
+  // 逐条结果写回批次记录：界面要能回答"哪一条自动入库、哪一条待审、哪一条被忽略"，
+  // 只存汇总数字的话回填结束后就再也查不到了。
+  const review = {
+    at: new Date().toISOString(),
+    stats: {
+      surveyed: stats.surveyed,
+      confirmed: stats.confirmed,
+      resolved: stats.resolved,
+      autoWritten: written.autoWritten || 0,
+      pendingReview: written.pendingReview || 0,
+      skipped: stats.skipped,
+      libraryName: written.libraryName || "",
+      warning: written.warning || stats.warning || ""
+    },
+    terms: [
+      ...aligned.noEvidence.map((item) => ({
+        source: item.source,
+        target: item.suggestedTarget,
+        action: "skipped",
+        reason: "人工终稿里没有出现这个源词"
+      })),
+      ...(written.items || [])
+    ]
+  };
+  try {
+    const latest = await getBatchRun(run.batchId) || run;
+    const survey = latest.runnerOptions?.termSurvey || run.runnerOptions?.termSurvey;
+    if (survey) {
+      await saveBatchRun({
+        ...latest,
+        runnerOptions: { ...(latest.runnerOptions || {}), termSurvey: { ...survey, review } }
+      });
+    }
+  } catch (error) {
+    console.error(`[Kami] 术语普查逐条结果写回失败（${run.batchId}）：${error.message}`);
+  }
+  return { ...stats, ...written, review };
+}
+
+/**
+ * 术语候选的公共落地：按策略分流（自动入库 / 待审核），两处调用者
+ * （回填确认、门禁复盘的术语建议）共用同一套判定与写库路径。
+ */
+async function persistTermCandidateInputs({ locale, projectId, contentType = "general", domain = "general", batchId = "", filename = "", inputs = [], presetPending = [], sourceLabel = "术语候选" }) {
+  const stats = { autoWritten: 0, pendingReview: 0, unmatched: 0, libraryName: "", warning: "", batchId: "", items: [] };
+  const assets = (await getProjectAssets(locale, projectId).catch(() => ({ assets: {} }))).assets || {};
+  const existingTerms = assets.terms || [];
+  const autoWriteEnabled = getSettings().learning.termAutoWriteReviewedTerms !== false;
+  const autoCandidates = [];
+  const pendingCandidates = [...presetPending];
+  for (const input of inputs) {
+    let derived = [];
+    try {
+      derived = deriveTermCandidatesFromHumanFinal({
+        locale,
+        source: input.segmentSource,
+        finalTranslation: input.humanFinal,
+        matches: [],
+        suggestions: [{
+          source: input.source,
+          target: input.target,
+          confidence: Math.max(0.9, Number(input.confidence) || 0),
+          reason: input.reason || sourceLabel,
+          preserveOriginal: input.preserveSource === true
+        }],
+        existingTerms,
+        contentType,
+        domain,
+        project: projectId,
+        batchId,
+        sourceFile: filename,
+        minimumSuggestionConfidence: 0.5
+      });
+    } catch (error) {
+      stats.warning = stats.warning || `术语候选生成失败：${error.message}`;
+    }
+    const candidate = derived[0];
+    if (!candidate) {
+      stats.unmatched += 1;
+      continue;
+    }
+    const decision = decideTermWrite(
+      { source: candidate.source, target: candidate.target, proposalAction: candidate.proposalAction, verbatim: input.verbatim === true },
+      { existingTerms, autoWriteEnabled }
+    );
+    const record = {
+      ...candidate,
+      selected: true,
+      decision: decision.auto ? "ready" : "review",
+      candidateRole: candidate.proposalAction,
+      candidateOrigin: `term-survey:${candidate.proposalAction}`,
+      reasons: [pendingReason({ reason: input.reason }, decision)]
+    };
+    if (decision.auto) autoCandidates.push(record);
+    else pendingCandidates.push(record);
+    // 逐条留档：界面要显示"哪一条自动入库、哪一条转待审"，只报汇总数字是不够的。
+    stats.items.push({
+      source: candidate.source,
+      target: candidate.target,
+      action: decision.auto ? "auto_written" : "pending_review",
+      reason: decision.auto ? "" : pendingReason({ reason: input.reason }, decision)
+    });
+  }
+  for (const pending of presetPending) {
+    stats.items.push({
+      source: String(pending?.source || "").trim(),
+      target: String(pending?.target || "").trim(),
+      action: "pending_review",
+      reason: "模型没能在人工终稿里定位到对应译法"
+    });
+  }
+
+  const libraries = await getResourceLibraries(projectId).catch(() => []);
+  const termLibrary = libraries.find((library) => library.kind === "term_base" && library.enabled !== false) || null;
+  stats.libraryName = termLibrary?.name || "";
+  if (autoCandidates.length && termLibrary) {
+    try {
+      const preview = await saveImportPreview({
+        filename: `${String(filename || "审校回填").slice(0, 100)} · 术语自动入库`,
+        fileType: "external-review-terms",
+        requestedLocale: locale,
+        projectId,
+        fileMode: "term",
+        statistics: { rowsScanned: autoCandidates.length, candidates: autoCandidates.length, ready: autoCandidates.length, review: 0 },
+        ai: { requested: true, used: true, reviewed: autoCandidates.length, total: autoCandidates.length, source: "term-survey" },
+        sheets: [],
+        candidates: autoCandidates
+      });
+      await commitTermImport({
+        batchId: preview.batchId,
+        projectId,
+        filename: `${filename} · 术语自动入库`,
+        termLibraryId: termLibrary.id,
+        candidates: autoCandidates
+      });
+      stats.autoWritten = autoCandidates.length;
+    } catch (error) {
+      stats.warning = stats.warning || `术语自动入库失败，已转为待审核：${error.message}`;
+      pendingCandidates.push(...autoCandidates.map((candidate) => ({ ...candidate, decision: "review", reasons: [...(candidate.reasons || []), "自动入库失败，转人工确认"] })));
+      for (const item of stats.items) {
+        if (item.action === "auto_written") {
+          item.action = "pending_review";
+          item.reason = "自动入库失败，转人工确认";
+        }
+      }
+    }
+  } else if (autoCandidates.length) {
+    pendingCandidates.push(...autoCandidates.map((candidate) => ({ ...candidate, decision: "review", reasons: [...(candidate.reasons || []), "项目没有启用的术语库，转人工确认"] })));
+    for (const item of stats.items) {
+      if (item.action === "auto_written") {
+        item.action = "pending_review";
+        item.reason = "项目没有启用的术语库，转人工确认";
+      }
+    }
+  }
+
+  if (pendingCandidates.length) {
+    try {
+      const preview = await saveImportPreview({
+        filename: `${String(filename || "审校回填").slice(0, 100)} · 术语候选`,
+        fileType: "external-review-terms",
+        requestedLocale: locale,
+        projectId,
+        fileMode: "term",
+        statistics: { rowsScanned: pendingCandidates.length, candidates: pendingCandidates.length, ready: 0, review: pendingCandidates.length },
+        ai: { requested: true, used: true, reviewed: pendingCandidates.length, total: pendingCandidates.length, source: "term-survey" },
+        sheets: [],
+        candidates: pendingCandidates
+      });
+      stats.batchId = preview.batchId;
+      stats.pendingReview = pendingCandidates.length;
+      const task = await createBackgroundTask({
+        type: "term_import",
+        title: `术语候选 · ${filename}`,
+        projectId,
+        locale,
+        progress: { phase: "pending-commit", message: `待审核 ${pendingCandidates.length} 条术语${stats.autoWritten ? `（另有 ${stats.autoWritten} 条已自动入库）` : ""}`, percent: 100, completed: 1, total: 1 },
+        payload: { batchId: preview.batchId, candidateCount: pendingCandidates.length, autoWritten: stats.autoWritten, libraryName: stats.libraryName }
+      });
+      await updateBackgroundTaskProgress(task.id, {
+        status: "review",
+        progress: { phase: "pending-commit", message: `待审核 ${pendingCandidates.length} 条术语${stats.autoWritten ? `（另有 ${stats.autoWritten} 条已自动入库）` : ""}`, percent: 100, completed: 1, total: 1 },
+        payload: { batchId: preview.batchId, candidateCount: pendingCandidates.length, autoWritten: stats.autoWritten, libraryName: stats.libraryName }
+      }).catch(() => {});
+    } catch (error) {
+      stats.warning = stats.warning || `术语候选批次保存失败：${error.message}`;
+    }
+  } else if (stats.autoWritten) {
+    await createBackgroundTask({
+      type: "term_import",
+      title: `术语自动入库 · ${filename}`,
+      projectId,
+      locale,
+      progress: { phase: "completed", message: `自动入库 ${stats.autoWritten} 条术语（库：${stats.libraryName || "未命名"}）`, percent: 100, completed: stats.autoWritten, total: stats.autoWritten },
+      payload: { candidateCount: 0, autoWritten: stats.autoWritten, libraryName: stats.libraryName }
+    }).then((task) => updateBackgroundTaskProgress(task.id, {
+      status: "completed",
+      progress: { phase: "completed", message: `自动入库 ${stats.autoWritten} 条术语（库：${stats.libraryName || "未命名"}）`, percent: 100, completed: stats.autoWritten, total: stats.autoWritten },
+      payload: { candidateCount: 0, autoWritten: stats.autoWritten, libraryName: stats.libraryName }
+    })).catch(() => {});
+  }
+  return stats;
+}
+
 async function importBatchReview({ run, pairs, projectId, filename }) {
   const segments = Array.isArray(run.segments) ? run.segments : [];
   const selected = segments.filter((segment) => segment.selected !== false);
@@ -1722,6 +2951,40 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
     matched: matched.matches.length, unmatched: matched.unmatched.length, ambiguous: matched.ambiguous.length,
     trajectoriesLinked, trajectoriesUpdated, acceptedUnchanged
   });
+  // 回填就是这套工作流的"人工审校结论"。改动直接进回归集，并自动对新候选跑一次门禁，
+  // 让下一次发版判断用的永远是刚回填的证据，而不是等人来点按钮。
+  const regressionScope = learningScope({
+    locale: run.locale,
+    contentType: run.contentType || "general",
+    domain: run.domain || "general",
+    project: projectId
+  });
+  let regression = null;
+  try {
+    const result = await refreshRegressionSuite(regressionScope, {
+      reason: "external-review-import",
+      changeNote: `审校回填 ${filename}`
+    });
+    regression = {
+      changed: Boolean(result.changed),
+      suiteVersion: result.asset?.version || null,
+      cases: result.stats?.total || 0,
+      externalCases: result.stats?.external || 0,
+      reason: result.reason
+    };
+    if (result.changed) triggerQualityGateRefresh(regressionScope, { reason: "external-review-import" });
+  } catch (error) {
+    console.error("审校回填后重建回归集失败", error);
+    regression = { error: error.message };
+  }
+  // 术语普查的确认与入库：同样以人工终稿为准，失败只记警告，不影响回填结果本身。
+  let termSurvey = null;
+  try {
+    termSurvey = await applyTermSurveyToReview({ run, projectId, filename, applied, scope: regressionScope });
+  } catch (error) {
+    console.error("审校回填后处理术语普查失败", error);
+    termSurvey = { error: error.message };
+  }
   return {
     batchId: run.batchId, filename, total: pairs.length,
     matched: matched.matches.length,
@@ -1736,6 +2999,8 @@ async function importBatchReview({ run, pairs, projectId, filename }) {
     trajectoryAcceptedUnchanged: acceptedUnchanged,
     trajectoryUnmatched: trajectoryMatch.unmatched.length,
     trajectoryAmbiguous: trajectoryMatch.ambiguous.length,
+    regression,
+    termSurvey,
     // 本批解析时跳过的句段：回填里"原文不在批次中"的条目多半就是它们（锁定 / 已有译文），
     // 明细里带上原因，用户才看得懂为什么这几条进不来。
     skippedUnits: {
@@ -1755,6 +3020,8 @@ const contextAnalysisTasks = new Map();
 const consistencyCheckTasks = new Map();
 const CONTEXT_ANALYSIS_CONCURRENCY = 3;
 const CONSISTENCY_CHECK_CONCURRENCY = 3;
+/** 术语普查的并发：和一致性核对同级，避免和大批次翻译抢模型额度。 */
+const termSurveyTasks = new Map();
 
 function taskProgressReporter(taskId) {
   return (update) => { if (taskId) updateBackgroundTaskProgress(taskId, { progress: update }).catch(() => {}); };
@@ -1864,8 +3131,452 @@ function startContextAnalysis(batchId) {
 }
 
 /**
- * 交付前一致性核对 + 质量报告。确定性部分（同原文不同译文、术语登记译法未采用）
- * 不花额度先算；语义漂移分片交给模型。结果写回批次记录，供批次页与任务中心查看。
+ * 一致性核对的证据：风格指南 + 术语库命中 + 主/参考/工作 TM 精确命中。
+ * 都按"这一批真实出现的原文"去查，不把整个库灌进提示词。
+ */
+function consistencyTermEvidence(run, segments, assets) {
+  const bySegment = new Map();
+  const terms = new Map();
+  for (const segment of segments) {
+    const hits = matchTerms(segment.source || "", assets, {
+      contentType: run.contentType,
+      domain: run.domain,
+      // 一致性证据只取 exact；关掉滑窗编辑距离，否则 5.8k 术语 × 全部段落要几十秒。
+      exactOnly: true,
+      ...deliveryContext(run, segment.source || "")
+    }).filter((match) => match.mode === "exact" && String(match.expectedTarget || match.term?.target || "").trim());
+    const list = hits.map((match) => ({
+      source: String(match.term?.source || match.matchPhrase || "").trim(),
+      target: String(match.expectedTarget || match.term?.target || "").trim(),
+      mode: String(match.mode || "")
+    })).filter((item) => item.source && item.target);
+    bySegment.set(String(segment.id || ""), list);
+    for (const item of list) {
+      const key = `${normalizeSource(item.source)}\u0000${normalizeSource(item.target)}`;
+      if (!terms.has(key)) terms.set(key, item);
+    }
+  }
+  return { bySegment, terms: [...terms.values()] };
+}
+
+/** TM 条目的权威排序：人工条永远排在机器条前面，主 TM 排在参考 TM 前面。 */
+function tmEvidenceRank(entry = {}) {
+  const human = String(entry.qualityStatus || "") === "human_approved";
+  const role = String(entry.libraryRole || "");
+  if (human && role === "master") return 0;
+  if (human && role === "reference") return 1;
+  if (human) return 2;
+  if (role === "master") return 3;
+  if (role === "working") return 4;
+  return 5;
+}
+
+function tmEvidenceLabel(entry = {}) {
+  return ["主 TM 人工条", "参考 TM 人工条", "人工译例", "主 TM 机器条", "工作 TM 机器条", "TM 机器条"][tmEvidenceRank(entry)] || "TM 条目";
+}
+
+/** 按原文精确查 TM：只查这一批出现过的原文，不拉整库（项目 TM 动辄上万条）。 */
+async function consistencyTmEvidence({ locale, projectId, contentType, domain, sources = [] }) {
+  const libraries = projectId ? await getResourceLibraries(projectId, { kind: "translation_memory" }).catch(() => []) : [];
+  const libraryById = new Map(libraries.map((library) => [library.id, library]));
+  const bySource = new Map();
+  const seen = new Set();
+  const phrases = [...new Set((Array.isArray(sources) ? sources : []).map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 60);
+  for (const phrase of phrases) {
+    const rows = await getMemories(locale, { projectId, contentType, domain, limit: 50, search: phrase, scopeFallback: true }).catch(() => []);
+    const entries = [];
+    for (const row of rows) {
+      if (normalizeMemoryText(row.source) !== normalizeMemoryText(phrase)) continue;
+      const key = String(row.id || `${row.source}\u0000${row.target}`);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const library = libraryById.get(row.libraryId);
+      entries.push({
+        id: row.id,
+        source: String(row.source || ""),
+        target: String(row.target || ""),
+        qualityStatus: String(row.qualityStatus || ""),
+        libraryId: String(row.libraryId || ""),
+        libraryRole: String(library?.role || ""),
+        libraryName: String(library?.name || ""),
+        batchId: String(row.batchId || "")
+      });
+    }
+    if (entries.length) bySource.set(normalizeSource(phrase), entries);
+  }
+  return bySource;
+}
+
+/** 给一片的提示词选出这一片用得上的证据（术语命中 + 原文精确命中的 TM 条目）。 */
+function consistencyChunkEvidence({ style = null, termEvidence = { bySegment: new Map() }, tmEvidence = new Map(), pairs = [] }) {
+  const terms = [];
+  const termKeys = new Set();
+  for (const pair of pairs) {
+    for (const item of termEvidence.bySegment.get(String(pair.id)) || []) {
+      const key = `${normalizeSource(item.source)}\u0000${normalizeSource(item.target)}`;
+      if (termKeys.has(key)) continue;
+      termKeys.add(key);
+      terms.push(item);
+    }
+  }
+  const tm = [];
+  const seen = new Set();
+  for (const pair of pairs) {
+    for (const entry of tmEvidence.get(normalizeSource(pair.source)) || []) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      tm.push(entry);
+    }
+  }
+  tm.sort((left, right) => tmEvidenceRank(left) - tmEvidenceRank(right));
+  return {
+    style: style || null,
+    terms: terms.slice(0, CONSISTENCY_EVIDENCE_LIMITS.terms),
+    tm: tm.slice(0, CONSISTENCY_EVIDENCE_LIMITS.tm).map((entry) => ({
+      source: entry.source,
+      target: entry.target,
+      authority: tmEvidenceLabel(entry)
+    }))
+  };
+}
+
+/** 段落当前会被确定性规则判出哪些问题；自动统一前后各算一次，用来挡"改出新错误"。 */
+function consistencySegmentIssues(run, segment, translation) {
+  return runQa({
+    source: segment.source || "",
+    translation: String(translation || ""),
+    matches: Array.isArray(segment.result?.matches) ? segment.result.matches : [],
+    locale: run.locale,
+    titleOverrides: getSettings().orthography.titleBrackets,
+    contentType: run.contentType || segment.result?.segmentPurpose || "general"
+  });
+}
+
+/** 定向修订：只按一致性要求改这一处，改完由调用方做确定性校验。 */
+async function reviseSegmentForConsistency({ run, segment, assets, source, target, reason }) {
+  const locale = run.locale;
+  const classification = await classify({ text: segment.source || "", hint: run.contentType || "general", useModel: false });
+  const matches = matchTerms(segment.source || "", assets, {
+    contentType: run.contentType,
+    domain: run.domain,
+    ...deliveryContext(run, segment.source || "")
+  });
+  const [styleProfile, qaCases, queryEmbedding] = await Promise.all([
+    getProjectStyleProfile(locale, { projectId: run.projectId }).catch(() => null),
+    getQaCases(locale, { projectId: run.projectId, contentType: classification.contentType, domain: run.domain, limit: -1, scopeFallback: true }).catch(() => []),
+    embedSource(segment.source || "").catch(() => null)
+  ]);
+  const qaGuidance = rankQaCases(segment.source || "", qaCases, {
+    limit: 3,
+    queryEmbedding,
+    contentType: classification.contentType,
+    domain: run.domain
+  });
+  const contextPack = buildContextPack({
+    titleOverrides: getSettings().orthography.titleBrackets,
+    source: segment.source || "",
+    locale,
+    classification,
+    matches,
+    domain: run.domain,
+    styleProfile,
+    qaGuidance
+  });
+  const revised = await reviseTranslationWithQa({
+    contextPack,
+    translation: String(segment.translation || ""),
+    issues: [{
+      severity: "major",
+      category: "consistency",
+      message: `本文件要求统一：${source} 统一译为「${target}」（依据：${reason}）。只改这一处，其余内容、格式与信息保持不变。`
+    }],
+    references: [],
+    qaCases: qaGuidance
+  });
+  return String(revised || "").trim();
+}
+
+/** 修复后只复核改动所在的分片，确认漂移消失；不整批重跑，避免重复花钱。 */
+async function recheckConsistencyChunks({ run, pairs, changedIds, style, termEvidence, tmEvidence }) {
+  const chunks = splitConsistencyChunks(pairs).filter((chunk) => chunk.ids.some((id) => changedIds.has(String(id))));
+  if (!chunks.length) return { checkedChunks: 0, remaining: [], failures: [] };
+  const byId = new Map(pairs.map((pair) => [String(pair.id), pair]));
+  const results = await runTaskPool(chunks, async (chunk) => {
+    const chunkPairs = chunk.ids.map((id) => byId.get(String(id))).filter(Boolean);
+    return checkBatchConsistencyWithModel({
+      filename: run.filename,
+      locale: run.locale,
+      purpose: run.contentType || "general",
+      pairs: chunkPairs,
+      part: { index: chunk.index, total: chunks.length },
+      evidence: consistencyChunkEvidence({ style, termEvidence, tmEvidence, pairs: chunkPairs }),
+      toolRunner: buildReferenceToolRunner({ projectId: run.projectId })
+    });
+  }, { concurrency: CONSISTENCY_CHECK_CONCURRENCY });
+  return {
+    checkedChunks: chunks.length,
+    remaining: mergeConsistencyFindings(results.filter((result) => result.status === "fulfilled").map((result) => result.value)),
+    failures: results.filter((result) => result.status === "rejected").map((result) => String(result.reason?.message || result.reason))
+  };
+}
+
+/**
+ * 一致性自动统一：按证据定案 → 能确定性替换的直接替换、不能的走一次定向修订 →
+ * 逐段确定性校验（改出新的阻断问题就回退）→ 交给调用方落库。
+ * 人工回填过的批次与"关掉自动统一"的设置都只报告，不改稿。
+ */
+async function applyConsistencyRepairs({ run, segments, findings, assets, taskId = "" }) {
+  const report = taskProgressReporter(taskId);
+  const repair = { at: new Date().toISOString(), enabled: true, blocked: null, changed: [], skipped: [] };
+  if (getSettings().quality?.consistencyAutoRepair === false) {
+    repair.enabled = false;
+    repair.blocked = { reason: "设置里关闭了自动统一" };
+    return { repair, segments };
+  }
+  if (segments.some((segment) => segment.accepted === true)) {
+    repair.blocked = { reason: REPAIR_SKIP_REASONS.human_reviewed };
+    return { repair, segments };
+  }
+  const byId = new Map(segments.map((segment) => [String(segment.id || ""), segment]));
+  const sources = [];
+  for (const finding of findings) {
+    for (const id of finding.ids || []) {
+      const source = byId.get(String(id))?.source;
+      if (source) sources.push(source);
+    }
+    for (const term of finding.terms || []) sources.push(term.source);
+    for (const item of finding.unify || []) sources.push(item.source);
+  }
+  const tmEvidence = await consistencyTmEvidence({
+    locale: run.locale,
+    projectId: run.projectId,
+    contentType: run.contentType,
+    domain: run.domain,
+    sources
+  });
+  const plan = planConsistencyRepairs({
+    findings,
+    segments,
+    groups: summarizeSourceGroups(segments),
+    termTargetsFor: (source) => matchTerms(source || "", assets, {
+      contentType: run.contentType,
+      domain: run.domain,
+      exactOnly: true,
+      ...deliveryContext(run, source || "")
+    }).filter((match) => match.mode === "exact" && String(match.expectedTarget || match.term?.target || "").trim())
+      .map((match) => ({
+        source: String(match.term?.source || match.matchPhrase || "").trim(),
+        target: String(match.expectedTarget || match.term?.target || "").trim()
+      })),
+    tmEntriesFor: (source) => tmEvidence.get(normalizeSource(source)) || [],
+    maxSegments: getSettings().quality?.consistencyRepairMaxSegments ?? 20
+  });
+  repair.skipped = plan.skipped;
+  if (plan.blocked) {
+    repair.blocked = plan.blocked;
+    return { repair, segments };
+  }
+  if (!plan.actions.length) return { repair, segments };
+  const updated = new Map(segments.map((segment) => [String(segment.id || ""), { ...segment }]));
+  const totalChanges = plan.actions.reduce((sum, action) => sum + action.changes.length, 0);
+  let completed = 0;
+  report({ phase: "repairing", message: `正在按证据统一译法：0 / ${totalChanges} 段`, percent: 30, completed: 0, total: totalChanges });
+  for (const action of plan.actions) {
+    for (const change of action.changes) {
+      completed += 1;
+      const segment = updated.get(change.segmentId);
+      if (!segment || segment.accepted === true) continue;
+      const before = String(segment.translation || "");
+      let after = change.method === "replace" ? String(change.after || "") : "";
+      // 同一条 finding 可能有多个统一目标（例如一组 UI 选项），段落以它自己那条结论为准。
+      const changeSource = change.source || action.source;
+      const changeTarget = change.target || action.target;
+      const changeEvidence = change.evidence || action.evidence || null;
+      if (!after) {
+        try {
+          after = await reviseSegmentForConsistency({
+            run,
+            segment,
+            assets,
+            source: changeSource,
+            target: changeTarget,
+            reason: REPAIR_EVIDENCE_LABELS[changeEvidence?.kind] || "一致性核对"
+          });
+        } catch (error) {
+          repair.skipped.push({ findingIndex: action.findingIndex, type: action.type, ids: [change.segmentId], reason: `定向修订失败：${error.message}` });
+          continue;
+        }
+      }
+      if (!after || after === before) {
+        repair.skipped.push({
+          findingIndex: action.findingIndex,
+          type: action.type,
+          ids: [change.segmentId],
+          reason: change.reason || REPAIR_SKIP_REASONS.no_variant
+        });
+        continue;
+      }
+      const beforeIssues = consistencySegmentIssues(run, segment, before);
+      const introduced = consistencySegmentIssues(run, segment, after).filter((issue) => issue.severity === "error"
+        && !beforeIssues.some((previous) => previous.severity === "error" && previous.type === issue.type));
+      if (introduced.length) {
+        repair.skipped.push({ findingIndex: action.findingIndex, type: action.type, ids: [change.segmentId], reason: `校验未通过：${introduced[0].message}` });
+        continue;
+      }
+      segment.translation = after;
+      segment.result = {
+        ...(segment.result || {}),
+        consistencyRepair: {
+          at: repair.at,
+          before,
+          after,
+          method: change.method,
+          source: changeSource,
+          target: changeTarget,
+          evidence: changeEvidence,
+          overrodeModel: change.overrodeModel === true,
+          finding: action.detail || ""
+        }
+      };
+      repair.changed.push({
+        segmentId: change.segmentId,
+        findingIndex: action.findingIndex,
+        type: action.type,
+        source: changeSource,
+        target: changeTarget,
+        evidence: changeEvidence,
+        overrodeModel: change.overrodeModel === true,
+        method: change.method,
+        before,
+        after
+      });
+      report({
+        phase: "repairing",
+        message: `正在按证据统一译法：${completed} / ${totalChanges} 段`,
+        percent: 30 + Math.round((completed / Math.max(1, totalChanges)) * 30),
+        completed,
+        total: totalChanges
+      });
+    }
+  }
+  if (!repair.changed.length) return { repair, segments };
+  const nextSegments = segments.map((segment) => updated.get(String(segment.id || "")) || segment);
+  await syncConsistencyRepairRecords({ run, changes: repair.changed, segments: nextSegments });
+  return { repair, segments: nextSegments };
+}
+
+/**
+ * 修复后的资产同步：工作 TM 里这条批次的机器条改成新译法（不新增分叉，也不碰人工条），
+ * 有学习轨迹的段落把机器终稿同步成修复后的译文，保证 SFT / 回归集用的是实际交付的机器稿。
+ */
+async function syncConsistencyRepairRecords({ run, changes, segments }) {
+  if (!changes.length) return;
+  const libraries = run.projectId ? await getResourceLibraries(run.projectId, { kind: "translation_memory" }).catch(() => []) : [];
+  const workingLibrary = libraries.find((library) => library.role === "working" && library.enabled !== false) || null;
+  const byId = new Map(segments.map((segment) => [String(segment.id || ""), segment]));
+  for (const change of changes) {
+    const segment = byId.get(String(change.segmentId));
+    if (!segment) continue;
+    if (workingLibrary) {
+      try {
+        const rows = await getMemories(run.locale, {
+          projectId: run.projectId,
+          contentType: run.contentType,
+          domain: run.domain,
+          limit: 50,
+          search: String(segment.source || ""),
+          scopeFallback: true
+        }).catch(() => []);
+        const stale = rows.filter((row) => row.libraryId === workingLibrary.id
+          && row.batchId === run.batchId
+          && normalizeMemoryText(row.source) === normalizeMemoryText(segment.source)
+          && normalizeMemoryText(row.target) !== normalizeMemoryText(change.after)
+          && String(row.qualityStatus || "") !== "human_approved");
+        for (const row of stale) await deleteMemory(run.locale, row.id).catch(() => {});
+        await saveMemory(run.locale, {
+          source: segment.source,
+          target: change.after,
+          domain: run.domain || "general",
+          contentType: run.contentType || "general",
+          qualityStatus: "machine_verified",
+          assetTier: "working",
+          project: run.projectId,
+          projectId: run.projectId,
+          libraryId: workingLibrary.id,
+          provenance: "consistency-repair",
+          batchId: run.batchId,
+          entryId: segment.locator?.unitId || segment.locator?.entryId || segment.context?.entryId || "",
+          entryKey: segment.entryKey || segment.locator?.entryKey || "",
+          sourceFile: run.filename,
+          sourceRow: segment.locator?.row || segment.context?.row || null
+        });
+      } catch (error) {
+        console.error(`[Kami] 一致性修复后同步工作 TM 失败（${change.segmentId}）：${error.message}`);
+      }
+    }
+    const trajectoryId = String(segment.result?.trajectoryId || "");
+    if (!trajectoryId) continue;
+    try {
+      const trajectory = await getLearningTrajectory(trajectoryId).catch(() => null);
+      if (!trajectory || trajectory.humanDecision?.accepted === true) continue;
+      await updateLearningTrajectory(trajectoryId, {
+        finalTranslation: change.after,
+        events: [...(Array.isArray(trajectory.events) ? trajectory.events : []), {
+          type: "consistency_repaired",
+          at: new Date().toISOString(),
+          segmentId: change.segmentId,
+          source: change.source,
+          target: change.target
+        }]
+      });
+    } catch (error) {
+      console.error(`[Kami] 一致性修复后同步学习轨迹失败（${change.segmentId}）：${error.message}`);
+    }
+  }
+}
+
+/** 每条待核对项写明"自动统一成了什么、依据是什么、为什么没改"。 */
+function annotateConsistencyFindings(findings, repair, verification) {
+  const changedByIndex = new Map();
+  for (const change of repair.changed || []) {
+    if (!changedByIndex.has(change.findingIndex)) changedByIndex.set(change.findingIndex, []);
+    changedByIndex.get(change.findingIndex).push(change);
+  }
+  const skippedByIndex = new Map();
+  for (const item of repair.skipped || []) {
+    if (!skippedByIndex.has(item.findingIndex)) skippedByIndex.set(item.findingIndex, []);
+    skippedByIndex.get(item.findingIndex).push(item);
+  }
+  const stillReported = new Set((verification?.remaining || []).flatMap((finding) => finding.ids || []).map(String));
+  return findings.map((finding, index) => {
+    if (repair.blocked) return { ...finding, repair: { status: "skipped", reason: repair.blocked.reason } };
+    const changes = changedByIndex.get(index) || [];
+    const skipped = skippedByIndex.get(index) || [];
+    if (changes.length) {
+      const still = changes.some((change) => stillReported.has(String(change.segmentId)));
+      return {
+        ...finding,
+        repair: {
+          status: still ? "partial" : "repaired",
+          target: changes[0].target,
+          evidence: changes[0].evidence || null,
+          overrodeModel: changes.some((change) => change.overrodeModel === true),
+          changedIds: changes.map((change) => change.segmentId),
+          reason: still ? "统一后复核仍点到了这些段落" : ""
+        }
+      };
+    }
+    const reason = skipped[0]?.reason
+      || (finding.source === "rule" && finding.type === "term_usage_gap" ? REPAIR_SKIP_REASONS.report_only : REPAIR_SKIP_REASONS.no_evidence);
+    return { ...finding, repair: { status: "skipped", reason } };
+  });
+}
+
+/**
+ * 交付前一致性核对 + 质量报告 + 有依据的自动统一。
+ * 确定性部分（同原文不同译文、术语登记译法未采用）不花额度先算；语义漂移分片交给模型，
+ * 模型只报漂移与候选写法，统一成哪个由证据定案（见 src/consistency-repair.mjs）。
+ * 结果写回批次记录，供批次页与任务中心查看。
  */
 async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
   const run = await getBatchRun(batchId);
@@ -1874,24 +3585,55 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
   const translated = segments.filter((segment) => segment.selected !== false && String(segment.translation || "").trim());
   if (!translated.length) throw new Error("这条任务还没有译文，无法核对一致性");
   const report = taskProgressReporter(taskId);
-  const pairs = translated.map((segment) => ({
+  const toPairs = (list) => list.map((segment) => ({
     id: String(segment.id || ""),
     source: String(segment.source || ""),
     translation: String(segment.translation || "")
   }));
-  const findings = deterministicConsistencyFindings(segments);
+  const pairs = toPairs(translated);
+  const deterministic = deterministicConsistencyFindings(segments);
+  const provider = getProviderConfig();
+  const assets = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets || {};
+  const styleProfile = await getProjectStyleProfile(run.locale, { projectId: run.projectId }).catch(() => null);
+  const style = styleProfile ? {
+    id: String(styleProfile.id || ""),
+    name: String(styleProfile.name || ""),
+    version: Number(styleProfile.version) || 0,
+    instruction: String(styleProfile.instruction || ""),
+    rules: (Array.isArray(styleProfile.rules) ? styleProfile.rules : [])
+      .map((rule) => (typeof rule === "string" ? rule : rule?.text || rule?.instruction || ""))
+      .filter(Boolean),
+    registerPolicy: styleProfile.reviewRubric?.registerPolicy || null
+  } : null;
+  const termEvidence = consistencyTermEvidence(run, translated, assets);
+  const tmSources = new Set(pairs.map((pair) => pair.source));
+  for (const finding of [...deterministic]) {
+    for (const term of finding.terms || []) tmSources.add(term.source);
+  }
+  const tmEvidence = await consistencyTmEvidence({
+    locale: run.locale,
+    projectId: run.projectId,
+    contentType: run.contentType,
+    domain: run.domain,
+    sources: [...tmSources]
+  });
   const chunks = splitConsistencyChunks(pairs);
   report({ phase: "checking", message: `正在核对跨条目一致性：0 / ${chunks.length} 片`, percent: 10, completed: 0, total: chunks.length });
   let completed = 0;
   const failures = [];
   const byId = new Map(pairs.map((pair) => [pair.id, pair]));
-  const results = await runTaskPool(chunks, async (chunk) => checkBatchConsistencyWithModel({
-    filename: run.filename,
-    locale: run.locale,
-    purpose: run.contentType || "general",
-    pairs: chunk.ids.map((id) => byId.get(id)).filter(Boolean),
-    part: { index: chunk.index, total: chunks.length }
-  }), {
+  const results = await runTaskPool(chunks, async (chunk) => {
+    const chunkPairs = chunk.ids.map((id) => byId.get(id)).filter(Boolean);
+    return checkBatchConsistencyWithModel({
+      filename: run.filename,
+      locale: run.locale,
+      purpose: run.contentType || "general",
+      pairs: chunkPairs,
+      part: { index: chunk.index, total: chunks.length },
+      evidence: consistencyChunkEvidence({ style, termEvidence, tmEvidence, pairs: chunkPairs }),
+      toolRunner: buildReferenceToolRunner({ projectId: run.projectId })
+    });
+  }, {
     concurrency: CONSISTENCY_CHECK_CONCURRENCY,
     onSettled: (result) => {
       completed += 1;
@@ -1899,23 +3641,57 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
       report({
         phase: "checking",
         message: `正在核对跨条目一致性：${completed} / ${chunks.length} 片`,
-        percent: 10 + Math.round((completed / chunks.length) * 70),
+        percent: 10 + Math.round((completed / chunks.length) * 20),
         completed,
         total: chunks.length
       });
     }
   });
   const modelFindings = mergeConsistencyFindings(results.filter((result) => result.status === "fulfilled").map((result) => result.value));
-  const merged = [...findings, ...modelFindings];
-  const provider = getProviderConfig();
-  const styleProfile = await getProjectStyleProfile(run.locale, { projectId: run.projectId }).catch(() => null);
+  const merged = [...deterministic, ...modelFindings];
+  const repaired = await applyConsistencyRepairs({ run, segments, findings: merged, assets, taskId });
+  const changedIds = new Set((repaired.repair.changed || []).map((change) => String(change.segmentId)));
+  let verification = null;
+  if (changedIds.size) {
+    report({ phase: "verifying", message: `正在复核统一结果：0 片`, percent: 70, completed: 0, total: 1 });
+    try {
+      verification = await recheckConsistencyChunks({
+        run,
+        pairs: toPairs(repaired.segments.filter((segment) => segment.selected !== false && String(segment.translation || "").trim())),
+        changedIds,
+        style,
+        termEvidence,
+        tmEvidence
+      });
+    } catch (error) {
+      verification = { checkedChunks: 0, remaining: [], failures: [error.message] };
+    }
+  }
+  const findings = annotateConsistencyFindings(merged, repaired.repair, verification);
   const qualityReport = buildQualityReport({
-    segments, brief: run.contextBrief || null, findings: merged, provider, styleProfile,
+    segments: repaired.segments, brief: run.contextBrief || null, findings, provider, styleProfile,
     batchId: run.batchId, filename: run.filename, locale: run.locale
   });
   const latest = await getBatchRun(batchId);
-  await saveBatchRun({ ...(latest || run), qualityReport: { report: qualityReport, findings: merged, warning: failures[0] || "" } });
-  return { report: qualityReport, findings: merged, failures };
+  // 写回前重新读一次批次，按 segment id 合并，避免覆盖这段时间里的并发改动。
+  const latestSegments = Array.isArray(latest?.segments) ? latest.segments : [];
+  const mergedSegments = latestSegments.length
+    ? latestSegments.map((segment) => repaired.segments.find((item) => String(item.id) === String(segment.id)) || segment)
+    : repaired.segments;
+  const repairSummary = {
+    at: repaired.repair.at,
+    enabled: repaired.repair.enabled,
+    blocked: repaired.repair.blocked,
+    changed: repaired.repair.changed,
+    skipped: repaired.repair.skipped,
+    verification
+  };
+  await saveBatchRun({
+    ...(latest || run),
+    segments: mergedSegments,
+    qualityReport: { report: qualityReport, findings, warning: failures[0] || "", repair: repairSummary }
+  });
+  return { report: qualityReport, findings, failures, repair: repairSummary };
 }
 
 /** 起一个一致性核对后台任务；同一批次已在跑时直接复用。 */
@@ -1930,20 +3706,23 @@ function startConsistencyCheck(batchId) {
       title: `一致性核对 · ${run.filename}`,
       locale: run.locale,
       projectId: run.projectId,
-      progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length }
+      progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length },
+      payload: { batchId }
     });
     try {
+      await attachBatchWorkflowTask(batchId, "qualityReport", task.id);
       const outcome = await runConsistencyCheck(batchId, { taskId: task.id });
+      const repairedCount = (outcome.repair?.changed || []).length;
       await updateBackgroundTaskProgress(task.id, {
-        status: "completed",
+        status: outcome.failures.length ? "needs_attention" : "completed",
         progress: {
           phase: "completed",
-          message: `一致性核对完成：${outcome.findings.length} 条待核对，质检覆盖率 ${outcome.report.coverage.percent}%`,
+          message: `一致性核对完成：${outcome.findings.length} 条待核对${repairedCount ? ` · 已按证据自动统一 ${repairedCount} 段` : ""}，质检覆盖率 ${outcome.report.coverage.percent}%`,
           percent: 100,
           completed: outcome.findings.length,
           total: outcome.findings.length
         },
-        payload: { batchId, findings: outcome.findings.length, report: outcome.report, warning: outcome.failures[0] || "" }
+        payload: { batchId, findings: outcome.findings.length, repaired: repairedCount, report: outcome.report, warning: outcome.failures[0] || "" }
       });
       return { batchId, taskId: task.id, ...outcome };
     } catch (error) {
@@ -1958,10 +3737,196 @@ function startConsistencyCheck(batchId) {
   return tracked;
 }
 
+/**
+ * 翻译期术语普查：整批翻完后让模型指出"像术语但库里没有"的说法，
+ * 结果挂在批次记录的 runnerOptions.termSurvey 上，等审校回填时用人工终稿确认译法。
+ *
+ * 这一步失败不影响批次：只记一条失败任务，翻译结果照常使用。
+ */
+async function runTermSurvey(batchId, { taskId = "" } = {}) {
+  const run = await getBatchRun(batchId);
+  if (!run) throw new Error("未找到这条翻译任务");
+  const pairs = surveyPairs(run.segments || []);
+  if (!pairs.length) throw new Error("这条任务还没有译文，无法做术语普查");
+  const chunks = splitConsistencyChunks(pairs);
+  const byId = new Map(pairs.map((pair) => [pair.id, pair]));
+  const existingTerms = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [];
+  const report = taskProgressReporter(taskId);
+  report({ phase: "surveying", message: `正在查找疑似术语：0 / ${chunks.length} 片`, percent: 10, completed: 0, total: chunks.length });
+  let completed = 0;
+  const failures = [];
+  const results = await runTaskPool(chunks, async (chunk) => surveyTermsWithModel({
+    filename: run.filename,
+    locale: run.locale,
+    purpose: run.contentType || "general",
+    pairs: chunk.ids.map((id) => byId.get(id)).filter(Boolean),
+    part: { index: chunk.index, total: chunks.length },
+    existingTerms
+  }), {
+    concurrency: CONSISTENCY_CHECK_CONCURRENCY,
+    onSettled: (result) => {
+      completed += 1;
+      if (result.status === "rejected") failures.push(String(result.reason?.message || result.reason));
+      report({
+        phase: "surveying",
+        message: `正在查找疑似术语：${completed} / ${chunks.length} 片`,
+        percent: 10 + Math.round((completed / chunks.length) * 80),
+        completed,
+        total: chunks.length
+      });
+    }
+  });
+  const terms = normalizeSurveyTerms(
+    results.filter((result) => result.status === "fulfilled").flatMap((result) => result.value?.terms || []),
+    { existingTerms }
+  );
+  const analyzedPairs = results.reduce((total, result, index) => total + (result.status === "fulfilled" ? chunks[index].ids.length : 0), 0);
+  const coverage = { analyzedPairs, totalSegments: (run.segments || []).filter((segment) => segment.selected !== false).length, chunks: chunks.length, failedChunks: failures.length };
+  const latest = await getBatchRun(batchId) || run;
+  await saveBatchRun({
+    ...latest,
+    runnerOptions: {
+      ...(latest.runnerOptions || {}),
+      termSurvey: {
+        version: 1,
+        filename: run.filename,
+        model: getProviderConfig().model,
+        generatedAt: new Date().toISOString(),
+        terms,
+        coverage,
+        warning: failures[0] || ""
+      }
+    }
+  });
+  return { terms, failures, coverage };
+}
+
+/** 起一个术语普查后台任务；同一批次已在跑时直接复用。 */
+function startTermSurvey(batchId) {
+  const running = termSurveyTasks.get(batchId);
+  if (running) return running;
+  const tracked = (async () => {
+    const run = await getBatchRun(batchId);
+    if (!run) return { batchId, skipped: "not_found" };
+    const task = await createBackgroundTask({
+      type: "term_survey",
+      title: `术语普查 · ${run.filename}`,
+      locale: run.locale,
+      projectId: run.projectId,
+      progress: { phase: "queued", message: "已进入后台队列", total: (run.segments || []).length },
+      payload: { batchId }
+    });
+    try {
+      await attachBatchWorkflowTask(batchId, "termSurvey", task.id);
+      const outcome = await runTermSurvey(batchId, { taskId: task.id });
+      await updateBackgroundTaskProgress(task.id, {
+        status: outcome.failures.length ? "needs_attention" : "completed",
+        progress: {
+          phase: "completed",
+          message: outcome.terms.length
+            ? `发现疑似术语 ${outcome.terms.length} 条：回填审校稿后会按人工终稿入库或转待审核`
+            : "没有发现需要新增的术语",
+          percent: 100,
+          completed: outcome.terms.length,
+          total: outcome.terms.length
+        },
+        payload: { batchId, candidateCount: outcome.terms.length, warning: outcome.failures[0] || "" }
+      });
+      return { batchId, taskId: task.id, ...outcome };
+    } catch (error) {
+      await updateBackgroundTaskProgress(task.id, {
+        status: "failed",
+        progress: { phase: "failed", message: `术语普查失败：${error.message}`, percent: 100 }
+      }).catch(() => {});
+      return { batchId, taskId: task.id, failed: error.message };
+    }
+  })().finally(() => termSurveyTasks.delete(batchId));
+  termSurveyTasks.set(batchId, tracked);
+  return tracked;
+}
+
+async function attachBatchWorkflowTask(batchId, stage, taskId) {
+  const write = (batchWorkflowWrites.get(batchId) || Promise.resolve()).catch(() => {}).then(async () => {
+    const run = await getBatchRun(batchId);
+    if (!run) return;
+    await saveBatchRun({ ...run, runnerOptions: { ...run.runnerOptions, workflowTasks: { ...run.runnerOptions?.workflowTasks, [stage]: taskId } } });
+  });
+  batchWorkflowWrites.set(batchId, write);
+  try { await write; }
+  finally { if (batchWorkflowWrites.get(batchId) === write) batchWorkflowWrites.delete(batchId); }
+}
+
+async function loadBatchWorkflow(run, knownTasks = new Map()) {
+  if (!run.segments && !run.runnerOptions?.workflowTasks && ["completed", "needs_attention"].includes(run.runState)) {
+    run = await getBatchRun(run.batchId) || run;
+  }
+  const ids = run.runnerOptions?.workflowTasks || {};
+  const tasks = await Promise.all(["qualityReport", "termSurvey", "aiQa"].map((stage) => {
+    const id = ids[stage];
+    return id ? knownTasks.get(id) || getBackgroundTask(id) : null;
+  }));
+  const settings = getSettings();
+  const workflow = buildBatchWorkflow(run, { qualityTask: tasks[0], termTask: tasks[1], qaTask: tasks[2],
+    autoConsistencyCheck: settings.quality?.autoConsistencyCheck !== false, termSurveyEnabled: settings.learning.termSurveyEnabled !== false });
+  if (!batchWorkers.has(run.batchId) && !batchQaWorkers.has(run.batchId)) {
+    for (const [index, stage, running] of [[0, "qualityReport", consistencyCheckTasks], [1, "termSurvey", termSurveyTasks]]) {
+      if (workflow[stage].status === "waiting" && !running.has(run.batchId) && tasks[index]?.status !== "in_progress") {
+        workflow[stage] = { status: "not_started", message: `${stage === "qualityReport" ? "质量报告" : "术语普查"}尚未执行，可手动运行；补跑翻译或 QA 后也会自动触发` };
+      }
+    }
+  }
+  return { ...workflow, qaRetryBusy: batchQaWorkers.has(run.batchId) };
+}
+
+async function finalizeBatchWorkflow(batchId) {
+  // 保留先统一译文、再做普查的顺序，避免两份批次快照相互覆盖；失败仍继续下一步。
+  if (getSettings().quality?.autoConsistencyCheck !== false) {
+    await startConsistencyCheck(batchId).catch((error) => console.error(`[Kami] 批次 ${batchId} 质量报告失败`, error));
+  }
+  if (getSettings().learning.termSurveyEnabled !== false) {
+    await startTermSurvey(batchId).catch((error) => console.error(`[Kami] 批次 ${batchId} 术语普查失败`, error));
+  }
+}
+
+function startBatchQaRetry(batchId, taskId, segmentIds) {
+  const control = beginBackgroundRun(taskId);
+  const tracked = (async () => {
+    // 收尾正在写批次时先等它结束，避免 QA 与一致性修复互相覆盖。
+    const worker = batchWorkers.get(batchId);
+    await worker?.translationSettled;
+    await worker?.followupPromise;
+    await Promise.all([consistencyCheckTasks.get(batchId), termSurveyTasks.get(batchId)]);
+    await attachBatchWorkflowTask(batchId, "aiQa", taskId);
+    const outcome = await retryServerBatchQa(batchId, {
+      loadRun: getBatchRun, saveRun: saveBatchRun, segmentIds,
+      recheckSegment: (body) => translateBatchSegment(body, "/api/qa"),
+      shouldCancel: () => control.cancelRequested,
+      report: ({ completed, failed, total }) => updateBackgroundTaskProgress(taskId, {
+        progress: { phase: "checking", message: `AIQA 重试：${completed} / ${total} 段${failed ? ` · ${failed} 段仍未完成` : ""}`,
+          percent: total ? Math.round(completed / total * 100) : 100, completed, total, failed }
+      })
+    });
+    const latest = await getBatchRun(batchId);
+    if (latest && !outcome.cancelled) await saveBatchRun({ ...latest, runnerOptions: { ...latest.runnerOptions, qaCompletedAt: new Date().toISOString() } });
+    await updateBackgroundTaskProgress(taskId, {
+      status: outcome.cancelled || outcome.failed ? "needs_attention" : "completed",
+      progress: { phase: outcome.cancelled ? "cancelled" : "completed", percent: 100, completed: outcome.completed, total: outcome.total, failed: outcome.failed,
+        message: outcome.cancelled ? "AIQA 重试已中断，已完成结果保留" : `AIQA 重试已结束：成功 ${outcome.completed - outcome.failed} 段${outcome.failed ? ` · ${outcome.failed} 段仍未完成` : ""}` },
+      payload: { batchId }
+    });
+    if (latest && !outcome.cancelled) await finalizeBatchWorkflow(batchId);
+  })().catch(async (error) => {
+    await updateBackgroundTaskProgress(taskId, { status: "failed", progress: { phase: "failed", message: `AIQA 重试失败：${error.message}` }, payload: { batchId } }).catch(() => {});
+  }).finally(() => { endBackgroundRun(taskId); batchQaWorkers.delete(batchId); });
+  batchQaWorkers.set(batchId, { taskId, promise: tracked });
+}
+
 function startBatchWorker(batchId, backgroundTaskId = "") {
   const existing = batchWorkers.get(batchId);
   if (existing) return existing;
   const controller = { pauseRequested: false, cancelRequested: false, promise: null, backgroundTaskId };
+  let settleTranslation;
+  controller.translationSettled = new Promise((resolve) => { settleTranslation = resolve; });
   const sessionId = `batch:${batchId}`;
   const heartbeat = setInterval(() => workbenchSessionMonitor?.touch(sessionId), 5_000);
   heartbeat.unref?.();
@@ -2009,18 +3974,20 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
     }),
     // 整批翻完之后自动跑一次交付前闭环：一致性核对 + 质量报告。
     // 这一步失败不影响批次完成状态，批次页可以手动重跑。
-    finalize: async (run) => {
-      if (getSettings().quality?.autoConsistencyCheck === false) return;
-      await runConsistencyCheck(run.batchId).catch((error) => {
-        console.error(`[Kami] 批次 ${run.batchId} 一致性核对失败：${error.message}`);
-      });
+    finalize: (run) => {
+      controller.translationComplete = true;
+      controller.followupActive = true;
+      controller.followupPromise = finalizeBatchWorkflow(run.batchId).finally(() => { controller.followupActive = false; });
+      settleTranslation();
+      return controller.followupPromise;
     }
   }).catch(async (error) => {
     const run = await getBatchRun(batchId).catch(() => null);
-    if (run) await saveBatchRun({ ...run, runState: "needs_attention" }).catch(() => {});
+    if (run) await saveBatchRun({ ...run, runState: "needs_attention", runnerOptions: { ...run.runnerOptions, translationError: error.message } }).catch(() => {});
     if (backgroundTaskId) await updateBackgroundTaskProgress(backgroundTaskId, { status: "failed", progress: { phase: "failed", message: error.message, percent: 100 } }).catch(() => {});
     console.error(`后台批次 ${batchId} 失败`, error);
   }).finally(() => {
+    settleTranslation();
     clearInterval(heartbeat);
     workbenchSessionMonitor?.close(sessionId);
     batchWorkers.delete(batchId);
@@ -2303,7 +4270,9 @@ async function apiHandler(req, res, url) {
           batch: run ? {
             batchId: run.batchId, status: run.status, runState: run.runState,
             totalSegments: run.totalSegments, completedSegments: run.completedSegments,
-            failedSegments: run.failedSegments, qaPending: run.qaPending, updatedAt: run.updatedAt
+            failedSegments: run.failedSegments, qaPending: run.qaPending,
+            qualityTiers: run.qualityTiers || null,
+            updatedAt: run.updatedAt
           } : null,
           learning: { count: Number(learning?.count) || 0, humanReviewed: Number(learning?.humanReviewed) || 0 }
         };
@@ -2381,28 +4350,19 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/learning/conflict-scan") {
     const body = await readJsonBody(req);
-    const scope = learningScope({
-      locale: assertActiveLocale(body.locale),
-      contentType: body.contentType || "general",
-      domain: body.domain || "game",
-      project: body.project || "default"
-    });
+    // 语体/领域只作参考：冲突审查按「语言 × 项目」整体扫一次。
+    const scope = learningScope({ locale: assertActiveLocale(body.locale), project: body.project || "default" });
     return json(res, 200, await conflictScanner.scan(scope));
   }
   if (req.method === "POST" && url.pathname === "/api/learning/conflict-scan/apply") {
     // 扫描负责衡量，改写要人点。风格规则是唯一可以在这里就地退休的：
     // 技能规则须经配对评测晋升，译者画像走草稿流程，两者都不从这里绕过去。
     const body = await readJsonBody(req);
-    const scope = learningScope({
-      locale: assertActiveLocale(body.locale),
-      contentType: body.contentType || "general",
-      domain: body.domain || "game",
-      project: body.project || "default"
-    });
+    const scope = learningScope({ locale: assertActiveLocale(body.locale), project: body.project || "default" });
     const ruleId = String(body.ruleId || "").trim();
     if (!ruleId) return json(res, 400, { error: "缺少要退休的规则 id" });
     const profile = await getProjectStyleProfile(scope.locale, { projectId: scope.project });
-    if (!profile?.id) return json(res, 404, { error: "该作用域没有生效中的风格规范" });
+    if (!profile?.id) return json(res, 404, { error: "该项目没有生效中的风格规范" });
     const rules = retireRule(profile.rules, ruleId, { reason: String(body.reason || "").slice(0, 300) });
     if (!rules) return json(res, 409, { error: "该规则不存在或已经退休" });
     const updated = await updateStyleProfileRules(profile.id, {
@@ -2416,8 +4376,6 @@ async function apiHandler(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/learning/conflict-scan") {
     const scope = learningScope({
       locale: assertActiveLocale(url.searchParams.get("locale")),
-      contentType: url.searchParams.get("contentType") || "general",
-      domain: url.searchParams.get("domain") || "game",
       project: url.searchParams.get("project") || "default"
     });
     return json(res, 200, conflictReports.get(learningScopeKeyOf(scope)) || { scope, conflicts: [], reason: "尚未扫描" });
@@ -2490,10 +4448,16 @@ async function apiHandler(req, res, url) {
     if (tooLarge) return json(res, 400, { error: `${tooLarge.filename} 超过单文件 ${Math.round(IMPORT_FILE_BYTES / (1024 * 1024))}MB 上限` });
     const candidates = [];
     let rowsScanned = 0;
+    let totalRows = 0;
+    let rowLimit = 0;
+    let truncation = null;
     const fileTypes = new Set();
     for (const file of files) {
-      const pairs = /\.(xlsx|csv)$/iu.test(file.filename)
-        ? (await extractTermPairs({ filename: file.filename, base64: file.base64, locale: "zh-CN" })).candidates.map((candidate) => ({
+      let pairs;
+      let parsed = null;
+      if (/\.(xlsx|csv)$/iu.test(file.filename)) {
+        parsed = await extractTermPairs({ filename: file.filename, base64: file.base64, locale: "zh-CN" });
+        pairs = parsed.candidates.map((candidate) => ({
           entryId: candidate.entryId || "",
           source: candidate.source,
           target: candidate.target,
@@ -2503,9 +4467,14 @@ async function apiHandler(req, res, url) {
           context: candidate.sheet || "",
           sourceRow: candidate.rowNumber || null,
           sheet: candidate.sheet || ""
-        }))
-        : extractXliffPairs(Buffer.from(file.base64, "base64"), file.filename);
+        }));
+      } else {
+        pairs = extractXliffPairs(Buffer.from(file.base64, "base64"), file.filename);
+      }
       rowsScanned += pairs.length;
+      // 整表行数用于界面提示（"共 N 行 / 本次读取 M 行"），XLIFF 没有行概念就按候选数记。
+      totalRows += Number(parsed?.statistics?.totalRows) || pairs.length;
+      if (Number(parsed?.statistics?.rowLimit) > 0) rowLimit = Number(parsed.statistics.rowLimit);
       fileTypes.add(file.filename.toLowerCase().endsWith(".mqxliff") ? "mqxliff" : file.filename.toLowerCase().endsWith(".xliff") ? "xliff" : file.filename.toLowerCase().endsWith(".csv") ? "csv" : "xlsx");
       pairs.forEach((pair, index) => {
         candidates.push({
@@ -2514,18 +4483,54 @@ async function apiHandler(req, res, url) {
           sourceFile: file.filename, sourceRow: pair.sourceRow || index + 1
         });
       });
+      // 单表读取上限命中时要明确报出来：静默少读 89% 是最坏的一种"成功"。
+      if (parsed?.statistics?.truncated) {
+        truncation = {
+          file: file.filename,
+          totalRows: parsed.statistics.totalRows,
+          rowsScanned: parsed.statistics.rowsScanned,
+          rowLimit: parsed.statistics.rowLimit
+        };
+      }
     }
+    const batchId = randomUUID();
+    // 候选留在服务端：8 万条候选序列化约 49MB，来回传两次既慢又会撞上请求体上限。
+    await writePreviewCache({
+      batchId,
+      meta: {
+        filename: files.length === 1 ? files[0].filename : `${files[0].filename} 等 ${files.length} 个文件`,
+        fileType: "tm",
+        sourceFileType: [...fileTypes][0] || "xlsx",
+        projectId,
+        requestedLocale: "zh-CN",
+        files: files.map((file) => file.filename),
+        statistics: { rowsScanned, pairedRows: candidates.length, totalRows, rowLimit, truncated: Boolean(truncation), ...(truncation || {}) }
+      },
+      candidates
+    });
     return json(res, 200, {
-      batchId: randomUUID(),
+      batchId,
       filename: files.length === 1 ? files[0].filename : `${files[0].filename} 等 ${files.length} 个文件`,
       fileType: "tm",
       sourceFileType: [...fileTypes][0] || "xlsx",
       projectId,
-      candidates,
+      // 只回一页样例：列表要看完就按页取（GET /api/tm-import/preview/:batchId）。
+      candidates: candidates.slice(0, TM_PREVIEW_SAMPLE),
+      total: candidates.length,
+      sampleLimit: TM_PREVIEW_SAMPLE,
       files: files.map((file) => file.filename),
-      statistics: { rowsScanned, pairedRows: candidates.length },
+      statistics: { rowsScanned, pairedRows: candidates.length, totalRows, rowLimit, truncated: Boolean(truncation), ...(truncation || {}) },
       write: { modelCalled: false, databaseWritten: false }
     });
+  }
+  // 预检列表分页：只回一页候选，避免把 49MB 候选一次性塞进浏览器。
+  if (req.method === "GET" && url.pathname.startsWith("/api/tm-import/preview/")) {
+    const batchId = decodeURIComponent(url.pathname.slice("/api/tm-import/preview/".length));
+    const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset")) || 0));
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || TM_PREVIEW_SAMPLE));
+    const page = await readPreviewPage(batchId, { offset, limit });
+    if (!page) return json(res, 404, { error: "预检缓存已过期，请重新预检" });
+    return json(res, 200, page);
   }
   if (req.method === "POST" && url.pathname === "/api/assets-import/preview") {
     return json(res, 200, await previewBilingualAssets(await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES })));
@@ -2626,9 +4631,14 @@ async function apiHandler(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/tm-import/commit") {
     const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
-    if (!body.batchId || !Array.isArray(body.candidates)) return json(res, 400, { error: "TM 导入批次或候选无效" });
     const projectId = String(body.projectId || "").trim();
     if (!projectId || !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
+    // 候选优先从预检缓存里读回来：浏览器只回批次号与取消勾选的序号，
+    // 8 万条候选（约 49MB）不再经前端来回搬运。旧客户端仍可直接传 candidates。
+    const resolved = await resolveTmImportCandidates(body);
+    if (!resolved.candidates.length) return json(res, 400, { error: resolved.error });
+    const candidates = resolved.candidates;
+    const batchId = resolved.batchId || String(body.batchId || "");
     const filename = String(body.filename || "人工 TM 导入").slice(0, 120);
     // 页面要进度条时走后台任务：9332 条要跑好几分钟，同步请求期间界面只能干等。
     const tmLibrary = await resolveImportLibrary(projectId, { libraryId: body.tmLibraryId, kind: "translation_memory" });
@@ -2638,31 +4648,41 @@ async function apiHandler(req, res, url) {
         type: "term_import",
         title: `TM 导入 · ${filename}`,
         projectId,
-        progress: { phase: "queued", message: "已排队：正在写入审核队列", total: body.candidates.length }
+        progress: { phase: "queued", message: "已排队：开始写入主 TM", total: candidates.length },
+        payload: { batchId, filename, tmLibraryId, resumable: true }
       });
       runTmImportInBackground({
         taskId: task.id,
         projectId,
         filename,
-        batchId: String(body.batchId),
-        candidates: body.candidates,
+        batchId,
+        candidates,
         styleEvidence: body.styleEvidence !== false,
         sourceFileType: body.sourceFileType,
         tmLibraryId
       }).catch((error) => console.error("[Kami] 人工 TM 导入后台任务异常", error));
-      return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId: String(body.batchId), accepted: body.candidates.length, background: true, tmLibraryId });
+      // 预检缓存不在这里删：导入成功才删，失败要留给「继续导入」。
+      return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, batchId, accepted: candidates.length, background: true, tmLibraryId });
     }
-    const persisted = await saveImportPreview({
-      filename: body.filename || "人工 TM 导入",
+    // 同步路径（接口测试 / 小批量）：同样是"先写主 TM，成功后再写审计"。
+    const result = await commitTermImport(
+      { ...body, projectId, batchId, candidates, tmLibraryId },
+      null,
+      null,
+      { skipQueueCompletion: true }
+    );
+    await saveTmImportAudit({
+      batchId,
+      filename,
       fileType: body.sourceFileType || "tm",
-      requestedLocale: "zh-CN",
       projectId,
-      candidates: body.candidates,
-      statistics: { rowsScanned: body.candidates.length, pairedRows: body.candidates.length },
-      fileMode: "tm",
-      ai: { used: false, requested: false }
+      requestedLocale: "zh-CN",
+      summary: result.summary,
+      candidates,
+      decisions: result.decisions
     });
-    return json(res, 200, await commitTermImport({ ...body, projectId, batchId: persisted.batchId, candidates: persisted.candidates, tmLibraryId }));
+    await releasePreviewCaches(batchId);
+    return json(res, 200, result);
   }
   if (req.method === "POST" && url.pathname === "/api/term-import/preview") {
     const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
@@ -2952,7 +4972,9 @@ async function apiHandler(req, res, url) {
     if (projectId && !(await getProject(projectId))) return json(res, 404, { error: "项目不存在" });
     const [profiles, evidence, qaRuns, learningRuns, totals] = await Promise.all([
       listStyleProfiles(locale, status, { projectId }),
-      getStyleEvidence(locale, { projectId, limit: 1_000 }),
+      // 面板展示的是"分析取样"结果：人工采纳优先 → 语体分层 → 来源覆盖，
+      // 而不是"最新 1000 条"（大导入会把窗口全占掉）。
+      sampleStyleEvidence(locale, { projectId, limit: 1_000 }),
       getQaRuns(locale, { projectId, limit: 500 }),
       getStyleLearningRuns(locale, { projectId, limit: 30 }),
       countStyleEvidence(locale, { projectId }).catch(() => null)
@@ -3142,6 +5164,15 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    // 生效风格换人：同作用域里针对旧生效版本的风格评测作废，就地停掉。
+    await failEvaluationJobs(styleEvaluationJobs,
+      (job) => sameEvaluationScope(job.scope, {
+        locale: activated.locale,
+        contentType: activated.contentType,
+        domain: activated.domain,
+        project: activated.projectId
+      }) && String(job.championId) !== String(id),
+      "生效风格已更新，本次评测终止");
     // 译者画像不参与配对评测，也不在 style_profiles 表里，不能往那儿写激活依据。
     if (located && located.kind !== "user_profile") {
       const basis = !located.evaluation ? "unevaluated" : located.evaluation.promotable === true ? "evaluated" : "forced";
@@ -3165,6 +5196,7 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    await failEvaluationJobs(styleEvaluationJobs, (job) => String(job.challengerId) === String(id), "风格草稿已被拒绝，评测终止");
     return json(res, 200, rejected);
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/style-profiles/") && url.pathname.endsWith("/rules")) {
@@ -3205,6 +5237,7 @@ async function apiHandler(req, res, url) {
       return json(res, 409, { error: profile.kind === "user_profile" ? "这份风格指南正在生效：先「停用」，再删除" : "当前生效版本不能删除：先「停用」，再删除" });
     }
     const deleted = profile.kind === "user_profile" ? await deleteUserProfile(id) : await deleteStyleProfile(id);
+    await failEvaluationJobs(styleEvaluationJobs, (job) => String(job.challengerId) === String(id), "风格草稿已被删除，评测终止");
     logInfo(profile.kind === "user_profile" ? "删除人工风格指南" : "删除风格版本", { id, version: profile.version, status: profile.status });
     return json(res, 200, { deleted, id });
   }
@@ -3221,7 +5254,16 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
-    return json(res, 200, { id, status: "human_approved" });
+    // 采纳即入集：这条人工决定本身就是回归集的闸门，不再需要第二次审批与署名。
+    // 并集失败不影响采纳结果本身，只把原因带回界面。
+    let regression = null;
+    try {
+      regression = await admitApprovedQaCase(id);
+    } catch (error) {
+      console.error("QA 案例采纳后并入回归集失败", error);
+      regression = { error: error.message };
+    }
+    return json(res, 200, { id, status: "human_approved", regression });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/qa-cases/") && url.pathname.endsWith("/dispose")) {
     const id = decodeURIComponent(url.pathname.slice("/api/qa-cases/".length, -"/dispose".length));
@@ -3322,11 +5364,141 @@ async function apiHandler(req, res, url) {
       trajectories
     });
   }
+  if (req.method === "GET" && url.pathname === "/api/learning/overview") {
+    // 学习中心总览：语体/领域只作参考，所以整个项目就是一条流水线。
+    // 仍然返回 scopes 数组（长度 1），前端与旧客户端都不用改读取方式。
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
+    const project = String(url.searchParams.get("project") || "default");
+    const [scopeCounts, skills, goldRecords, suiteRecords, runs] = await Promise.all([
+      countLearningTrajectoriesByScope({ locale, project }).catch(() => []),
+      listTranslationSkills({ locale, project, limit: 500 }),
+      listQualityAssets({ locale, project, kind: "gold_set", limit: 500 }),
+      listQualityAssets({ locale, project, kind: "regression_suite", limit: 500 }),
+      listQualityRuns({ locale, project, limit: 200 })
+    ]);
+    const scope = learningScope({ locale, project });
+    const trajectoryCount = scopeCounts.reduce((sum, item) => sum + (Number(item.count) || 0), 0);
+    const files = [];
+    const fileIndex = new Map();
+    for (const item of scopeCounts) {
+      for (const file of item.files || []) {
+        const name = String(file.file || file.name || "");
+        if (!name) continue;
+        const current = fileIndex.get(name) || { file: name, count: 0, humanReviewed: 0 };
+        current.count += Number(file.count) || 0;
+        current.humanReviewed += Number(file.humanReviewed) || 0;
+        if (!fileIndex.has(name)) fileIndex.set(name, current);
+      }
+    }
+    files.push(...[...fileIndex.values()].sort((left, right) => right.count - left.count));
+    const champion = skills
+      .filter((item) => item.status === "champion")
+      .sort((left, right) => (Number(right.version) || 0) - (Number(left.version) || 0))[0] || null;
+    const candidates = skills.filter((item) => ["challenger", "draft"].includes(item.status));
+    const assets = resolveGateAssets({
+      goldSets: goldRecords.map((item) => item.payload).filter(Boolean),
+      regressionSuites: suiteRecords.map((item) => item.payload).filter(Boolean),
+      scope
+    });
+    const latest = runs[0] || null;
+    const hasAssets = Boolean(assets.samples.length || assets.cases.length);
+    const scopes = [{
+      scope: { contentType: "general", domain: "general", locale, project },
+      trajectoryCount,
+      files,
+      champion: champion ? { id: champion.id, version: champion.version, name: champion.name } : null,
+      candidateCount: candidates.length,
+      latestCandidate: candidates
+        .sort((left, right) => (Number(right.version) || 0) - (Number(left.version) || 0))
+        .map((item) => ({ id: item.id, version: item.version, status: item.status, name: item.name }))[0] || null,
+      assets: {
+        goldSampleCount: assets.samples.length,
+        regressionCaseCount: assets.cases.length,
+        goldenVersions: assets.goldSetVersions,
+        regressionSuiteVersions: assets.regressionSuiteVersions
+      },
+      gate: latest
+        ? {
+          decision: latest.decision,
+          runId: latest.id,
+          skillId: latest.skillId,
+          createdAt: latest.createdAt,
+          coversCurrentAssets: gateRunCoversAssets(latest, assets)
+        }
+        : hasAssets ? { decision: "not_run", runId: "", skillId: "", createdAt: null, coversCurrentAssets: false } : null
+    }];
+    return json(res, 200, { locale, project, scopes });
+  }
+  if (req.method === "GET" && url.pathname === "/api/learning/evidence") {
+    // 来源证据明细：服务端筛选 + 分页。列表类界面不允许"取一页当全量"，
+    // 所以这里必须同时返回 total，界面写清"已显示 N / 共 M 条"。
+    const locale = assertActiveLocale(url.searchParams.get("locale"));
+    const requestedScope = learningScope({
+      locale,
+      contentType: url.searchParams.get("contentType") || "general",
+      domain: url.searchParams.get("domain") || "general",
+      project: url.searchParams.get("project") || "default"
+    });
+    const queriedScope = learningScopeQuery(requestedScope);
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 20));
+    const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+    const skillId = String(url.searchParams.get("skillId") || "");
+    const kind = String(url.searchParams.get("kind") || "");
+    const file = String(url.searchParams.get("file") || "");
+    const search = String(url.searchParams.get("search") || "").trim().toLowerCase();
+    const [trajectories, skill, batchRuns] = await Promise.all([
+      listLearningTrajectories({ ...queriedScope, limit: 1_000 }),
+      skillId ? getTranslationSkill(skillId) : null,
+      listBatchRuns({ projectId: requestedScope.project, limit: 500 }).catch(() => [])
+    ]);
+    const batchFiles = Object.fromEntries(batchRuns.map((run) => [String(run.batchId), String(run.filename || "")]).filter(([, name]) => name));
+    const fileOf = (item) => String(item.assetRefs?.sourceFile || item.humanDecision?.sourceFile || batchFiles[String(item.batchId || "")] || "");
+    let rows = trajectories;
+    if (skill) {
+      const evidenceIds = new Set((skill.evidenceIds || []).map(String));
+      rows = rows.filter((item) => evidenceIds.has(String(item.id)));
+    }
+    if (kind === "accepted") rows = rows.filter((item) => item.humanDecision?.accepted === true);
+    else if (kind === "review") rows = rows.filter((item) => item.status === "review");
+    else if (kind === "completed") rows = rows.filter((item) => item.status === "completed");
+    if (file) rows = rows.filter((item) => fileOf(item) === file);
+    if (search) {
+      rows = rows.filter((item) => String(item.source || "").toLowerCase().includes(search)
+        || String(item.finalTranslation || "").toLowerCase().includes(search));
+    }
+    const total = rows.length;
+    const page = rows.slice(offset, offset + limit);
+    return json(res, 200, {
+      scope: requestedScope,
+      total,
+      limit,
+      offset,
+      hasMore: offset + page.length < total,
+      items: page.map((item) => ({
+        ...item,
+        sourceFile: fileOf(item),
+        attribution: (() => {
+          try {
+            return summarizeTrajectoryAttribution({
+              id: item.id,
+              scope: learningScope(item),
+              initial: item.qaBefore || {},
+              final: item.qaAfter || {},
+              context: item.contextPack || {},
+              revisions: (item.events || []).filter((event) => /revision/u.test(event.type || "")),
+              humanFeedback: item.humanDecision || {}
+            });
+          } catch { return null; }
+        })()
+      }))
+    });
+  }
   if (req.method === "POST" && url.pathname === "/api/learning/skills/generate") {
     const body = await readJsonBody(req);
     const scope = learningScope(body);
     const champion = await ensureChampionTranslationSkill(scope);
-    const trajectories = await listLearningTrajectories({ ...scope, limit: 100 });
+    // 取 500 条窗口：机器稿会挤在最新的一批里，窗口太小会把人工采纳的老终稿挤出去。
+    const trajectories = await listLearningTrajectories({ ...scope, limit: 500 });
     // 手动与自动提议共用同一实现，保证轨迹筛选、补丁合并与证据隔离完全一致。
     const skill = await proposeChallengerSkill({ scope, champion, trajectories, promptVersion: TRANSLATION_PROMPT_VERSION });
     // 手动成功也要刷新自动提议的记账：否则卡片上会一直挂着"上次自动提议失败"的旧报错，
@@ -3347,6 +5519,8 @@ async function apiHandler(req, res, url) {
         }
       }
     }).catch((error) => console.error("刷新自动提议记账失败（候选已生成，不影响结果）", error));
+    // 新候选生成后就让门禁跟上：否则候选会一直挂着"尚未跑过门禁"，等人去点。
+    triggerQualityGateRefresh(scope, { reason: "candidate-created" });
     return json(res, 201, { skill, candidate: skill });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/evaluate")) {
@@ -3444,6 +5618,32 @@ async function apiHandler(req, res, url) {
     await evaluationJobs.resume(jobId);
     return json(res, 200, { job: evaluationJobs.get(jobId) });
   }
+  if (req.method === "POST" && url.pathname.startsWith("/api/learning/evaluation-jobs/") && url.pathname.endsWith("/retry-failed")) {
+    // 只重跑失败的那几组样本：已成功的样本继续沿用，不用把 27 组全部重新烧一遍模型调用。
+    const jobId = decodeURIComponent(url.pathname.slice("/api/learning/evaluation-jobs/".length, -"/retry-failed".length));
+    const job = evaluationJobs.get(jobId);
+    if (!job) {
+      const error = new Error("未找到评测任务");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (!Number(job.progress?.failed)) return json(res, 409, { error: "这条评测没有失败样本，不需要重试" });
+    const active = evaluationJobs.findActiveForChallenger(job.challengerId);
+    if (active && active.jobId !== jobId) {
+      return json(res, 409, { error: "该候选已有进行中的评测任务，等它跑完再重试失败样本" });
+    }
+    const candidate = await getTranslationSkill(job.challengerId);
+    const [currentChampion] = await listTranslationSkills({ ...learningScope(job.scope), status: "champion", limit: 1 });
+    try {
+      assertCurrentCandidate(candidate, currentChampion);
+    } catch (error) {
+      await evaluationJobs.fail(jobId, `无法重试：${error.message}`);
+      return json(res, 409, { error: `无法重试：${error.message}` });
+    }
+    const retried = await evaluationJobs.retryFailed(jobId);
+    logInfo("只重试失败的评测样本", { jobId, challengerId: job.challengerId, progress: retried?.progress });
+    return json(res, 202, { job: retried });
+  }
   if (req.method === "GET" && url.pathname.startsWith("/api/learning/evaluation-jobs/")) {
     const jobId = decodeURIComponent(url.pathname.slice("/api/learning/evaluation-jobs/".length));
     const job = evaluationJobs.get(jobId);
@@ -3463,46 +5663,58 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     const scope = learningScope(skill);
-    const body = await readJsonBody(req).catch(() => ({}));
     const [currentChampion] = await listTranslationSkills({ ...scope, status: "champion", limit: 1 });
     const [latest] = await listSkillEvaluations({ challengerSkillId: id, limit: 1 });
     assertCurrentCandidate(skill, currentChampion, latest, { requireEvaluation: true });
-    // 发版门禁：固定资产上的回归必须在这个候选上真跑过并通过。人工可以强制放行，
-    // 但放行本身会作为一条带署名和理由的记录留在质量门禁运行表里。
+    // 发版门禁：固定资产上的回归必须在这个候选上真跑过并通过，而且结论要覆盖当前
+    // 资产版本。回归集更新后旧 pass 自动作废——否则拿旧结论放行等于门禁形同虚设。
     const [latestGateRun] = await listQualityRuns({ ...scope, skillId: id, limit: 1 });
-    if (!latestGateRun || latestGateRun.decision !== "pass") {
-      const reviewer = String(body.override?.reviewer || "").trim();
-      const reason = String(body.override?.reason || "").trim();
-      if (!reviewer || !reason) {
-        const error = new Error(latestGateRun
+    const assets = await loadGateAssets(scope);
+    const covers = latestGateRun ? gateRunCoversAssets(latestGateRun, assets) : false;
+    if (!latestGateRun || latestGateRun.decision !== "pass" || !covers) {
+      const staleVersions = latestGateRun
+        ? `门禁跑过的是 Gold ${(latestGateRun.assetVersions?.goldSets || []).join("、") || "无"} / 回归 ${(latestGateRun.assetVersions?.regressionSuites || []).join("、") || "无"}，` +
+          `当前是 Gold ${assets.goldSetVersions.join("、") || "无"} / 回归 ${assets.regressionSuiteVersions.join("、") || "无"}`
+        : "";
+      const error = new Error(latestGateRun
+        ? (covers
           ? `质量门禁未通过（${latestGateRun.decision}），不能晋升：${(latestGateRun.blocking || []).map((item) => item.message).join("；") || "无阻断说明"}`
-          : "该候选尚未在固定 Gold Set 与回归集上跑过质量门禁，不能晋升");
-        error.statusCode = 409;
-        error.details = {
-          gate: latestGateRun ? { decision: latestGateRun.decision, blocking: latestGateRun.blocking, runId: latestGateRun.id } : { decision: "not_run" },
-          hint: "先执行 POST /api/quality/runs，或提供 override.reviewer 与 override.reason 由人工署名放行"
-        };
-        throw error;
-      }
-      await saveQualityRun({
-        ...scope,
-        skillId: id,
-        skillVersion: String(skill.version ?? ""),
-        decision: latestGateRun?.decision || "insufficient",
-        regressionTotal: latestGateRun?.regressionTotal || 0,
-        regressionPassed: latestGateRun?.regressionPassed || 0,
-        regressionPassRate: latestGateRun?.regressionPassRate ?? null,
-        goldTotal: latestGateRun?.goldTotal || 0,
-        goldTermAccuracy: latestGateRun?.goldTermAccuracy ?? null,
-        goldFactAccuracy: latestGateRun?.goldFactAccuracy ?? null,
-        assetVersions: latestGateRun?.assetVersions || {},
-        metrics: latestGateRun?.metrics || {},
-        report: { override: { reviewer, reason, overriddenRunId: latestGateRun?.id || "", at: new Date().toISOString() } },
-        blocking: latestGateRun?.blocking || [{ code: "gate_not_run", message: "晋升时尚未执行质量门禁" }],
-        triggeredBy: `override:${reviewer}`
-      });
+          : `质量门禁结论已过期：资产版本已经变化，需要重跑。${staleVersions}`)
+        : "该候选尚未在固定 Gold Set 与回归集上跑过质量门禁，不能晋升");
+      error.statusCode = 409;
+      error.details = {
+        gate: latestGateRun
+          ? { decision: latestGateRun.decision, blocking: latestGateRun.blocking || [], runId: latestGateRun.id, coversCurrentAssets: covers, assetVersions: latestGateRun.assetVersions || {} }
+          : { decision: "not_run" },
+        currentAssets: { goldSets: assets.goldSetVersions, regressionSuites: assets.regressionSuiteVersions },
+        hint: "先执行 POST /api/quality/runs（面板上的「运行门禁」会自动带上当前候选）"
+      };
+      throw error;
     }
-    return json(res, 200, { skill: await activateTranslationSkill(id), gate: latestGateRun || null });
+    const activated = await activateTranslationSkill(id);
+    // 生效版本换人：同作用域里针对旧生效版本的评测都作废，停掉它们别让客户端去续跑。
+    await failEvaluationJobs(evaluationJobs,
+      (job) => sameEvaluationScope(job.scope, scope) && String(job.championId) !== String(id),
+      "生效版本已更新，本次评测终止");
+    return json(res, 200, { skill: activated, gate: latestGateRun || null });
+  }
+  if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/disable")) {
+    // 规则冲突审查里"停用候选"：只有还没生效的版本能这么处理。
+    const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length, -"/disable".length));
+    const before = await getTranslationSkill(id);
+    if (!before) {
+      const error = new Error("技能版本不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (!["challenger", "draft"].includes(String(before.status || ""))) {
+      const error = new Error("只有候选/草稿可以停用；生效版本请走回滚或新候选");
+      error.statusCode = 409;
+      throw error;
+    }
+    const skill = await updateTranslationSkill(id, { status: "inactive" });
+    await failEvaluationJobs(evaluationJobs, (job) => String(job.challengerId) === String(id), "候选技能已被停用，评测终止");
+    return json(res, 200, { skill });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/reject")) {
     const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length, -"/reject".length));
@@ -3512,11 +5724,21 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
+    // 候选已被拒绝：它身上没跑完的评测不会再续跑，就地判失败（原因写进任务中心）。
+    await failEvaluationJobs(evaluationJobs, (job) => String(job.challengerId) === String(id), "候选技能已被拒绝，评测终止");
     return json(res, 200, { skill });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/learning/skills/") && url.pathname.endsWith("/rollback")) {
     const id = decodeURIComponent(url.pathname.slice("/api/learning/skills/".length, -"/rollback".length));
-    return json(res, 200, await rollbackTranslationSkill(id));
+    const before = await getTranslationSkill(id);
+    const result = await rollbackTranslationSkill(id);
+    // 生效版本换人：同作用域里针对旧生效版本的评测全部作废，别让它们续跑。
+    if (before) {
+      await failEvaluationJobs(evaluationJobs,
+        (job) => sameEvaluationScope(job.scope, learningScope(before)) && String(job.championId) !== String(result?.champion?.id || ""),
+        "生效版本已回滚，本次评测终止");
+    }
+    return json(res, 200, result);
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/learning/skills/")) {
     // 删掉一个不再要的候选版本。生效版本不能删：删了等于生产翻译失去当前策略，
@@ -3528,6 +5750,7 @@ async function apiHandler(req, res, url) {
       return json(res, 409, { error: "当前生效版本不能删除：先启用新版本或回滚，再删掉它" });
     }
     const deleted = await deleteTranslationSkill(id);
+    await failEvaluationJobs(evaluationJobs, (job) => String(job.challengerId) === String(id), "候选技能已被删除，评测终止");
     logInfo("删除翻译技能版本", { id, version: skill.version, status: skill.status });
     return json(res, 200, { deleted, id });
   }
@@ -3682,35 +5905,38 @@ async function apiHandler(req, res, url) {
       note: String(body.note || "")
     });
     const updated = await updateQualityAsset(id, { status: decided.status, approval: decided.approval, payload: decided });
-    return json(res, 200, { asset: updated });
+    // 决定之后立刻按最新证据重建回归集：批准＝入集，拒绝＝从下一版里消失。
+    const scope = learningScope(asset);
+    let regression = null;
+    try {
+      const result = await refreshRegressionSuite(scope, { reason: `candidate-${decided.status}` });
+      regression = { changed: Boolean(result.changed), suiteVersion: result.asset?.version || null, cases: result.stats?.total || 0 };
+      if (decided.status === "approved") triggerQualityGateRefresh(scope, { reason: "candidate-approved" });
+    } catch (error) {
+      console.error("回归候选裁定后重建回归集失败", error);
+    }
+    return json(res, 200, { asset: updated, regression });
   }
   if (req.method === "POST" && url.pathname === "/api/quality/regression-suites") {
     const body = await readJsonBody(req);
     const scope = learningScope(body);
-    const candidates = await listQualityAssets({ ...scope, kind: "regression_candidate", status: "approved", limit: 500 });
-    if (!candidates.length) {
-      const error = new Error("当前作用域没有已批准的回归候选，无法生成回归集");
+    // 案例来源有两处：外部审校回填的改动与人工批准的 QA 失败案例。两者都是派生输入，
+    // 所以这里永远是"按最新证据重建"，不再需要先把候选一条条审批进集。
+    const result = await refreshRegressionSuite(scope, {
+      reason: "manual",
+      changeNote: String(body.changeNote || "").trim() || "按最新证据手动重建"
+    });
+    if (!result.asset) {
+      const error = new Error(`${result.reason}：先把审校后的双语文件回填一次，或在译文质检里采纳失败案例`);
       error.statusCode = 400;
       throw error;
     }
-    const seriesId = String(body.seriesId || "").trim() || `regression:${scope.locale}:${scope.contentType}:${scope.domain}:${scope.project}`;
-    const version = await nextQualityAssetVersion(scope, "regression_suite", seriesId);
-    const payload = normalizeRegressionSuite({
-      id: `${seriesId}#v${version}`,
-      seriesId,
-      version,
-      scope,
-      name: String(body.name || "").trim() || `${scope.locale} 失败回归集`,
-      description: String(body.description || ""),
-      status: body.status === "draft" ? "draft" : "active",
-      enabled: body.status !== "draft",
-      candidates: candidates.map((item) => item.payload),
-      createdAt: new Date().toISOString(),
-      createdBy: String(body.createdBy || "").trim(),
-      changeNote: String(body.changeNote || "")
+    return json(res, result.changed ? 201 : 200, {
+      asset: result.asset,
+      changed: Boolean(result.changed),
+      stats: { externalCases: result.stats?.external || 0, qaCases: result.stats?.qa || 0, total: result.stats?.total || 0 },
+      reason: result.reason
     });
-    const saved = await saveQualityAsset({ kind: "regression_suite", scope, payload, status: payload.status, enabled: payload.enabled });
-    return json(res, 201, { asset: payload.enabled ? await activateQualityAsset(saved) : saved });
   }
   if (req.method === "GET" && url.pathname === "/api/quality/runs") {
     const scope = learningScope({
@@ -3722,6 +5948,135 @@ async function apiHandler(req, res, url) {
     const runs = await listQualityRuns({ ...scope, skillId: url.searchParams.get("skillId") || "", limit: Number(url.searchParams.get("limit")) || 20 });
     return json(res, 200, { scope, runs });
   }
+  if (req.method === "POST" && /^\/api\/quality\/runs\/[^/]+\/review$/u.test(url.pathname)) {
+    // 门禁失败复盘：把"这次又犯的错"按模式归类，给出下一步能做什么。
+    // 报告只写进运行记录的 report.review，不改结论、不改资产。
+    const id = decodeURIComponent(url.pathname.slice("/api/quality/runs/".length, -"/review".length));
+    const body = await readJsonBody(req).catch(() => ({}));
+    const scope = learningScope(body);
+    const target = (await listQualityRuns({ ...scope, limit: 100 })).find((item) => String(item.id) === id) || null;
+    if (!target) {
+      const error = new Error("未找到这次门禁运行");
+      error.statusCode = 404;
+      throw error;
+    }
+    const cases = gateFailureCases(target);
+    if (!cases.length) {
+      const empty = { summary: "这次门禁没有失败样本，不需要复盘", patterns: [], generatedAt: new Date().toISOString(), caseCount: 0, model: "" };
+      await updateQualityRun(id, { report: { review: empty } });
+      return json(res, 200, { runId: id, review: empty, cached: false });
+    }
+    const existing = target.report?.review;
+    if (existing?.patterns && body.force !== true) {
+      return json(res, 200, { runId: id, review: existing, cached: true });
+    }
+    const chunks = chunkGateFailures(cases);
+    const parts = [];
+    const failures = [];
+    for (const chunk of chunks) {
+      try {
+        parts.push(await reviewGateFailuresWithModel({
+          locale: target.locale || scope.locale,
+          scope: { contentType: target.contentType || scope.contentType, domain: target.domain || scope.domain },
+          cases: chunk.cases,
+          part: chunks.length > 1 ? { index: chunk.index, total: chunks.length } : null
+        }));
+      } catch (error) {
+        failures.push(error.message);
+      }
+    }
+    if (!parts.length) {
+      const error = new Error(`复盘失败：${failures[0] || "模型不可用"}`);
+      error.statusCode = 502;
+      throw error;
+    }
+    const merged = mergeGateReviewReports(parts);
+    const review = {
+      ...merged,
+      generatedAt: new Date().toISOString(),
+      model: getProviderConfig().model,
+      caseCount: cases.length,
+      warning: failures[0] || ""
+    };
+    await updateQualityRun(id, { report: { review } });
+    logInfo("门禁失败复盘已生成", { runId: id, cases: cases.length, patterns: review.patterns.length });
+    return json(res, 200, { runId: id, review, cached: false });
+  }
+  if (req.method === "POST" && /^\/api\/quality\/runs\/[^/]+\/terms$/u.test(url.pathname)) {
+    // 复盘里的术语建议 → 术语候选：期望译法取自这次失败案例的人工终稿，
+    // 入库策略与回填时完全一致（终稿逐字确认才自动写入，其余待审核）。
+    const id = decodeURIComponent(url.pathname.slice("/api/quality/runs/".length, -"/terms".length));
+    const body = await readJsonBody(req).catch(() => ({}));
+    const scope = learningScope(body);
+    const target = (await listQualityRuns({ ...scope, limit: 50 })).find((item) => String(item.id) === id);
+    if (!target) {
+      const error = new Error("未找到这次门禁运行");
+      error.statusCode = 404;
+      throw error;
+    }
+    const review = target.report?.review;
+    if (!review?.patterns?.length) {
+      const error = new Error("这次运行还没有复盘报告，先生成复盘");
+      error.statusCode = 400;
+      throw error;
+    }
+    const inputs = termInputsFromReview(review, gateFailureCases(target));
+    if (!inputs.length) {
+      const error = new Error("复盘里没有可转成术语的建议");
+      error.statusCode = 400;
+      throw error;
+    }
+    const written = await persistTermCandidateInputs({
+      locale: target.locale || scope.locale,
+      projectId: scope.project,
+      contentType: target.contentType || scope.contentType,
+      domain: target.domain || scope.domain,
+      batchId: `gate-review:${id}`,
+      filename: `门禁复盘 ${String(target.createdAt || id).slice(0, 19)}`,
+      inputs,
+      sourceLabel: "门禁复盘"
+    });
+    return json(res, 200, { runId: id, candidates: inputs.length, ...written });
+  }
+  if (req.method === "POST" && url.pathname === "/api/learning/skills/from-gate-review") {
+    // 据此改写技能：把复盘报告（含失败原文与人工终稿）交给模型产出策略补丁，
+    // 复用与「生成候选技能」完全相同的净化、合并与落库路径。
+    const body = await readJsonBody(req);
+    const scope = learningScope(body);
+    const runId = String(body.runId || "");
+    const target = runId ? (await listQualityRuns({ ...scope, limit: 50 })).find((item) => String(item.id) === runId) : (await listQualityRuns({ ...scope, limit: 1 }))[0];
+    if (!target) {
+      const error = new Error("未找到这次门禁运行");
+      error.statusCode = 404;
+      throw error;
+    }
+    const review = target.report?.review;
+    if (!review?.patterns?.length) {
+      const error = new Error("这次运行还没有复盘报告，先生成复盘");
+      error.statusCode = 400;
+      throw error;
+    }
+    const [champion] = await listTranslationSkills({ ...scope, status: "champion", limit: 1 });
+    const usableChampion = champion || await ensureChampionTranslationSkill(scope);
+    const cases = gateFailureCases(target);
+    // 证据口径与轨迹提炼一致：凡是喂给模型的东西都登记为证据，之后不会回流进留出集。
+    const patternIds = Array.isArray(body.patternIds) ? body.patternIds.map(String) : null;
+    const selectedPatterns = patternIds?.length ? review.patterns.filter((pattern) => patternIds.includes(String(pattern.id))) : review.patterns;
+    const selectedCaseIds = new Set(selectedPatterns.flatMap((pattern) => pattern.caseIds || []));
+    const evidenceIds = [...new Set(cases
+      .filter((item) => !selectedCaseIds.size || selectedCaseIds.has(item.caseId))
+      .map((item) => String(item.sourceTrajectoryId || ""))
+      .filter(Boolean))];
+    const skill = await proposeChallengerFromGateReview({
+      scope,
+      champion: usableChampion,
+      review: { ...review, patterns: selectedPatterns },
+      cases,
+      evidenceIds,
+      runId: String(target.id)
+    });
+    return json(res, 201, { skill, candidate: skill, runId: String(target.id) });
+  }
   if (req.method === "POST" && url.pathname === "/api/quality/runs") {
     const body = await readJsonBody(req);
     const scope = learningScope(body);
@@ -3731,42 +6086,11 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
-    const assets = await loadGateAssets(scope);
-    const total = assets.samples.length + assets.cases.length;
-    if (!total) {
-      const error = new Error("当前作用域没有启用的 Gold Set 或回归集，先建立固定评测资产");
-      error.statusCode = 400;
-      throw error;
-    }
-    const task = await createBackgroundTask({
-      type: "quality-gate",
-      title: `质量门禁 · ${scope.locale} · ${skill.name || skill.id}`,
-      projectId: scope.project,
-      locale: scope.locale,
-      progress: { total, message: `准备执行 ${total} 个固定样本` }
-    });
-    (async () => {
-      const result = await runQualityGate({
-        scope,
-        skill,
-        triggeredBy: String(body.triggeredBy || "manual"),
-        onProgress: async (index, count) => updateBackgroundTaskProgress(task.id, {
-          progress: { phase: "running", message: `正在执行第 ${index + 1} / ${count} 个固定样本`, percent: Math.round((index / Math.max(count, 1)) * 90), completed: index, total: count }
-        })
-      });
-      const run = await persistQualityRun({ scope, skill, result, triggeredBy: String(body.triggeredBy || "manual") });
-      await updateBackgroundTaskProgress(task.id, {
-        status: "completed",
-        progress: { phase: "completed", message: `门禁结论：${result.gate.decision}`, percent: 100, completed: total, total },
-        payload: { qualityRunId: run.id, decision: result.gate.decision, blocking: result.gate.blocking, skillId: skill.id }
-      });
-    })().catch(async (error) => {
-      console.error("质量门禁后台任务失败", error);
-      await updateBackgroundTaskProgress(task.id, {
-        status: "failed",
-        progress: { phase: "failed", message: `门禁执行失败：${error.message}`, percent: 100 },
-        payload: { error: error.message }
-      }).catch(() => {});
+    const { task, total } = await startQualityGateRun({
+      scope,
+      skill,
+      triggeredBy: String(body.triggeredBy || "manual"),
+      reason: "manual"
     });
     return json(res, 202, { backgroundTaskId: task.id, message: `质量门禁已进入任务中心，将执行 ${total} 个固定样本`, total });
   }
@@ -3783,6 +6107,14 @@ async function apiHandler(req, res, url) {
       listQualityRuns({ ...scope, ...(skillId ? { skillId } : {}), limit: 5 })
     ]);
     const latest = runs[0] || null;
+    const gateCaseLimit = getSettings().learning.gateRegressionCaseLimit;
+    const gateCases = selectGateCases(assets.cases, gateCaseLimit);
+    const coversCurrentAssets = latest ? gateRunCoversAssets(latest, assets) : false;
+    const sources = assets.cases.reduce((carry, item) => {
+      if (item.sourceKind === "external_review") carry.externalReview += 1;
+      else carry.qaApproved += 1;
+      return carry;
+    }, { externalReview: 0, qaApproved: 0 });
     return json(res, 200, {
       scope,
       latestRun: latest,
@@ -3790,8 +6122,21 @@ async function apiHandler(req, res, url) {
       assets: {
         goldSampleCount: assets.samples.length,
         regressionCaseCount: assets.cases.length,
+        regressionCaseTotal: assets.cases.length,
+        gateCaseCount: gateCases.length,
+        gateCaseLimit,
         goldSetVersions: assets.goldSetVersions,
-        regressionSuiteVersions: assets.regressionSuiteVersions
+        regressionSuiteVersions: assets.regressionSuiteVersions,
+        sources,
+        // 结论是否覆盖当前资产：回归集或 Gold Set 出了新版本，旧结论就不能再当证据。
+        coverage: {
+          valid: coversCurrentAssets,
+          reason: !latest
+            ? "尚未运行门禁"
+            : coversCurrentAssets
+              ? "结论覆盖当前 Gold Set 与回归集版本"
+              : "资产版本已更新，需要重跑门禁"
+        }
       },
       // 没跑过就是没证据，前端据此显示"未验证"而不是"通过"。
       status: latest ? latest.decision : "not_run"
@@ -3836,7 +6181,18 @@ async function apiHandler(req, res, url) {
       domain: url.searchParams.get("domain") || "general",
       project: url.searchParams.get("project") || "default"
     });
-    return json(res, 200, { scope, runs: await listTrainingRuns({ ...scope, limit: 50 }) });
+    // 列表要给出总数并支持"加载更多"，不能把取到的第一页当成全部。
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 20));
+    const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+    const all = await listTrainingRuns({ ...scope, limit: 200 });
+    return json(res, 200, {
+      scope,
+      total: all.length,
+      limit,
+      offset,
+      hasMore: offset + limit < all.length,
+      runs: all.slice(offset, offset + limit)
+    });
   }
   if (req.method === "POST" && url.pathname === "/api/training/runs") {
     const body = await readJsonBody(req);
@@ -3972,12 +6328,53 @@ async function apiHandler(req, res, url) {
     // 否则就会回落到"读前 8000 字猜一次"。进度在任务中心与批次页都能看到。
     const contextBriefPending = prepared.segments.length >= CONTEXT_BRIEF_MIN_SEGMENTS;
     if (contextBriefPending) startContextAnalysis(batchId).catch((error) => console.error("[Kami] 语境分析启动失败", error));
-    return json(res, 200, { ...prepared, batchId, originalFile, contextBriefPending });
+    // requiresBrief 交给前端判门禁：阈值只写在服务端一处，页面不再自己记一份 6 段。
+    return json(res, 200, { ...prepared, batchId, originalFile, contextBriefPending, requiresBrief: contextBriefPending });
   }
   if (req.method === "POST" && url.pathname === "/api/batch/run") {
     const body = await readJsonBody(req);
-    const saved = await saveBatchRun({ ...body, locale: assertActiveLocale(body.locale || "zh-CN") });
+    const existing = body.batchId ? await getBatchRun(body.batchId) : null;
+    const saved = await saveBatchRun({ ...existing, ...body, runnerOptions: { ...existing?.runnerOptions, ...body.runnerOptions }, locale: assertActiveLocale(body.locale || "zh-CN") });
     return json(res, 200, saved);
+  }
+  if (req.method === "GET" && url.pathname === "/api/batch/files") {
+    // 翻译界面的"文件列表"：一个待译文件 = 一条批次。把进度、语境分析、QA 待处理、
+    // 人工审校（学习轨迹里 accepted 的条数）与原文件存档情况一次算齐，前端一页就够了。
+    const locale = assertActiveLocale(url.searchParams.get("locale") || ACTIVE_LOCALES[0]);
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
+    const [runs, countByFile] = await Promise.all([
+      listBatchRuns({ locale, projectId, limit: 500 }).catch(() => []),
+      countLearningTrajectoriesByFile({ locale, project: projectId }).catch(() => [])
+    ]);
+    const learningByFile = new Map(countByFile.map((item) => [String(item.sourceFile || "").trim(), item]));
+    const files = runs.map((run) => {
+      const learning = learningByFile.get(String(run.filename || "").trim()) || null;
+      const brief = run.contextBrief || null;
+      const briefStatus = contextAnalysisTasks.has(run.batchId)
+        ? "pending"
+        : brief?.status === "ready" ? "ready" : brief?.status || "none";
+      return {
+        batchId: run.batchId,
+        filename: run.filename,
+        format: run.format,
+        locale: run.locale,
+        projectId: run.projectId || "",
+        runState: run.runState,
+        status: run.status,
+        totalSegments: run.totalSegments,
+        completedSegments: run.completedSegments,
+        failedSegments: run.failedSegments,
+        qaPending: run.qaPending,
+        qualityTiers: run.qualityTiers || null,
+        brief: { status: briefStatus, sections: brief?.sections || 0 },
+        learning: { count: Number(learning?.count) || 0, humanReviewed: Number(learning?.humanReviewed) || 0 },
+        hasOriginal: Boolean(run.runnerOptions?.originalFile),
+        originalBytes: Number(run.runnerOptions?.originalBytes) || 0,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt
+      };
+    });
+    return json(res, 200, { locale, projectId, total: files.length, files });
   }
   if (req.method === "DELETE" && url.pathname.startsWith("/api/tasks/")) {
     // 删除一条翻译批次：正在跑就先中断并等它停下，再删记录；关联的后台任务行、
@@ -4041,6 +6438,7 @@ async function apiHandler(req, res, url) {
     const body = await readJsonBody(req).catch(() => ({}));
     const run = await getBatchRun(batchId);
     if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    if (batchQaWorkers.has(batchId) || batchQaStarts.has(batchId)) return json(res, 409, { error: "AIQA 重试或收尾正在运行，请在当前阶段结束后重试翻译" });
     if (batchWorkers.has(batchId)) return json(res, 200, { batchId, runState: "running", alreadyRunning: true });
     // 语境分析是翻译的前置条件：还没跑完就先把分析跑起来，让前端等在原地，
     // 而不是用"猜出来的语体"先把整批翻掉。
@@ -4061,7 +6459,9 @@ async function apiHandler(req, res, url) {
       segments,
       runnerOptions: {
         ...(run.runnerOptions || {}),
-        qualityTier: resolveManualTier({ qualityTier: body.qualityTier, route: body.route || run.runnerOptions?.route })
+        cancelled: false,
+        translationError: "",
+        qualityTier: resolveManualTier({ qualityTier: body.qualityTier ?? run.runnerOptions?.qualityTier, route: body.route || run.runnerOptions?.route })
       },
       runState: "queued"
     });
@@ -4146,11 +6546,22 @@ async function apiHandler(req, res, url) {
     }
     if (req.method === "POST") {
       // 同上：核对要跑几十次模型调用，不能挂在请求上等。
+      if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后会自动重新生成质量报告" });
       const alreadyRunning = consistencyCheckTasks.has(batchId);
       if (!alreadyRunning) startConsistencyCheck(batchId).catch((error) => console.error("[Kami] 一致性核对任务异常", error));
       return json(res, 202, { batchId, pending: true, alreadyRunning });
     }
     return json(res, 405, { error: "不支持的方法" });
+  }
+  if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/term-survey$/u.test(url.pathname)) {
+    // 手动重跑术语普查：批次跑完会自动跑一次，界面上的「重新普查」走这里。
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const run = await getBatchRun(batchId);
+    if (!run) return json(res, 404, { error: "未找到这条翻译任务" });
+    if (batchQaWorkers.has(batchId)) return json(res, 409, { error: "AIQA 重试正在进行，结束后会自动重新做术语普查" });
+    const alreadyRunning = termSurveyTasks.has(batchId);
+    if (!alreadyRunning) startTermSurvey(batchId).catch((error) => console.error("[Kami] 术语普查任务异常", error));
+    return json(res, 202, { batchId, pending: true, alreadyRunning });
   }
   if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/pause$/u.test(url.pathname)) {
     const batchId = decodeURIComponent(url.pathname.split("/")[4]);
@@ -4187,17 +6598,36 @@ async function apiHandler(req, res, url) {
     const projectId = String(url.searchParams.get("projectId") || "").trim();
     const search = url.searchParams.get("search") || "";
     const limit = Number(url.searchParams.get("limit")) || 200;
-    const batches = type === "autoqa" || type === "background" ? [] : await listBatchRuns({ locale, projectId, status, search, limit });
-    const qaTasks = type === "batch" || type === "background" ? [] : await listQaTasks({ locale, projectId, status, search, limit });
-    const backgroundTasks = type === "batch" || type === "autoqa" ? [] : (await listBackgroundTasks({ projectId, search, limit })).map((task) => ({
+    // 三个区块互不依赖：任一 Directus 查询超时只丢这一块，不再把整个任务中心打成 500。
+    const { values, failures } = await settleReadSections([
+      { key: "batches", fallback: [], load: () => type === "autoqa" || type === "background" ? Promise.resolve([]) : listBatchRuns({ locale, projectId, status, search, limit }) },
+      { key: "qaTasks", fallback: [], load: () => type === "batch" || type === "background" ? Promise.resolve([]) : listQaTasks({ locale, projectId, status, search, limit }) },
+      { key: "backgroundTasks", fallback: [], load: () => type === "batch" || type === "autoqa" ? Promise.resolve([]) : listBackgroundTasks({ projectId, search, limit }) }
+    ]);
+    if (failures.length) {
+      console.warn(`[Kami] 任务中心部分数据读取失败：${failures.map((item) => `${item.key}: ${item.error?.message || item.error}`).join("; ")}`);
+    }
+    const batches = values.batches;
+    const qaTasks = values.qaTasks;
+    const backgroundTasks = values.backgroundTasks.map((task) => ({
       id: task.id,
       type: "background",
       taskType: task.type,
       title: task.title,
+      // 带上项目：任务行要能判断"这条是不是当前项目的"，验收脚本也按它过滤。
+      projectId: task.projectId || "",
       locale: task.locale || "",
       contentType: "general",
       domain: "general",
-      status: task.status === "in_progress" ? "in_progress" : task.status === "review" ? "review" : task.status === "failed" ? "needs_attention" : "completed",
+      // 中断收尾写的是 needs_attention（配合 progress.phase=cancelled/interrupted），
+      // 这里必须原样透出：旧映射把它并进"已完成"，被中断的门禁会被当成正常结束。
+      status: task.status === "in_progress"
+        ? "in_progress"
+        : task.status === "review"
+          ? "review"
+          : ["failed", "needs_attention", "abandoned"].includes(String(task.status))
+            ? "needs_attention"
+            : "completed",
       overallScore: null,
       totalSegments: Number(task.progress?.total) || 0,
       completedSegments: Number(task.progress?.completed) || 0,
@@ -4208,7 +6638,16 @@ async function apiHandler(req, res, url) {
       createdAt: task.createdAt,
       updatedAt: task.updatedAt
     })).filter((item) => (!item.locale || item.locale === locale) && (!status || item.status === status));
-    const merged = [...batches.map((item) => ({ ...item, type: "batch" })), ...qaTasks, ...backgroundTasks]
+    const knownTasks = new Map(backgroundTasks.map((task) => [task.id, task]));
+    const batchTasks = await Promise.all(batches.map(async (item) => {
+      try {
+        return { ...item, type: "batch", workflow: await loadBatchWorkflow(item, knownTasks) };
+      } catch (error) {
+        console.warn(`[Kami] 批次 ${item.batchId} 的阶段进度读取失败：${error.message}`);
+        return { ...item, type: "batch", workflow: null };
+      }
+    }));
+    const merged = [...mergeBatchTaskRows(batchTasks, backgroundTasks), ...qaTasks]
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
       .slice(0, limit);
     return json(res, 200, merged);
@@ -4224,19 +6663,65 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     assertActiveLocale(run.locale);
-    const task = await createBackgroundTask({ type: "batch_export", title: `导出 · ${run.filename}`, locale: run.locale, projectId: run.projectId || "" });
+    /**
+     * 导出方式（批次页与文件列表共用这一个后台端点，任务中心因此永远看得到导出进度）：
+     *   in-place         写回原文件里该在的位置（翻译界面的「写回原文件」）
+     *   translation-only 只要译文
+     *   bilingual        原文 + 译文（文件列表默认）
+     */
+    const requestedMode = ["in-place", "translation-only", "translation", "bilingual"].includes(String(body.mode || ""))
+      ? String(body.mode)
+      : "bilingual";
+    const mode = requestedMode === "translation" ? "translation" : requestedMode;
+    const modeLabel = mode === "translation" || mode === "translation-only" ? "仅译文" : mode === "in-place" ? "写回原文件" : "双语";
+    const requestedFormat = String(body.format || "").trim();
+    const sourceFormat = String(body.sourceFormat || run.format || "").trim();
+    // 批次页可能带着用户刚编辑过的段落：传了就按它导，没传就用服务端已保存的那份。
+    const segments = Array.isArray(body.segments) && body.segments.length ? body.segments : run.segments;
+    let providedOriginal = typeof body.base64 === "string" ? body.base64 : "";
+    if (!providedOriginal && mode !== "translation") {
+      const stored = await readBatchOriginal({ dataRoot: DATA_ROOT, relativePath: run.runnerOptions?.originalFile }).catch(() => null);
+      if (stored) providedOriginal = stored.toString("base64");
+    }
+    // 用户在界面上临时补选的原文件：顺手存档，下次导出就不用再选（与同步导出同一口径）。
+    if (providedOriginal && mode !== "translation" && !run.runnerOptions?.originalFile) {
+      try {
+        const saved = await saveBatchOriginal({
+          dataRoot: DATA_ROOT,
+          batchId: run.batchId,
+          filename: run.filename,
+          buffer: Buffer.from(providedOriginal.replace(/^data:[^;]+;base64,/u, ""), "base64")
+        });
+        await saveBatchRun({ ...run, runnerOptions: { ...(run.runnerOptions || {}), originalFile: saved.relative, originalBytes: saved.bytes } });
+        run.runnerOptions = { ...(run.runnerOptions || {}), originalFile: saved.relative, originalBytes: saved.bytes };
+        logInfo("已把用户补选的原文件存档到批次", { batchId: run.batchId, file: saved.relative });
+      } catch (error) {
+        console.error(`[Kami] 补存原文件失败（批次 ${run.batchId}）：${error.message}`);
+      }
+    }
+    const task = await createBackgroundTask({ type: "batch_export", title: `导出${modeLabel} · ${run.filename}`, locale: run.locale, projectId: run.projectId || "" });
     (async () => {
       try {
         await updateBackgroundTaskProgress(task.id, { progress: { phase: "exporting", message: "正在合并导出文件", percent: 40, completed: 0, total: 1 } });
-        const exported = await exportBatchDocument({ filename: run.filename, locale: run.locale, format: "task-xlsx", segments: run.segments });
+        const exported = await exportBatchDocument({
+          filename: String(body.filename || run.filename),
+          locale: run.locale,
+          format: requestedFormat || (mode === "translation" ? "translation" : "bilingual"),
+          sourceFormat,
+          mode: mode === "in-place" ? "in-place" : mode === "translation-only" ? "translation-only" : "",
+          segments,
+          structure: body.structure ?? run.structure ?? null,
+          runnerOptions: run.runnerOptions || null,
+          base64: providedOriginal || undefined
+        });
         await updateBackgroundTaskProgress(task.id, { progress: { phase: "saving", message: "正在保存文件", percent: 85, completed: 0, total: 1 } });
         const directory = join(DATA_ROOT, "exports");
         await mkdir(directory, { recursive: true });
-        await writeFile(join(directory, `${task.id}.xlsx`), Buffer.from(exported.base64, "base64"));
+        await writeFile(join(directory, `${task.id}${exported.extension}`), Buffer.from(exported.base64, "base64"));
         await updateBackgroundTaskProgress(task.id, {
           status: "completed",
           progress: { phase: "completed", message: "导出完成", percent: 100, completed: 1, total: 1 },
-          payload: { filename: exported.filename, mimeType: exported.mimeType, bytes: exported.bytes, downloadUrl: `/api/export-tasks/${task.id}/download` }
+          payload: { filename: exported.filename, extension: exported.extension, mimeType: exported.mimeType, bytes: exported.bytes, mode: requestedMode, downloadUrl: `/api/export-tasks/${task.id}/download` }
         });
       } catch (error) {
         await updateBackgroundTaskProgress(task.id, {
@@ -4248,6 +6733,31 @@ async function apiHandler(req, res, url) {
     })().catch((error) => console.error("批次导出后台任务失败", error));
     return json(res, 202, { backgroundTaskId: task.id, message: "导出已进入任务中心后台处理" });
   }
+  if (req.method === "GET" && url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/original")) {
+    // 导出原文件：原样给回上传时那份（不解压、不改动）。
+    const batchId = decodeURIComponent(url.pathname.slice("/api/tasks/".length, -"/original".length));
+    const run = await getBatchRun(batchId);
+    const projectId = String(url.searchParams.get("projectId") || "");
+    if (!run || (run.projectId && run.projectId !== projectId)) {
+      const error = new Error("未找到该翻译任务");
+      error.statusCode = 404;
+      throw error;
+    }
+    const buffer = await readBatchOriginal({ dataRoot: DATA_ROOT, relativePath: run.runnerOptions?.originalFile });
+    if (!buffer) {
+      const error = new Error("这条批次没有留存原文件（早期导入或上传时存档失败）；可以重新上传该文件后再试");
+      error.statusCode = 404;
+      throw error;
+    }
+    const extension = extname(run.filename || "").toLowerCase();
+    res.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-length": buffer.length,
+      "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(run.filename || `original${extension}`)}`
+    });
+    res.end(buffer);
+    return true;
+  }
   if (req.method === "GET" && url.pathname.startsWith("/api/export-tasks/") && url.pathname.endsWith("/download")) {
     const id = decodeURIComponent(url.pathname.slice("/api/export-tasks/".length, -"/download".length));
     const task = await getBackgroundTask(id);
@@ -4257,7 +6767,12 @@ async function apiHandler(req, res, url) {
       throw error;
     }
     try {
-      const body = await readFile(join(DATA_ROOT, "exports", `${id}.xlsx`));
+      const extension = task.payload.extension || extname(task.payload.filename || "").toLowerCase() || ".xlsx";
+      const body = await readFile(join(DATA_ROOT, "exports", `${id}${extension}`)).catch((error) => {
+        // 旧版导出结果未返回 extension，文件曾保存为 `${id}undefined`；原样兼容读取。
+        if (error.code !== "ENOENT") throw error;
+        return readFile(join(DATA_ROOT, "exports", `${id}undefined`));
+      });
       res.writeHead(200, {
         "content-type": task.payload.mimeType || "application/octet-stream",
         "content-length": body.length,
@@ -4279,7 +6794,10 @@ async function apiHandler(req, res, url) {
       error.statusCode = 404;
       throw error;
     }
-    workbenchSessionMonitor?.release(backgroundTaskHoldId(id));
+    // 还在本进程里跑的任务（例如门禁）行删了、循环还在收尾：这时放开 hold 会让
+    // "最后一个页面已关闭"的收尾判定立刻成立，工作台会在执行中途自己停掉。
+    // 让执行方在 finally 里自己释放。
+    if (!runningBackgroundTasks.has(id)) workbenchSessionMonitor?.release(backgroundTaskHoldId(id));
     return json(res, 200, { ok: true });
   }
   if (req.method === "POST" && /^\/api\/background-tasks\/[^/]+\/cancel$/u.test(url.pathname)) {
@@ -4309,6 +6827,45 @@ async function apiHandler(req, res, url) {
     if (!task) return json(res, 404, { error: "后台任务不存在" });
     return json(res, 200, { ...task, taskType: task.type });
   }
+  if (req.method === "POST" && /^\/api\/batch\/run\/[^/]+\/retry-qa$/u.test(url.pathname)) {
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const body = await readJsonBody(req);
+    const run = await getBatchRun(batchId);
+    if (!run || !body.projectId || run.projectId !== String(body.projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    const existing = batchQaWorkers.get(batchId);
+    if (existing) return json(res, 202, { batchId, backgroundTaskId: existing.taskId, alreadyRunning: true });
+    if (batchQaStarts.has(batchId)) {
+      const task = await batchQaStarts.get(batchId);
+      return json(res, 202, { batchId, backgroundTaskId: task.id, alreadyRunning: true });
+    }
+    if (["queued", "running"].includes(run.runState)) return json(res, 409, { error: "本轮翻译仍在进行，请等翻译结束后仅重试未完成的 AIQA" });
+    const segmentIds = Array.isArray(body.segmentIds) ? body.segmentIds.map(String) : null;
+    const count = run.segments.filter((segment) => isIncompleteBatchQa(segment) && (!segmentIds || segmentIds.includes(String(segment.id)))).length;
+    if (!count) return json(res, 200, { batchId, total: 0, message: "没有未完成的 AIQA" });
+    const worker = batchWorkers.get(batchId);
+    const waiting = Boolean(worker && (!worker.translationComplete || worker.followupActive)) || consistencyCheckTasks.has(batchId) || termSurveyTasks.has(batchId);
+    const starting = (async () => {
+      const task = await createBackgroundTask({ type: "batch_qa_retry", title: `重试 AIQA · ${run.filename}`, locale: run.locale, projectId: run.projectId,
+        progress: { phase: "queued", message: waiting ? "已排队：等待当前报告 / 普查结束后仅重试未完成的 AIQA" : `准备重试 ${count} 段未完成的 AIQA`, percent: 0, completed: 0, total: count }, payload: { batchId } });
+      await attachBatchWorkflowTask(batchId, "aiQa", task.id);
+      startBatchQaRetry(batchId, task.id, segmentIds);
+      return task;
+    })();
+    batchQaStarts.set(batchId, starting);
+    try {
+      const task = await starting;
+      return json(res, 202, { batchId, backgroundTaskId: task.id, total: count, waiting });
+    } finally { if (batchQaStarts.get(batchId) === starting) batchQaStarts.delete(batchId); }
+  }
+  if (req.method === "GET" && /^\/api\/batch\/run\/[^/]+\/status$/u.test(url.pathname)) {
+    const batchId = decodeURIComponent(url.pathname.split("/")[4]);
+    const run = await getBatchRun(batchId);
+    const projectId = String(url.searchParams.get("projectId") || "");
+    if (!run || (projectId && run.projectId !== projectId)) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    return json(res, 200, { batchId, runState: run.runState, workflow: await loadBatchWorkflow(run),
+      qualityReportAt: run.qualityReport?.report?.generatedAt || "", termSurveyAt: run.runnerOptions?.termSurvey?.generatedAt || "",
+      qaCompletedAt: run.runnerOptions?.qaCompletedAt || "" });
+  }
   if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/")) {
     const batchId = decodeURIComponent(url.pathname.slice("/api/batch/run/".length));
     const run = await getBatchRun(batchId);
@@ -4329,9 +6886,15 @@ async function apiHandler(req, res, url) {
     const segments = run.segments.map((segment) => {
       const qaRun = latestRunBySource.get(segment.source);
       if (!qaRun) return segment;
+      const savedQa = segment.result?.aiQa;
+      // 同原文可出现多次；独立 QA 记录只能补详情，不能覆盖该句段已保存的执行结论。
+      if (savedQa && (qaRun.finalTranslation !== segment.translation
+        || qaRun.score !== (segment.result.qaScore ?? savedQa.score ?? null)
+        || qaRun.status !== savedQa.status || qaRun.fallbackReason !== (savedQa.fallbackReason || ""))) return segment;
       const references = (qaRun.references || []).filter((item) => item.kind !== "qa_case");
       const qaCases = (qaRun.references || []).filter((item) => item.kind === "qa_case");
-      const matches = matchTerms(segment.source, assets, { contentType: run.contentType, domain: run.domain, ...deliveryContext(run, segment.source) });
+      // 复用翻译时保存的 matches：几千条术语时重算一段要数秒，轮询会占满事件循环。
+      const matches = resolveSegmentMatches(segment, assets, { contentType: run.contentType, domain: run.domain, ...deliveryContext(run, segment.source) });
       return {
         ...segment,
         translation: segment.translation || qaRun.finalTranslation,
@@ -4346,7 +6909,20 @@ async function apiHandler(req, res, url) {
         }
       };
     });
-    return json(res, 200, { ...run, segments });
+    // requiresBrief 由服务端算：前端只负责"没就绪就把开始按钮置灰"，不再自己记阈值。
+    return json(res, 200, {
+      ...run,
+      segments,
+      // 术语普查界面数据：模型建议 / 机器稿实际用法 / 人工终稿 / 术语库登记 / 回填处理结果。
+      workflow: await loadBatchWorkflow({ ...run, segments }),
+      termSurvey: buildTermSurveyView({
+        survey: run.runnerOptions?.termSurvey || null,
+        segments,
+        termAssets: assets.terms || []
+      }),
+      requiresBrief: segments.length >= CONTEXT_BRIEF_MIN_SEGMENTS,
+      contextBriefPending: contextAnalysisTasks.has(run.batchId)
+    });
   }
   if (req.method === "POST" && url.pathname === "/api/style-guides/import") {
     const body = await readJsonBody(req);
@@ -4374,18 +6950,24 @@ async function apiHandler(req, res, url) {
     const project = body.projectId ? await getProject(String(body.projectId)) : null;
     const projectSettings = project?.settings || null;
     const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
-    const [memories, memoryLibraries] = await Promise.all([
-      getMemories(locale, { domain: "general", limit: -1, projectId: body.projectId || "" }),
-      body.projectId ? getResourceLibraries(String(body.projectId), { kind: "translation_memory" }) : []
-    ]);
-    const enabledMaster = memoryLibraries.find((library) => library.enabled && library.role === "master");
-    const masterMemories = enabledMaster
-      ? memories.filter((memory) => memory.libraryId === enabledMaster.id).map((memory) => ({ ...memory, libraryRole: "master", libraryName: enabledMaster.name, libraryPriority: enabledMaster.priority }))
-      : [];
     const segments = Array.isArray(body.segments) ? body.segments.filter((segment) => segment?.selected !== false) : [];
     // 参考译例只算一次：原来每段都对整库（本项目 8000+ 条）跑一次排序，67 段就要几分钟，
     // 用户点"导出"后只看到按钮变灰、最后什么都等不到。文档级参考足够驱动导出前的规则检查。
     const documentText = segments.map((segment) => segment?.source || "").join("\n").slice(0, 8_000);
+    const memoryLibraries = body.projectId ? await getResourceLibraries(String(body.projectId), { kind: "translation_memory" }) : [];
+    const enabledMaster = memoryLibraries.find((library) => library.enabled && library.role === "master");
+    // 只取主 TM 的候选，粗筛的候选池也按同一个库收窄。
+    const memories = enabledMaster
+      ? await getMemoryCandidates(locale, {
+        projectId: body.projectId || "",
+        source: documentText,
+        limit: getSettings().retrieval.candidatePoolSize,
+        libraryIds: [enabledMaster.id]
+      })
+      : [];
+    const masterMemories = enabledMaster
+      ? memories.filter((memory) => memory.libraryId === enabledMaster.id).map((memory) => ({ ...memory, libraryRole: "master", libraryName: enabledMaster.name, libraryPriority: enabledMaster.priority }))
+      : [];
     const translationReferences = documentText
       ? rankTranslationMemories(documentText, masterMemories, {
         limit: 20,
@@ -4398,7 +6980,8 @@ async function apiHandler(req, res, url) {
       })
       : [];
     const issues = segments.flatMap((segment, index) => {
-      const matches = matchTerms(segment.source || "", assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
+      // 导出预检与批次详情同一个坑：逐段重算术语匹配，几千条术语时整页会卡几十秒。
+      const matches = resolveSegmentMatches(segment, assets, { contentType: body.contentType || "general", domain: body.domain || "general", ...deliveryContext(body, segment.source || "") });
       return runQa({ source: segment.source || "", translation: segment.translation || "", matches, translationReferences, locale, contentType: body.contentType || "general", projectSettings }).map((issue) => ({ ...issue, segmentId: segment.id || `seg-${index + 1}`, segmentIndex: index + 1 }));
     });
     const blocking = issues.filter((issue) => ["error", "critical"].includes(issue.severity));
@@ -4657,7 +7240,7 @@ async function evaluateQaFile(body = {}) {
   const contentType = body.contentType && body.contentType !== "auto" ? body.contentType : "general";
   const domain = concreteDomain(body.domain, { contentType });
   const styleProfile = await getProjectStyleProfile(locale, { projectId });
-  const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { projectId, contentType, domain, limit: 12 })).slice(0, 6);
+  const evidence = positiveEvidenceOnly(await sampleStyleEvidence(locale, { projectId, contentType, domain, limit: 12, positiveOnly: true })).slice(0, 6);
   const evaluated = await evaluateQaPairList({
     pairs, assets, locale, contentType, domain, projectSettings, styleProfile,
     references: [], machineDrafts: [], qaCases: [], evidence,
@@ -4787,12 +7370,20 @@ async function evaluateQaBatch(batchId, projectId = "") {
     const projectId = String(body.projectId || "");
     const styleProfile = await getProjectStyleProfile(locale, { projectId });
     const queryEmbedding = await embedSource(cleanSource);
-    const narrowedMemories = narrowByDomain(await getMemories(locale, { projectId, contentType: scopeContentType, domain, limit: -1, scopeFallback: true }), domain);
+    // 粗筛候选再精排：语体/领域只影响排序加成，粗筛也不按它们过滤。
+    const narrowedMemories = narrowByDomain(await getMemoryCandidates(locale, {
+      projectId,
+      source: cleanSource,
+      limit: getSettings().retrieval.candidatePoolSize,
+      scopeFallback: true,
+      contentType: scopeContentType,
+      domain
+    }), domain);
     const narrowedQaCases = narrowByDomain(await getQaCases(locale, { projectId, contentType: scopeContentType, domain, limit: -1, scopeFallback: true }), domain);
     domainResolution.relaxedRetrieval = narrowedMemories.relaxed || narrowedQaCases.relaxed;
     const references = rankTranslationMemories(cleanSource, narrowedMemories.items, { limit: 5, queryEmbedding, contentTags: classification.contentTags || [], locale, contentType: scopeContentType, domain, projectId, campaign: String(body.campaign || ""), ...deliveryContext(body, cleanSource) });
     const qaCases = rankQaCases(cleanSource, narrowedQaCases.items, { limit: 3, queryEmbedding, contentType: scopeContentType, domain });
-    const evidence = positiveEvidenceOnly(await getStyleEvidence(locale, { projectId, contentType: scopeContentType, domain, limit: 12 })).slice(0, 6);
+    const evidence = positiveEvidenceOnly(await sampleStyleEvidence(locale, { projectId, contentType: scopeContentType, domain, limit: 12, positiveOnly: true })).slice(0, 6);
     // 只有人工批准的译例能充当"标准"；机器译文另开一档，仅供一致性参考。
     const { approved: approvedReferences, machineDrafts } = splitReferenceAuthority(references);
     const sourceSegments = splitQaSegments(cleanSource);
@@ -4992,11 +7583,86 @@ async function evaluateQaBatch(batchId, projectId = "") {
     }
     return json(res, 200, { ok: true });
   }
+  if (req.method === "GET" && url.pathname === "/api/reference-folders") {
+    const projectId = String(url.searchParams.get("projectId") || "").trim();
+    if (!projectId) return json(res, 400, { error: "缺少项目" });
+    const folders = await referenceFoldersForProject(projectId);
+    const { items: documents } = await listReferenceDocuments({ projectId, limit: 0 });
+    const counts = new Map();
+    for (const document of documents) {
+      const id = String(document.folderId || "");
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    return json(res, 200, {
+      items: folders.map((folder) => ({ ...folder, documentCount: counts.get(folder.id) || 0 }))
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/api/reference-folders/ensure") {
+    const body = await readJsonBody(req);
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId) return json(res, 400, { error: "缺少项目" });
+    const parentId = String(body.parentId || "").trim();
+    const paths = Array.isArray(body.paths) ? body.paths : [];
+    const created = [];
+    for (const path of paths) {
+      const result = await ensureReferenceFolderPath({ projectId, parentId, path });
+      created.push({ path, folderId: result.folderId });
+    }
+    return json(res, 200, { items: created, folders: await referenceFoldersForProject(projectId) });
+  }
+  if (req.method === "POST" && url.pathname === "/api/reference-folders") {
+    const body = await readJsonBody(req);
+    const projectId = String(body.projectId || "").trim();
+    if (!projectId) return json(res, 400, { error: "缺少项目" });
+    const parentId = String(body.parentId || "").trim();
+    const name = normalizeReferenceFolderName(body.name);
+    await assertReferenceFolderNameAvailable({ projectId, parentId, name });
+    return json(res, 201, { folder: await saveReferenceFolder({ projectId, parentId, name }) });
+  }
+  if (req.method === "PATCH" && /^\/api\/reference-folders\/[^/]+$/u.test(url.pathname)) {
+    const id = decodeURIComponent(url.pathname.slice("/api/reference-folders/".length));
+    const folder = await getReferenceFolder(id);
+    if (!folder) return json(res, 404, { error: "文件夹不存在" });
+    const body = await readJsonBody(req);
+    const projectId = folder.projectId;
+    const parentId = body.parentId === undefined ? folder.parentId : String(body.parentId || "").trim();
+    const name = body.name === undefined ? folder.name : normalizeReferenceFolderName(body.name);
+    if (parentId === id || referenceFolderDescendantIds(await referenceFoldersForProject(projectId), id).includes(parentId)) {
+      return json(res, 409, { error: "不能把文件夹移动到自身或它的子文件夹里" });
+    }
+    await assertReferenceFolderNameAvailable({ projectId, parentId, name, exceptId: id });
+    return json(res, 200, { folder: await saveReferenceFolder({ ...folder, name, parentId, id }) });
+  }
+  if (req.method === "DELETE" && /^\/api\/reference-folders\/[^/]+$/u.test(url.pathname)) {
+    const id = decodeURIComponent(url.pathname.slice("/api/reference-folders/".length));
+    const folder = await getReferenceFolder(id);
+    if (!folder) return json(res, 404, { error: "文件夹不存在" });
+    const folders = await referenceFoldersForProject(folder.projectId);
+    const folderIds = [folder.id, ...referenceFolderDescendantIds(folders, folder.id)];
+    const { items: documents } = await listReferenceDocuments({ projectId: folder.projectId, folderIds, limit: 0 });
+    const indexing = documents.filter((document) => document.status === "indexing");
+    if (indexing.length) return json(res, 409, { error: `文件夹里有 ${indexing.length} 份资料正在导入，请等完成后再删除` });
+    const task = await createBackgroundTask({
+      type: "reference_folder_delete",
+      title: `删除资料文件夹：${folder.name}`,
+      locale: ACTIVE_LOCALES[0],
+      projectId: folder.projectId,
+      progress: { phase: "queued", message: "等待删除", percent: 1, completed: 0, total: documents.length + folderIds.length }
+    });
+    runReferenceFolderDeleteInBackground({ taskId: task.id, folder }).catch((error) => console.error("[Kami] 参考资料文件夹删除失败", error));
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, folderId: folder.id });
+  }
   if (req.method === "GET" && url.pathname === "/api/references") {
     const projectId = String(url.searchParams.get("projectId") || "").trim();
+    const folderId = String(url.searchParams.get("folderId") || "").trim();
+    const hasFolderFilter = url.searchParams.has("folderId");
+    const recursive = url.searchParams.get("recursive") === "1";
+    const folderIds = hasFolderFilter ? await referenceFolderScopeIds(projectId, folderId, { recursive }) : null;
     const result = await listReferenceDocuments({
       projectId,
       libraryId: String(url.searchParams.get("libraryId") || "").trim(),
+      folderIds,
+      folderId: hasFolderFilter ? folderId : "",
       status: String(url.searchParams.get("status") || "").trim(),
       search: String(url.searchParams.get("search") || "").trim(),
       offset: Number(url.searchParams.get("offset")) || 0,
@@ -5008,32 +7674,105 @@ async function evaluateQaBatch(batchId, projectId = "") {
       libraries: projectId ? await getResourceLibraries(projectId).catch(() => []) : []
     });
   }
+  if (req.method === "POST" && url.pathname === "/api/references/file") {
+    return json(res, 202, await startReferenceUpload({ body: null, params: url.searchParams, req }));
+  }
   if (req.method === "POST" && url.pathname === "/api/references") {
+    const body = await readJsonBody(req, { limitBytes: IMPORT_BODY_BYTES });
+    return json(res, 202, await startReferenceUpload({ body, params: new URLSearchParams(), req }));
+  }
+  if (req.method === "POST" && url.pathname === "/api/references/describe-batch") {
     const body = await readJsonBody(req);
     const projectId = String(body.projectId || "").trim();
-    if (!projectId) return json(res, 400, { error: "请先选择项目" });
-    const filename = String(body.filename || "").trim();
-    const base64 = String(body.base64 || "");
-    if (!filename || !base64) return json(res, 400, { error: "缺少文件内容" });
+    if (!projectId) return json(res, 400, { error: "缺少项目" });
+    const candidatesById = new Map();
+    const requestedFolderIds = Array.isArray(body.folderIds) ? [...new Set(body.folderIds.map((id) => String(id).trim()).filter(Boolean))] : [];
+    if (requestedFolderIds.length) {
+      const folders = await referenceFoldersForProject(projectId);
+      const expanded = new Set();
+      for (const folderId of requestedFolderIds) {
+        const folder = folders.find((item) => item.id === folderId);
+        if (!folder) throw Object.assign(new Error("文件夹不存在或不属于当前项目"), { statusCode: 404 });
+        expanded.add(folder.id);
+        for (const descendantId of referenceFolderDescendantIds(folders, folder.id)) expanded.add(descendantId);
+      }
+      const scoped = await listReferenceDocuments({ projectId, folderIds: [...expanded], limit: 0 });
+      for (const document of scoped.items) candidatesById.set(document.id, document);
+    }
+    if (Array.isArray(body.documentIds) && body.documentIds.length) {
+      const ids = [...new Set(body.documentIds.map(String))].slice(0, 500);
+      const documents = await Promise.all(ids.map((id) => getReferenceDocument(id)));
+      for (const document of documents) {
+        if (document && document.projectId === projectId) candidatesById.set(document.id, document);
+      }
+    }
+    let candidates = [...candidatesById.values()];
+    if (!requestedFolderIds.length && !(Array.isArray(body.documentIds) && body.documentIds.length)) {
+      const folderId = String(body.folderId || "").trim();
+      const folderIds = body.folderId !== undefined
+        ? await referenceFolderScopeIds(projectId, folderId, { recursive: body.recursive !== false })
+        : null;
+      candidates = (await listReferenceDocuments({
+        projectId,
+        folderIds,
+        status: "ready",
+        search: String(body.search || "").trim(),
+        limit: 0
+      })).items;
+    }
+    const documents = candidates.filter((document) => document.status === "ready" && !document.ingestReport?.description);
+    if (!documents.length) return json(res, 409, { error: "选中范围内没有需要生成描述的可用资料（已有描述的会跳过）" });
     const task = await createBackgroundTask({
-      type: "reference_ingest",
-      title: `参考资料导入：${filename}`,
+      type: "reference_describe",
+      title: `资料 AI 扫描 · ${documents.length} 份`,
       locale: ACTIVE_LOCALES[0],
       projectId,
-      progress: { phase: "queued", message: "等待解析", percent: 1 }
+      progress: { phase: "queued", message: "等待 AI 扫描", percent: 1, completed: 0, total: documents.length }
     });
-    runReferenceIngestInBackground({
+    runReferenceDescribeBatchInBackground({ taskId: task.id, documents }).catch((error) => console.error("[Kami] 资料 AI 扫描失败", error));
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, total: documents.length, skipped: candidates.length - documents.length });
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/plan")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/plan".length));
+    const document = await getReferenceDocument(id);
+    if (!document) return json(res, 404, { error: "资料不存在" });
+    // stage 一定要给：前端靠它判断"还在预扫 / 等人确认 / 已经跑完了"，空字符串会被当成还在跑。
+    const stage = document.ingestReport?.stage
+      || (document.status === "ready" ? "ready" : document.status === "failed" ? "failed" : document.status === "disabled" ? "disabled" : "");
+    return json(res, 200, { documentId: id, plan: document.ingestReport?.plan || null, stage });
+  }
+  if (req.method === "POST" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/ingest")) {
+    // 确认后的正式导入：vision=true 全量识图，false 只读文字。原文件一直在磁盘上，不用重传。
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/ingest".length));
+    const body = await readJsonBody(req).catch(() => ({}));
+    const document = await getReferenceDocument(id);
+    if (!document) return json(res, 404, { error: "资料不存在" });
+    if (!document.ingestReport?.sourcePath) return json(res, 409, { error: "这份资料没有留存的源文件，无法重新导入，请重新上传" });
+    const task = await createBackgroundTask({
+      type: "reference_ingest",
+      title: `参考资料导入：${document.sourceFile || document.name}`,
+      locale: ACTIVE_LOCALES[0],
+      projectId: document.projectId,
+      progress: { phase: "queued", message: body.vision === false ? "等待解析（只读文字）" : "等待解析", percent: 1 }
+    });
+    enqueueReferenceIngest({
       taskId: task.id,
-      projectId,
-      libraryId: String(body.libraryId || "").trim(),
-      name: String(body.name || filename.replace(/\.[^.]+$/u, "")).trim(),
-      kind: String(body.kind || "other"),
-      contentType: String(body.contentType || "").trim(),
-      domain: String(body.domain || "").trim(),
-      filename,
-      base64
-    }).catch((error) => console.error("[Kami] 参考资料导入失败", error));
-    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, filename });
+      documentId: id,
+      visionMode: body.vision === false ? "none" : "all",
+      autoScan: body.autoScan !== false
+    });
+    return json(res, 202, { taskId: task.id, backgroundTaskId: task.id, documentId: id, vision: body.vision !== false, autoScan: body.autoScan !== false });
+  }
+  if (req.method === "PATCH" && /^\/api\/references\/[^/]+$/u.test(url.pathname)) {
+    const id = decodeURIComponent(url.pathname.slice("/api/references/".length));
+    const document = await getReferenceDocument(id);
+    if (!document) return json(res, 404, { error: "资料不存在" });
+    const body = await readJsonBody(req);
+    const folderId = String(body.folderId || "").trim();
+    await assertReferenceFolder(document.projectId, folderId);
+    const updated = await updateReferenceDocument(id, { folderId });
+    referenceIndex.invalidate(document.projectId);
+    return json(res, 200, { document: updated });
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/references/") && url.pathname.endsWith("/chunks")) {
     const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/chunks".length));
@@ -5071,20 +7810,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
     const id = decodeURIComponent(url.pathname.slice("/api/references/".length, -"/describe".length));
     const document = await getReferenceDocument(id);
     if (!document) return json(res, 404, { error: "资料不存在" });
-    const { items } = await listReferenceChunks({ documentId: id, limit: 200 });
-    const text = items
-      .slice()
-      .sort((left, right) => (Number(left.ordinal) || 0) - (Number(right.ordinal) || 0))
-      .map((chunk) => String(chunk.text || "").trim())
-      .filter(Boolean)
-      .join("\n")
-      .slice(0, 6_000);
-    if (!text) return json(res, 409, { error: "这份资料没有可读正文（可能导入失败或被停用），无法生成描述" });
-    const description = await describeReferenceWithModel({ name: document.name, kind: document.kind, text });
-    const updated = await updateReferenceDocument(id, {
-      ingestReport: { ...(document.ingestReport || {}), description, describedAt: new Date().toISOString() }
-    });
-    referenceIndex.invalidate(document.projectId);
+    const { description, document: updated } = await describeReferenceDocumentById(document);
     logInfo("参考资料描述已生成", { id, name: document.name, description });
     return json(res, 200, { id, description, document: updated });
   }
@@ -5100,7 +7826,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
   if (req.method === "DELETE" && url.pathname.startsWith("/api/references/")) {
     const id = decodeURIComponent(url.pathname.slice("/api/references/".length));
     const document = await getReferenceDocument(id);
-    const removed = await deleteReferenceDocument(id);
+    const removed = await deleteReferenceDocumentCompletely(id);
     if (!removed) return json(res, 404, { error: "资料不存在" });
     referenceIndex.invalidate(document?.projectId || "");
     return json(res, 200, { ok: true });
@@ -5159,20 +7885,29 @@ async function evaluateQaBatch(batchId, projectId = "") {
     const maxRevisions = Math.min(4, Math.max(0, effectiveStrategyValue(
       translationSkill.strategy?.qa?.maximumRevisionAttempts, factory.qa.maximumRevisionAttempts, tuning.quality.maxRevisionAttempts)));
     const delivery = deliveryContext(body, body.source);
-    const matches = matchTerms(body.source, assets, {
+    const matches = await matchTermsForTranslation(body.source, assets, {
       contentType: classification.contentType,
       domain,
       ...delivery
     });
     const queryEmbedding = await embedSource(body.source);
-    const [storedStyleProfile, localeQaCases, localeMemories, userProfile, projectLibraries] = await Promise.all([
+    const [storedStyleProfile, localeQaCases, userProfile, projectLibraries] = await Promise.all([
       // 统一降级链：同语体同领域 → 同语体通用 → 通用同领域 → 通用×通用。
       getProjectStyleProfile(locale, { projectId }),
       getQaCases(locale, { projectId, contentType: classification.contentType, domain, limit: -1, scopeFallback: true }),
-      getMemories(locale, { contentType: classification.contentType, domain, limit: -1, scopeFallback: true, projectId }),
       getUserProfile(locale, { projectId }),
       projectId ? getResourceLibraries(projectId, { kind: "translation_memory" }) : []
     ]);
+    // 候选先粗筛再精排：整库 8 万条时，这一段的代价是每段十几秒 / 369MB。
+    const localeMemories = await getMemoryCandidates(locale, {
+      projectId,
+      source: body.source,
+      limit: getSettings().retrieval.candidatePoolSize,
+      scopeFallback: true,
+      contentType: classification.contentType,
+      domain,
+      libraryIds: projectLibraries.filter((library) => library.enabled).map((library) => library.id)
+    });
     const librariesById = new Map(projectLibraries.map((library) => [library.id, library]));
     const scopedMemories = localeMemories.map((memory) => {
       const library = librariesById.get(memory.libraryId);
@@ -5568,17 +8303,43 @@ try {
   await initializeStore();
   await recoverInterruptedBatchWorkers();
   await recoverInterruptedImportTasks();
+  await recoverLegacyReferenceIngestTasks();
 } catch (error) {
   console.error(`[Kami] 启动失败\n${error.message}`);
   process.exit(1);
 }
 
 // 技能评测后台任务队列：同一时刻只跑一个评测，逐对持久化检查点，重启后可续跑。
+/**
+ * 评测任务 → 任务中心 / 通知中心。
+ *
+ * 评测以前只活在学习中心自己那一栏：跑完没有通知、失败也没有记录，用户只能盯着
+ * 按钮文字。桥接到后台任务以后，任务中心能看到它的进度与结论，通知中心也会在
+ * 完成 / 失败时提醒（失败的原因就写在任务详情里）。
+ */
+const syncLearningJobTask = createLearningJobTaskBridge({
+  createTask: (input) => createBackgroundTask(input),
+  updateTask: (id, update) => updateBackgroundTaskProgress(id, update),
+  patchJob: (jobId, fields, job) => (String(job?.kind || "") === "style-evaluation" ? styleEvaluationJobs : evaluationJobs).patch(jobId, fields),
+  describe: async (job) => {
+    const scope = job?.scope || {};
+    if (String(job?.kind || "") === "style-evaluation") {
+      const profiles = await styleProfilesInScope(scope).catch(() => []);
+      const draft = profiles.find((profile) => String(profile.id) === String(job.challengerId));
+      return draft ? `风格评测 · ${draft.name || `v${draft.version}`}` : "风格评测";
+    }
+    const candidate = await getTranslationSkill(job?.challengerId).catch(() => null);
+    return candidate ? `候选技能评测 · ${candidate.name || `v${candidate.version}`}` : "候选技能评测";
+  },
+  onError: (error) => console.warn(`[Kami] 评测任务同步到任务中心失败（不影响评测）：${error?.message || error}`)
+});
+
 const evaluationJobs = createEvaluationJobRunner({
   benchmark: benchmarkTranslationSkill,
   createSnapshot: ({ scope, trajectories }) => createBenchmarkSnapshot(scope, trajectories, { promptVersion: TRANSLATION_PROMPT_VERSION }),
   jobsDirectory: join(DATA_ROOT, "learning", "jobs"),
   concurrency: 5,
+  onChanged: syncLearningJobTask,
   deps: {
     getSkill: getTranslationSkill,
     getCurrentChampion: async (scope) => (await listTranslationSkills({ ...scope, status: "champion", limit: 1 }))[0] || null,
@@ -5618,6 +8379,7 @@ const styleEvaluationJobs = createEvaluationJobRunner({
   concurrency: 5,
   kind: "style-evaluation",
   guardrails: STYLE_PROMOTION_GUARDRAILS,
+  onChanged: syncLearningJobTask,
   deps: {
     getSkill: resolveStyleVariant,
     getCurrentChampion: async (scope) => {
@@ -5649,6 +8411,25 @@ const styleEvaluationJobs = createEvaluationJobRunner({
 });
 await styleEvaluationJobs.initialize();
 
+/**
+ * 候选被拒绝 / 删除、生效版本被换掉以后，指向它的评测任务永远续跑不了。
+ *
+ * 以前这类任务会停在 interrupted，客户端每轮轮询都去续跑一次、撞一次 409，
+ * 用户只看到一句"评测无法续跑"，任务中心里还挂着一条永远跑不完的"进行中"。
+ * 现在在源头上就把它判失败：状态、原因都落到任务中心与通知中心。
+ */
+async function failEvaluationJobs(runner, predicate, reason) {
+  for (const job of runner.list()) {
+    if (["completed", "failed"].includes(String(job.status))) continue;
+    if (!predicate(job)) continue;
+    await runner.fail(job.jobId, reason);
+  }
+}
+
+function sameEvaluationScope(jobScope, scope) {
+  return ["locale", "contentType", "domain", "project"].every((field) => String(jobScope?.[field] ?? "") === String(scope?.[field] ?? ""));
+}
+
 // 自动候选生成：人工批准终稿达到阈值后，在后台提议 challenger；评测与激活仍走人工闸门。
 const autoProposer = createAutoProposer({
   // 设置面板里的值；环境变量已在 settings-store 里优先合并过。
@@ -5664,7 +8445,7 @@ const autoProposer = createAutoProposer({
       const skills = await listTranslationSkills({ ...scope, limit: 20 });
       return skills.filter((item) => ["challenger", "draft"].includes(item.status));
     },
-    listTrajectories: async (scope) => listLearningTrajectories({ ...scope, limit: 200 }),
+    listTrajectories: async (scope) => listLearningTrajectories({ ...scope, limit: 500 }),
     selectTrajectories: (trajectories) => selectProposalTrajectories(trajectories),
     propose: ({ scope, champion, trajectories }) => proposeChallengerSkill({ scope, champion, trajectories, promptVersion: TRANSLATION_PROMPT_VERSION }),
     recordMetadata: async (championId, existingMetadata, autoPropose) => {
@@ -5686,12 +8467,25 @@ const conflictReports = new Map();
 const conflictScanner = createConflictScanner({
   deps: {
     loadScopeRules: async (scope) => {
-      const [styleProfile, translationSkill, userProfile] = await Promise.all([
+      const [styleProfile, champion, activeProfile, allSkills] = await Promise.all([
         getProjectStyleProfile(scope.locale, { projectId: scope.project }),
         ensureChampionTranslationSkill(scope),
-        getUserProfile(scope.locale, { projectId: scope.project })
+        getUserProfile(scope.locale, { projectId: scope.project }),
+        listTranslationSkills({ ...scope, limit: 200 })
       ]);
-      return { styleProfile, translationSkill, userProfile };
+      // 人工指南与译者画像是同一个槽位（同一时间只有一个 active）：
+      // 人工导入的整篇指南按名字/证据数识别，其余才当译者画像。
+      const isGuide = Boolean(activeProfile)
+        && (/^风格指南/u.test(String(activeProfile.name || "")) || (Number(activeProfile.evidenceCount) || 0) === 0);
+      const skills = (allSkills.length ? allSkills : [champion])
+        .filter((item) => item && ["champion", "challenger", "draft"].includes(String(item.status || "")));
+      return {
+        humanGuide: isGuide ? activeProfile : null,
+        styleProfile,
+        skills,
+        translationSkill: champion,
+        userProfile: isGuide ? null : activeProfile
+      };
     },
     adjudicate: (input) => adjudicateRuleConflictsWithModel(input),
     recordReport: async (report) => {
@@ -5701,7 +8495,8 @@ const conflictScanner = createConflictScanner({
 });
 
 function learningScopeKeyOf(scope) {
-  return [scope.locale, scope.contentType, scope.domain, scope.project || "default"].join("\u0000");
+  // 语体/领域只作参考：冲突报告按「语言 × 项目」结算。
+  return [scope.locale, scope.project || "default"].join("\u0000");
 }
 
 function triggerConflictScan(scope) {
@@ -5734,12 +8529,10 @@ function rescheduleConflictScan() {
     try {
       for (const project of await getProjects()) {
         for (const locale of ACTIVE_LOCALES) {
+          // 项目级扫描：一份规范 + 全部技能版本 + 人工指南/画像，扫一次就够。
           const { styleProfiles } = await listStyleProfiles(locale, "active", { projectId: project.id });
-          for (const profile of styleProfiles) {
-            await conflictScanner.scan(learningScope({
-              locale, contentType: profile.contentType, domain: profile.domain || "general", project: project.id
-            }));
-          }
+          if (!styleProfiles.length) continue;
+          await conflictScanner.scan(learningScope({ locale, project: project.id }));
         }
       }
     } catch (error) {
@@ -5755,6 +8548,8 @@ function triggerAutoProposal(scope) {
     .then((result) => {
       if (result?.proposed) {
         console.log(`已自动生成候选技能：${result.candidateId}（${result.reason}）`);
+        // 候选是自动长出来的，门禁也要自动跟上，否则"批准启用"会被未跑门禁拦住。
+        triggerQualityGateRefresh(scope, { reason: "auto-candidate" });
         return;
       }
       // 阈值未到/窗口防抖/已有候选等是正常不提议；其他原因按异常记录，避免被静默吞掉。
@@ -5873,15 +8668,59 @@ async function recoverInterruptedBatchWorkers() {
 async function recoverInterruptedImportTasks() {
   const tasks = await listBackgroundTasks({ limit: 500 });
   for (const task of tasks) {
-    if (!["term_import", "asset_import"].includes(task.type)) continue;
+    if (!["term_import", "asset_import", "reference_ingest", "reference_describe", "reference_folder_delete"].includes(task.type)) continue;
     if (task.status !== "in_progress") continue;
+    const referenceTask = ["reference_ingest", "reference_describe", "reference_folder_delete"].includes(task.type);
     await saveBackgroundTask({
       ...task,
       status: "needs_attention",
-      progress: { ...(task.progress || {}), phase: "interrupted", message: "服务重启导致中断，可在任务中心继续导入" },
-      payload: { ...(task.payload || {}), resumable: true }
+      progress: {
+        ...(task.progress || {}),
+        phase: "interrupted",
+        message: referenceTask ? "服务重启导致中断，请在参考资料页重试" : "服务重启导致中断，可在任务中心继续导入"
+      },
+      payload: { ...(task.payload || {}), resumable: !referenceTask || task.type === "reference_ingest" }
     });
     console.log(`[Kami] 已标记被服务重启打断的后台导入：${task.title}`);
+  }
+}
+
+/**
+ * 旧版参考资料导入会在图片过多时停在 review，等一个已经取消的确认弹窗。
+ * 这里按资料的真实状态收尾：已导入的直接完成，未导入的改为可操作的失败提示。
+ */
+async function recoverLegacyReferenceIngestTasks() {
+  const tasks = await listBackgroundTasks({ limit: 500 });
+  for (const task of tasks) {
+    if (task.type !== "reference_ingest" || task.status !== "review") continue;
+    const documentId = String(task.payload?.documentId || "");
+    const document = documentId ? await getReferenceDocument(documentId).catch(() => null) : null;
+    if (document?.status === "ready") {
+      await updateBackgroundTaskProgress(task.id, {
+        status: "completed",
+        progress: {
+          phase: "completed",
+          message: "旧版等待确认已由后续导入完成取代",
+          percent: 100,
+          completed: Number(document.chunkCount) || 0,
+          total: Number(document.chunkCount) || 0
+        },
+        payload: { ...(task.payload || {}), superseded: true }
+      });
+      continue;
+    }
+    await updateBackgroundTaskProgress(task.id, {
+      status: "needs_attention",
+      progress: {
+        phase: "legacy_confirmation_cancelled",
+        message: "旧版等待确认已取消；新的上传会按已选识图模式直接导入",
+        percent: 100,
+        completed: 0,
+        total: Number(task.progress?.total) || 0
+      },
+      payload: { ...(task.payload || {}), documentId, requiresReimport: true }
+    });
+    console.log(`[Kami] 已校准旧版参考资料待确认任务：${task.title}`);
   }
 }
 
@@ -5905,6 +8744,12 @@ const HOST = process.env.KAMI_HOST || "127.0.0.1";
 server.listen(PORT, HOST, () => {
   console.log(`Kami Localization Workbench: http://127.0.0.1:${PORT}`);
   rescheduleConflictScan();
+  // 启动先扫一遍：上一次被重启打断的任务不该在任务中心永远转圈。
+  sweepStaleBackgroundTasks({ reason: "startup" }).catch((error) => console.error(`[Kami] 清理残留后台任务失败：${error.message}`));
+  const staleSweepTimer = setInterval(() => {
+    sweepStaleBackgroundTasks({ reason: "interval" }).catch(() => {});
+  }, BACKGROUND_TASK_STALE_MS);
+  staleSweepTimer.unref?.();
   if (AUTO_SHUTDOWN_ENABLED) {
     workbenchSessionMonitor = new WorkbenchSessionMonitor({
       closeGraceMs: WORKBENCH_CLOSE_GRACE_MS,

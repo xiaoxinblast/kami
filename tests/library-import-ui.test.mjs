@@ -3,13 +3,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 test("术语库和风格指导页面提供各自的上传入口", async () => {
-  const [html, script] = await Promise.all([
+  const [html, script, styles] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
-    readFile(new URL("../public/app.js", import.meta.url), "utf8")
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8")
   ]);
   assert.match(html, /id="termLibraryFile"[^>]+accept="\.xlsx,\.csv"/u);
   assert.match(html, /id="styleGuideFile"[^>]+accept="\.txt,\.md,\.docx"/u);
   assert.match(html, /id="styleGuideImportButton"/u);
+  // 上传入口不能只渲染成一行灰字：要有上传图标 + 加粗动作文字 + 虚线边框样式。
+  assert.match(html, /class="library-file-button"[\s\S]{0,220}class="upload-mark"/u);
+  assert.match(html, /class="library-file-cta">点击选择风格指南文件</u);
+  assert.match(styles, /\.library-file-button \{ display: inline-flex;[\s\S]{0,200}border: 1px dashed/u);
+  assert.match(styles, /\.library-file-button\.has-file \{/u);
   assert.match(script, /setImportFiles\(files, \{ intent: "terms", returnView: "assets" \}\)/u);
   assert.match(script, /api\("\/api\/style-guides\/import"/u);
   assert.doesNotMatch(html, /name="enforcement"/u);
@@ -53,11 +59,14 @@ test("记忆库支持批量选择文件导入，并可选择是否写入风格�
   assert.match(script, /state\.memoryImportFiles = \[\.\.\.event\.target\.files\]/u);
   // 逐文件预检：进度按文件推进，单个文件坏了不影响其余文件。
   assert.match(script, /for \(const \[index, file\] of files\.entries\(\)\)/u);
-  assert.match(script, /本地预检识别 \$\{preview\.candidates\.length\} 条双语 TM（来自 \$\{files\.length - failures\.length\} \/ \$\{files\.length\} 个文件/u);
+  assert.match(script, /本地预检识别 \$\{preview\.total\} 条双语 TM（来自 \$\{files\.length - failures\.length\} \/ \$\{files\.length\} 个文件/u);
   // 提交走后台任务，页面按任务进度显示进度条。
   // 提交走后台任务，并且带上"导入到哪个库"（库页行内导入的目标库）。
-  assert.match(script, /candidates, styleEvidence: state\.memoryStyleEvidence, tmLibraryId: state\.memoryImportTargetId \|\| "", background: true \}\)/u);
+  // 候选本体留在服务端：提交只回批次号 + 取消勾选的序号，避免 8 万条来回搬运。
+  assert.match(script, /batches, filename: preview\.filename, styleEvidence: state\.memoryStyleEvidence, tmLibraryId: state\.memoryImportTargetId \|\| "", background: true \}\)/u);
+  assert.match(script, /deselected: \[\.\.\.preview\.deselected\]/u);
   assert.match(html, /id="memoryImportProgress"/u);
+  assert.match(html, /id="memoryImportMore"/u);
 });
 
 test("术语库列表显示原表注释", async () => {
@@ -94,8 +103,9 @@ test("预检逐个文件进行，并在界面上显示清单、进度与失败�
   // 请求根本没到服务端时，不能只把浏览器的 Failed to fetch 丢给用户；
   // 同时要把原始信息写进日志（界面提示只闪 3 秒，事后要能查）。
   assert.match(script, /const message = generic\s*\n\s*\? "连不上工作台：可能正在重启或已停止，请刷新页面后重试"/u);
-  assert.match(script, /recordClientLog\("error", `请求未送达：\$\{options\.method \|\| "GET"\} \$\{path\}`, detail\)/u);
-  assert.match(script, /throw new Error\(message\);/u);
+  // 离线错误先冒泡到 api() 外层的统一处理：那里按 offline 记日志，并把友好文案抛给界面。
+  assert.match(script, /throw Object\.assign\(new Error\(message\), \{ offline: true, detail \}\);/u);
+  assert.match(script, /recordClientLog\("error", `请求未送达：\$\{options\.method \|\| "GET"\} \$\{path\}`, String\(error\.detail \|\| ""\)\)/u);
   // 取文件时不能再用"人工 TM 默认勾选"覆盖用户刚改过的勾选状态。
   assert.match(script, /state\.assetImportStyleEvidence = styleEvidence \?\? readImportStyleEvidence\(\);/u);
   assert.doesNotMatch(script, /styleEvidence \?\? \(resolvedPurpose === "tm" \? true/u);

@@ -1,3 +1,4 @@
+import { summarizeBatchSegments } from "../public/batch-status.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ACTIVE_LOCALES, assertLocale } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
@@ -5,6 +6,7 @@ import { fetchWithTimeout } from "./provider.mjs";
 import { sanitizeProjectSettings } from "./project-config.mjs";
 import { memoryMatchAttempts, memorySourceHash, normalizeMemoryText, styleEvidenceMatch } from "./translation-memory.mjs";
 import { scopeFallbackChain, scopeRankOf } from "./scope-fallback.mjs";
+import { summarizeQualityTiers } from "./quality-tier.mjs";
 
 /** 按降级链挑第一份命中的风格规范（同语体同领域 → … → 通用×通用）。 */
 function pickProfileByScope(items = [], { contentType = "general", domain = "general" } = {}) {
@@ -76,6 +78,12 @@ function config() {
 
 /** 只读请求遇到连接层失败时的尝试次数（写请求永远只发一次，避免重复写入）。 */
 const DIRECTUS_READ_ATTEMPTS = 3;
+/**
+ * 核心读接口的超时。默认 10 秒在 Directus 冷缓存/大查询时会直接 500；
+ * 任务中心、批次详情、术语库这些页面级读取给 30 秒，失败时还有上层降级兜底。
+ * 单条/批量写入仍用各自更宽松的显式超时，不跟这个值。
+ */
+const DIRECTUS_READ_TIMEOUT_MS = 30_000;
 
 async function request(path, { method = "GET", body, timeoutMs = 10_000 } = {}) {
   const { baseUrl, token } = config();
@@ -127,16 +135,35 @@ async function request(path, { method = "GET", body, timeoutMs = 10_000 } = {}) 
   }
 }
 
-async function createItemsInChunks(path, records, { onProgress } = {}) {
+/**
+ * Directus 压力保护（503 `Service "api" is unavailable. Under pressure.`）是"我很忙"：
+ * 请求在进库之前就被挡回来了，重试不会写入两次。大表导入要发几百个 POST，
+ * 一次 503 就把整批 8 万条判死刑实在不值，所以这里对 503 退避重试。
+ * 其它错误（400/500/连接断开）照旧一次就抛：那些可能已经写进去了。
+ */
+const BULK_WRITE_BUSY_RETRIES = 3;
+
+function isDirectusBusy(error) {
+  const text = `${error?.message || ""} ${error?.cause?.message || ""}`;
+  return Number(error?.status) === 503 || /Under pressure|Service "api" is unavailable/u.test(text);
+}
+
+async function createItemsInChunks(path, records, { onProgress, maxItems } = {}) {
   const saved = [];
-  for (const chunk of chunkDirectusRecords(records)) {
-    try {
-      const result = await request(path, { method: "POST", body: chunk, timeoutMs: DIRECTUS_BULK_WRITE_TIMEOUT_MS });
-      saved.push(...(Array.isArray(result) ? result : [result]));
-      onProgress?.({ completed: saved.length, total: records.length });
-    } catch (error) {
-      error.createdItems = saved;
-      throw error;
+  for (const chunk of chunkDirectusRecords(records, maxItems ? { maxItems } : undefined)) {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const result = await request(path, { method: "POST", body: chunk, timeoutMs: DIRECTUS_BULK_WRITE_TIMEOUT_MS });
+        saved.push(...(Array.isArray(result) ? result : [result]));
+        onProgress?.({ completed: saved.length, total: records.length });
+        break;
+      } catch (error) {
+        if (!isDirectusBusy(error) || attempt > BULK_WRITE_BUSY_RETRIES) {
+          error.createdItems = saved;
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_500 * attempt));
+      }
     }
   }
   return saved;
@@ -146,6 +173,19 @@ async function updateItemsInChunks(path, records) {
   for (const chunk of chunkDirectusRecords(records)) {
     await request(path, { method: "PATCH", body: chunk, timeoutMs: DIRECTUS_BULK_WRITE_TIMEOUT_MS });
   }
+}
+
+/**
+ * 按主键批量删除。Directus 支持 `DELETE /items/:collection` + body `{"keys":[...]}`（一次 204），
+ * 比"逐条 DELETE"快两个数量级——替换上一批 7 万行审计时，逐条删要几分钟。
+ */
+async function deleteItemsByKeys(collection, keys, { chunkSize = 5_000 } = {}) {
+  const ids = (Array.isArray(keys) ? keys : []).map((key) => String(key || "")).filter(Boolean);
+  if (!ids.length) return 0;
+  for (const chunk of chunkList(ids, chunkSize)) {
+    await request(`/items/${collection}`, { method: "DELETE", body: { keys: chunk }, timeoutMs: DIRECTUS_BULK_WRITE_TIMEOUT_MS });
+  }
+  return ids.length;
 }
 
 async function candidateIdsForBatch(batchId) {
@@ -284,33 +324,14 @@ export async function initializeDirectusStore() {
  * contentType / domain 传 "general"（默认）表示不按语体/领域收窄，语义与读取后的 JS 过滤一致；
  * search 同时匹配日语原文与简体中文译文。
  */
-function applyMemoryFilters(params, { projectId = "", contentType = "general", domain = "general", exactContentType = false, scopeFallback = false, search = "" } = {}) {
+/**
+ * 记忆检索的过滤条件。语体与领域**不再参与过滤**（只作参考与排序加权），
+ * 因此这里只按项目收窄；调用方传来的 contentType/domain 仅用于计算 scopeRank。
+ */
+function applyMemoryFilters(params, { projectId = "", search = "" } = {}) {
   let group = 0;
   const nextGroup = () => `filter[_and][${group++}]`;
   if (projectId) params.set(`${nextGroup()}[project_id][_eq]`, String(projectId));
-  if (scopeFallback) {
-    // 统一降级链：同语体或通用语体都要取回来，具体优先级由 scopeRank 决定。
-    const types = [...new Set([contentType || "general", "general"])];
-    if (types.length > 1 || types[0] !== "general") params.set(`${nextGroup()}[content_type][_in]`, types.join(","));
-    const domains = [...new Set([domain || "general", "general"])];
-    if (domains.length > 1 || domains[0] !== "general") params.set(`${nextGroup()}[domain][_in]`, domains.join(","));
-  } else if (contentType && contentType !== "general") {
-    const base = nextGroup();
-    if (exactContentType) params.set(`${base}[content_type][_eq]`, String(contentType));
-    else {
-      params.set(`${base}[_or][0][content_type][_eq]`, String(contentType));
-      params.set(`${base}[_or][1][content_type][_eq]`, "general");
-    }
-    if (domain && domain !== "general") {
-      const domainBase = nextGroup();
-      params.set(`${domainBase}[_or][0][domain][_eq]`, String(domain));
-      params.set(`${domainBase}[_or][1][domain][_eq]`, "general");
-    }
-  } else if (domain && domain !== "general") {
-    const base = nextGroup();
-    params.set(`${base}[_or][0][domain][_eq]`, String(domain));
-    params.set(`${base}[_or][1][domain][_eq]`, "general");
-  }
   if (search) {
     const base = nextGroup();
     params.set(`${base}[_or][0][source][_icontains]`, String(search));
@@ -319,20 +340,12 @@ function applyMemoryFilters(params, { projectId = "", contentType = "general", d
   return params;
 }
 
-export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, offset = 0, search = "", exactContentType = false, scopeFallback = false, projectId = "" } = {}) {
-  const collection = memoryCollectionFor(locale);
-  const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(1000, limit));
-  // 按 date_created 排序，不用 date_updated：date_updated 允许为空，而 Postgres 的 DESC
-  // 把 NULL 排在最前面，会把真正最新的记忆挤出列表。
-  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_created", fields: "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,entry_id,entry_key,previous_source,next_source,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,project_id,library_id,campaign,platform,region,audience,superseded_by,date_created,date_updated" });
-  const start = Math.max(0, Math.trunc(Number(offset)) || 0);
-  if (start > 0) params.set("offset", String(start));
-  applyMemoryFilters(params, { projectId, contentType, domain, exactContentType, scopeFallback, search });
-  const items = await request(`/items/${collection}?${params}`);
-  return items.filter((item) =>
-    (scopeFallback || !contentType || (exactContentType ? item.content_type === contentType : contentType === "general" || item.content_type === contentType || item.content_type === "general"))
-    && (!domain || domain === "general" || item.domain === domain || item.domain === "general")
-  ).map((item) => ({
+/** 记忆行的字段清单：列表、按 id 取回两条路径共用，避免字段口径漂移。 */
+const DIRECTUS_MEMORY_FIELDS = "id,source,target,domain,content_type,content_tags,channel,style_profile_id,quality_status,qa_score,provenance,source_file,batch_id,source_row,entry_id,entry_key,previous_source,next_source,embedding,asset_tier,version,version_group_id,lifecycle_status,valid_from,valid_to,project,project_id,library_id,campaign,platform,region,audience,superseded_by,date_created,date_updated";
+
+/** Directus 行 → 内部记忆对象。 */
+function mapDirectusMemory(item, { contentType = "general", domain = "general", scopeFallback = false } = {}) {
+  return {
     // 降级链上的档位：0 同语体同领域 … 3 通用×通用，排序时由它决定加成。
     ...(scopeFallback ? { scopeRank: scopeRankOf({ contentType: item.content_type, domain: item.domain }, { contentType, domain }) } : {}),
     id: item.id,
@@ -370,7 +383,63 @@ export async function getDirectusMemories(locale, { contentType = "general", dom
     embedding: item.embedding || null,
     createdAt: item.date_created,
     updatedAt: item.date_updated
+  };
+}
+
+export async function getDirectusMemories(locale, { contentType = "general", domain = "general", limit = 500, offset = 0, search = "", exactContentType = false, scopeFallback = false, projectId = "" } = {}) {
+  const collection = memoryCollectionFor(locale);
+  const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(1000, limit));
+  // 按 date_created 排序，不用 date_updated：date_updated 允许为空，而 Postgres 的 DESC
+  // 把 NULL 排在最前面，会把真正最新的记忆挤出列表。
+  const params = new URLSearchParams({ limit: directusLimit, sort: "-date_created", fields: DIRECTUS_MEMORY_FIELDS });
+  const start = Math.max(0, Math.trunc(Number(offset)) || 0);
+  if (start > 0) params.set("offset", String(start));
+  applyMemoryFilters(params, { projectId, contentType, domain, exactContentType, scopeFallback, search });
+  // 语体/领域不再过滤：同项目内所有记忆都进入候选池，是否同范围只影响排序加成。
+  const items = await request(`/items/${collection}?${params}`);
+  return items.map((item) => mapDirectusMemory(item, { contentType, domain, scopeFallback }));
+}
+
+/**
+ * 候选索引用的精简行：只要 id / 原文 / 库归属。
+ * 不取 embedding（每行 2KB，8 万条就是 160MB+），索引里只留选候选需要的东西。
+ */
+export async function listDirectusMemoryIndexRows(locale, { projectId = "" } = {}) {
+  const collection = memoryCollectionFor(locale);
+  // 固定按 id 排序：候选同分也按 id 打破平局，增量索引与全量重建必须给出同一批候选。
+  const params = new URLSearchParams({ limit: "-1", sort: "id", fields: "id,source,library_id,quality_status,project_id" });
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  else params.set("filter[project_id][_empty]", "true");
+  const items = await request(`/items/${collection}?${params}`, { timeoutMs: 120_000 });
+  return items.map((item) => ({
+    id: item.id,
+    source: item.source || "",
+    libraryId: item.library_id || "",
+    qualityStatus: item.quality_status || "provisional",
+    projectId: item.project_id || ""
   }));
+}
+
+/**
+ * 按 id 取回候选行（含向量）：候选池只有几百条，比整库传输小两个数量级。
+ *
+ * 每批 200 个 id：1000 条候选只要 5 次往返，而 40 条一批要 25 次——
+ * 真机上后者是这段的主要耗时（每次 20–40ms）。id 是 UUID，200 个约 7.4KB URL，Directus 能收。
+ */
+export async function getDirectusMemoriesByIds(locale, ids = [], { contentType = "general", domain = "general", scopeFallback = false, chunkSize = 200 } = {}) {
+  const collection = memoryCollectionFor(locale);
+  const unique = [...new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "")).filter(Boolean))];
+  if (!unique.length) return [];
+  const items = [];
+  for (const chunk of chunkList(unique, chunkSize)) {
+    const params = new URLSearchParams({
+      limit: "-1",
+      fields: DIRECTUS_MEMORY_FIELDS,
+      filter: JSON.stringify({ id: { _in: chunk } })
+    });
+    items.push(...await request(`/items/${collection}?${params}`));
+  }
+  return items.map((item) => mapDirectusMemory(item, { contentType, domain, scopeFallback }));
 }
 
 /**
@@ -384,6 +453,50 @@ export async function countDirectusMemories(locale, options = {}) {
   const rows = await request(`/items/${collection}?${params}`);
   const value = rows?.[0]?.count?.id ?? rows?.[0]?.count ?? 0;
   return Number(value) || 0;
+}
+
+/**
+ * 一条翻译记忆的写入体。单条写入与批量写入共用同一份口径，
+ * 避免"批量导入时少写一个字段"这类只有大批量才暴露的偏差。
+ */
+function directusMemoryBody(input, { source, target, embedding }) {
+  return {
+    source,
+    target,
+    entry_id: String(input.entryId || ""),
+    // 条目身份：memoQ 的 x-mmq-context 等稳定 ID，用于"改稿重导覆盖原行"。
+    entry_key: String(input.entryKey || ""),
+    // 原文哈希：按"原文 + 译文"去重时用它查询，长度恒定，不受句段长短影响。
+    source_hash: memorySourceHash(source),
+    previous_source: String(input.previousSource || ""),
+    next_source: String(input.nextSource || ""),
+    domain: input.domain || "general",
+    content_type: input.contentType || "general",
+    content_tags: input.contentTags || [],
+    channel: input.channel || "",
+    style_profile_id: input.styleProfileId || "",
+    quality_status: input.qualityStatus || "provisional",
+    qa_score: Number(input.qaScore) || null,
+    provenance: input.provenance || "kami-workbench",
+    source_file: input.sourceFile || "",
+    batch_id: input.batchId || "",
+    source_row: Number(input.sourceRow) || null,
+    asset_tier: input.assetTier || (input.qualityStatus === "human_approved" ? "formal" : input.qualityStatus === "machine_verified" ? "working" : "candidate"),
+    version: Math.max(1, Number(input.version) || 1),
+    version_group_id: input.versionGroupId || "",
+    lifecycle_status: input.lifecycleStatus || "active",
+    valid_from: input.validFrom || null,
+    valid_to: input.validTo || null,
+    project: input.project || "",
+    project_id: input.projectId || "",
+    library_id: input.libraryId || "",
+    campaign: input.campaign || "",
+    platform: input.platform || "",
+    region: input.region || "",
+    audience: input.audience || "",
+    superseded_by: input.supersededBy || "",
+    ...(embedding ? { embedding } : {})
+  };
 }
 
 export async function saveDirectusMemory(locale, input) {
@@ -425,47 +538,134 @@ export async function saveDirectusMemory(locale, input) {
     }
     if (existing[0]) break;
   }
-  const body = {
-    source,
-    target,
-    entry_id: String(input.entryId || ""),
-    // 条目身份：memoQ 的 x-mmq-context 等稳定 ID，用于"改稿重导覆盖原行"。
-    entry_key: String(input.entryKey || ""),
-    // 原文哈希：按"原文 + 译文"去重时用它查询，长度恒定，不受句段长短影响。
-    source_hash: memorySourceHash(source),
-    previous_source: String(input.previousSource || ""),
-    next_source: String(input.nextSource || ""),
-    domain: input.domain || "general",
-    content_type: input.contentType || "general",
-    content_tags: input.contentTags || [],
-    channel: input.channel || "",
-    style_profile_id: input.styleProfileId || "",
-    quality_status: input.qualityStatus || "provisional",
-    qa_score: Number(input.qaScore) || null,
-    provenance: input.provenance || "kami-workbench",
-    source_file: input.sourceFile || "",
-    batch_id: input.batchId || "",
-    source_row: Number(input.sourceRow) || null,
-    asset_tier: input.assetTier || (input.qualityStatus === "human_approved" ? "formal" : input.qualityStatus === "machine_verified" ? "working" : "candidate"),
-    version: Math.max(1, Number(input.version) || 1),
-    version_group_id: input.versionGroupId || "",
-    lifecycle_status: input.lifecycleStatus || "active",
-    valid_from: input.validFrom || null,
-    valid_to: input.validTo || null,
-    project: input.project || "",
-    project_id: input.projectId || "",
-    library_id: input.libraryId || "",
-    campaign: input.campaign || "",
-    platform: input.platform || "",
-    region: input.region || "",
-    audience: input.audience || "",
-    superseded_by: input.supersededBy || "",
-    ...(embedding ? { embedding } : {})
-  };
+  const body = directusMemoryBody(input, { source, target, embedding });
   const saved = existing[0]
     ? await request(`/items/${collection}/${existing[0].id}`, { method: "PATCH", body })
     : await request(`/items/${collection}`, { method: "POST", body });
-  return { id: saved.id, locale, source: saved.source, target: saved.target, qualityStatus: saved.quality_status, qaScore: Number(saved.qa_score) || 0 };
+  // 单条写入的返回值要够增量索引使用：项目/库归属缺失的话，写入后无法定位是哪条
+  // 缓存的哪一行，只能退回整库重建（8 万行 22MB）。这里与 updateDirectusMemory 保持同一口径。
+  return { ...toMemoryEntry(saved), locale };
+}
+
+/** 批量写入的分块大小，以及 `_in` 查重列表的长度上限（太长会把 URL 撑爆）。 */
+const MEMORY_BULK_WRITE_ITEMS = 200;
+const DIRECTUS_IN_QUERY_ITEMS = 40;
+
+function chunkList(items = [], size = 1) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
+}
+
+/**
+ * 批量写入翻译记忆。
+ *
+ * 逐条"查重 + 写入"在一次导入里就是 2×N 次往返：8 万条要跑几十分钟。
+ * 这里把两条查重路径（entry_key 精确、source_hash 原文哈希）合并成批量查询，
+ * 命中的行仍然逐条 PATCH（覆盖语义与单条写入完全一致），其余走批量 POST。
+ * 同一批里重复的键只写一行，后面的结果指向同一行——等同于单条实现里
+ * "第二条查到刚写进去的那条并覆盖"的最终状态。
+ *
+ * 返回与入参等长的数组：成功是 `{ id, ... }`，失败是 `{ error }`，
+ * 单条失败不会连累整批（调用方按行记账）。
+ */
+export async function saveDirectusMemories(locale, inputs = [], { onProgress } = {}) {
+  const collection = memoryCollectionFor(locale);
+  const results = new Array(inputs.length).fill(null);
+  if (!inputs.length) return results;
+  const scope = (params, input) => {
+    if (input.projectId) params.set("filter[project_id][_eq]", String(input.projectId));
+    else params.set("filter[project_id][_empty]", "true");
+    if (input.libraryId) params.set("filter[library_id][_eq]", String(input.libraryId));
+    return params;
+  };
+  const prepared = [];
+  for (const [index, input] of inputs.entries()) {
+    const source = String(input.source || "").trim();
+    const target = String(input.target || "").trim();
+    if (!source || !target) {
+      results[index] = { error: "翻译记忆的日语原文和简体中文译文不能为空" };
+      continue;
+    }
+    const embedding = input.embedding ?? await embedSource(source);
+    prepared.push({
+      index,
+      input,
+      source,
+      target,
+      embedding,
+      hash: memorySourceHash(source),
+      entryKey: String(input.entryKey || "").trim()
+    });
+  }
+  const keyed = prepared.filter((item) => item.entryKey);
+  const hashed = prepared.filter((item) => !item.entryKey && item.hash);
+  const emptyHashed = prepared.filter((item) => !item.entryKey && !item.hash);
+  const existingByEntryKey = new Map();
+  for (const group of chunkList(keyed, DIRECTUS_IN_QUERY_ITEMS)) {
+    const params = scope(new URLSearchParams({ limit: "-1", fields: "id,source,entry_key" }), group[0].input);
+    params.set("filter[entry_key][_in]", [...new Set(group.map((item) => item.entryKey))].join(","));
+    const rows = await request(`/items/${collection}?${params}`);
+    for (const row of rows) existingByEntryKey.set(`${String(row.entry_key || "")}\u0000${normalizeMemoryText(row.source)}`, row.id);
+  }
+  const existingByPair = new Map();
+  for (const group of chunkList(hashed, DIRECTUS_IN_QUERY_ITEMS)) {
+    const params = scope(new URLSearchParams({ limit: "-1", fields: "id,source,target,source_hash" }), group[0].input);
+    params.set("filter[source_hash][_in]", [...new Set(group.map((item) => item.hash))].join(","));
+    const rows = await request(`/items/${collection}?${params}`);
+    for (const row of rows) existingByPair.set(`${String(row.source_hash || "")}\u0000${normalizeMemoryText(row.source)}\u0000${normalizeMemoryText(row.target)}`, row.id);
+  }
+  // 空哈希（整段只有内联标签占位符）不能进 `_in`：Directus 会报 400/431，改用 `_empty`。
+  if (emptyHashed.length) {
+    const params = scope(new URLSearchParams({ limit: "-1", fields: "id,source,target" }), emptyHashed[0].input);
+    params.set("filter[source_hash][_empty]", "true");
+    const rows = await request(`/items/${collection}?${params}`);
+    for (const row of rows) existingByPair.set(`\u0000${normalizeMemoryText(row.source)}\u0000${normalizeMemoryText(row.target)}`, row.id);
+  }
+  const creates = [];
+  const updates = [];
+  const linkedTo = new Map();
+  const claimed = new Map();
+  for (const item of prepared) {
+    const key = item.entryKey
+      ? `k:${item.entryKey}\u0000${normalizeMemoryText(item.source)}`
+      : `p:${item.hash || ""}\u0000${normalizeMemoryText(item.source)}\u0000${normalizeMemoryText(item.target)}`;
+    const body = directusMemoryBody(item.input, item);
+    const existingId = item.entryKey
+      ? existingByEntryKey.get(`${item.entryKey}\u0000${normalizeMemoryText(item.source)}`)
+      : existingByPair.get(`${item.hash || ""}\u0000${normalizeMemoryText(item.source)}\u0000${normalizeMemoryText(item.target)}`);
+    if (existingId) {
+      updates.push({ index: item.index, id: existingId, body, item });
+      continue;
+    }
+    const first = claimed.get(key);
+    if (first !== undefined) {
+      linkedTo.set(item.index, first);
+      continue;
+    }
+    claimed.set(key, item.index);
+    creates.push({ index: item.index, body, item });
+  }
+  if (creates.length) {
+    const saved = await createItemsInChunks(`/items/${collection}`, creates.map((entry) => entry.body), {
+      maxItems: BULK_INSERT_CHUNK_ITEMS,
+      onProgress: (update) => onProgress?.({ ...update, total: inputs.length })
+    });
+    creates.forEach((entry, position) => {
+      const row = saved[position];
+      results[entry.index] = row
+        ? { id: row.id, locale, source: entry.item.source, target: entry.item.target, qualityStatus: row.quality_status, qaScore: Number(row.qa_score) || 0 }
+        : { error: "批量写入没有返回这一条" };
+    });
+  }
+  for (const entry of updates) {
+    const row = await request(`/items/${collection}/${entry.id}`, { method: "PATCH", body: entry.body });
+    results[entry.index] = { id: row.id, locale, source: entry.item.source, target: entry.item.target, qualityStatus: row.quality_status, qaScore: Number(row.qa_score) || 0 };
+  }
+  for (const [index, sourceIndex] of linkedTo.entries()) {
+    results[index] = results[sourceIndex] ? { ...results[sourceIndex] } : { error: "同一批里的重复条目没有写成功" };
+  }
+  return results;
 }
 
 /**
@@ -572,17 +772,22 @@ export async function getDirectusStyleProfile(locale, contentType, domain = "gen
   return mapStyleProfileRow(profile);
 }
 
-export async function saveDirectusStyleEvidence(input) {
-  const embedding = input.embedding ?? await embedSource(input.source);
-  const locale = assertLocale(input.locale);
-  const body = {
+/**
+ * 风格证据的写入体：单条与批量共用，字段口径只有一份。
+ *
+ * 不再写 `embedding`：证据池的读法是"作用域 + 分层取样"（见 src/evidence-sample.mjs），
+ * 全仓库没有任何地方按向量检索证据；每条 2KB 的向量纯属导入负担。列还在，
+ * 历史行也保留，将来真要做语义取样时用 /api/embedding/rebuild 回填即可。
+ */
+function directusStyleEvidenceBody(input, { locale, source, target }) {
+  return {
     project_id: input.projectId || "",
     target_locale: locale,
     content_type: input.contentType || "general",
     content_tags: input.contentTags || [],
     domain: input.domain || "general",
-    source: String(input.source || "").trim(),
-    target: String(input.target || "").trim(),
+    source,
+    target,
     entry_key: String(input.entryKey || ""),
     source_file: input.sourceFile || "",
     source_row: Number(input.sourceRow) || null,
@@ -591,9 +796,17 @@ export async function saveDirectusStyleEvidence(input) {
     provenance: input.provenance || "",
     machine_translation: String(input.machineTranslation || "").trim(),
     polarity: input.polarity === "negative" ? "negative" : "positive",
-    note: String(input.note || "").trim(),
-    ...(embedding ? { embedding } : {})
+    note: String(input.note || "").trim()
   };
+}
+
+export async function saveDirectusStyleEvidence(input) {
+  const locale = assertLocale(input.locale);
+  const body = directusStyleEvidenceBody(input, {
+    locale,
+    source: String(input.source || "").trim(),
+    target: String(input.target || "").trim()
+  });
   // 同条目 ID + 同项目 + 同语言只留最新：命中就 PATCH 那一条。
   // 语体与领域不再参与判重（风格资产是项目级的），改判用途只会更新标签，不会新增一条。
   const match = styleEvidenceMatch({ entryKey: input.entryKey, locale, projectId: body.project_id });
@@ -627,9 +840,103 @@ export async function saveDirectusStyleEvidence(input) {
   return { id: saved.id, ...input };
 }
 
-export async function getDirectusStyleEvidence(locale, options = {}) {
+/**
+ * 风格证据的判重索引（原文+译文 → id、条目 ID → id）。
+ *
+ * 老实现每写一条证据就 `limit=-1` 拉一次全项目证据：导入 8 万条时这是 O(n²)
+ * 的行传输（实测 9,791 条就用了 283 秒，且越到后面越慢）。导入开始时建一次索引，
+ * 之后在内存里维护，行为不变（同一条目 ID 覆盖、无 ID 时按"原文+译文"去重）。
+ */
+export async function loadDirectusStyleEvidenceIndex(locale, { projectId = "" } = {}) {
   assertLocale(locale);
-  const params = new URLSearchParams({ limit: String(Math.min(1000, options.limit || 1000)), sort: "-date_created", fields: "id,project_id,target_locale,content_type,content_tags,domain,source,target,entry_key,machine_translation,polarity,note,source_file,source_row,batch_id,status,provenance,embedding,date_created" });
+  const params = new URLSearchParams({ limit: "-1", fields: "id,source,target,entry_key" });
+  params.set("filter[target_locale][_eq]", locale);
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  else params.set("filter[project_id][_empty]", "true");
+  const rows = await request(`/items/style_evidence?${params}`, { timeoutMs: 60_000 });
+  const pairs = new Map();
+  const entryKeys = new Map();
+  for (const row of rows) {
+    const entryKey = String(row.entry_key || "").trim();
+    if (entryKey) entryKeys.set(entryKey, row.id);
+    else pairs.set(`${normalizeMemoryText(row.source)}\u0000${normalizeMemoryText(row.target)}`, row.id);
+  }
+  return { pairs, entryKeys };
+}
+
+/**
+ * 批量写入风格证据：与单条写入同一套判重口径，但一次写一批。
+ * `index` 由 loadDirectusStyleEvidenceIndex 建好并在多次调用之间复用，
+ * 写进去的新行会立刻记进索引，后续批次不会重复创建。
+ */
+export async function saveDirectusStyleEvidences(inputs = [], { index = null } = {}) {
+  const results = new Array(inputs.length).fill(null);
+  if (!inputs.length) return results;
+  const pairs = index?.pairs || new Map();
+  const entryKeys = index?.entryKeys || new Map();
+  const creates = [];
+  const updates = [];
+  const linkedTo = new Map();
+  const claimed = new Map();
+  for (const [position, input] of inputs.entries()) {
+    const locale = assertLocale(input.locale);
+    const source = String(input.source || "").trim();
+    const target = String(input.target || "").trim();
+    if (!source || !target) {
+      results[position] = { error: "风格证据缺少原文或译文" };
+      continue;
+    }
+    const body = directusStyleEvidenceBody(input, { locale, source, target });
+    const entryKey = String(input.entryKey || "").trim();
+    const pairKey = `${normalizeMemoryText(source)}\u0000${normalizeMemoryText(target)}`;
+    const key = entryKey ? `k:${entryKey}` : `p:${pairKey}`;
+    const existingId = entryKey ? entryKeys.get(entryKey) : pairs.get(pairKey);
+    if (existingId) {
+      updates.push({ position, id: existingId, body });
+      continue;
+    }
+    const first = claimed.get(key);
+    if (first !== undefined) {
+      linkedTo.set(position, first);
+      continue;
+    }
+    claimed.set(key, position);
+    creates.push({ position, body, entryKey, pairKey });
+  }
+  if (creates.length) {
+    // 分块写入：7 万条证据一次请求会在真机上撞 120 秒超时（整批失败）。
+    const saved = await createItemsInChunks("/items/style_evidence", creates.map((entry) => entry.body), { maxItems: BULK_INSERT_CHUNK_ITEMS });
+    creates.forEach((entry, position) => {
+      const row = saved[position];
+      if (!row?.id) {
+        results[entry.position] = { error: "批量写入风格证据没有返回这一条" };
+        return;
+      }
+      results[entry.position] = { id: row.id, source: entry.body.source, target: entry.body.target };
+      if (entry.entryKey) entryKeys.set(entry.entryKey, row.id);
+      else pairs.set(entry.pairKey, row.id);
+    });
+  }
+  for (const entry of updates) {
+    const row = await request(`/items/style_evidence/${entry.id}`, { method: "PATCH", body: entry.body });
+    results[entry.position] = { id: row.id, source: row.source, target: row.target };
+  }
+  for (const [position, sourcePosition] of linkedTo.entries()) {
+    results[position] = results[sourcePosition] ? { ...results[sourcePosition] } : { error: "同一批里的重复证据没有写成功" };
+  }
+  return results;
+}
+
+/**
+ * 证据分页读取：分层取样要按页扫一个有界窗口（见 src/evidence-sample.mjs），
+ * 不能一次把 8 万条拉回内存。
+ */
+export async function listDirectusStyleEvidencePage(locale, options = {}) {
+  assertLocale(locale);
+  const limit = Math.max(1, Math.min(1_000, Number(options.limit) || 1_000));
+  const offset = Math.max(0, Math.trunc(Number(options.offset)) || 0);
+  const params = new URLSearchParams({ limit: String(limit), sort: "-date_created", fields: "id,project_id,target_locale,content_type,content_tags,domain,source,target,entry_key,machine_translation,polarity,note,source_file,source_row,batch_id,status,provenance,embedding,date_created" });
+  if (offset > 0) params.set("offset", String(offset));
   params.set("filter[target_locale][_eq]", locale);
   if (options.projectId) params.set("filter[project_id][_eq]", String(options.projectId));
   if (options.contentType) params.set("filter[content_type][_eq]", options.contentType);
@@ -651,6 +958,10 @@ export async function getDirectusStyleEvidence(locale, options = {}) {
       status: item.status || "accepted", provenance: item.provenance || "",
       embedding: item.embedding || null, createdAt: item.date_created
     }));
+}
+
+export async function getDirectusStyleEvidence(locale, options = {}) {
+  return listDirectusStyleEvidencePage(locale, options);
 }
 
 /**
@@ -687,12 +998,11 @@ export async function getDirectusQaRuns(locale, options = {}) {
   assertLocale(locale);
   const params = new URLSearchParams({ limit: String(Math.min(500, options.limit || 100)), sort: "-date_created", fields: "id,project_id,target_locale,content_type,domain,source,initial_translation,final_translation,score,status,iterations,issues,term_decisions,human_decisions,references,style_profile_id,model,fallback_reason,batch_id,date_created" });
   params.set("filter[target_locale][_eq]", locale);
-  if (options.contentType) params.set("filter[content_type][_eq]", options.contentType);
+  // 语体/领域只作参考：QA 记录按项目取，不再按这两个维度过滤。
   if (options.projectId) params.set("filter[project_id][_eq]", String(options.projectId));
   if (options.batchId) params.set("filter[batch_id][_eq]", options.batchId);
-  const items = await request(`/items/qa_runs?${params}`);
+  const items = await request(`/items/qa_runs?${params}`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
   return items
-    .filter((item) => !options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
     .map((item) => ({
       id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type || "general", domain: item.domain || "general",
       source: item.source, initialTranslation: item.initial_translation, finalTranslation: item.final_translation,
@@ -973,16 +1283,10 @@ export async function getDirectusQaCases(locale, { contentType = "general", doma
   const directusLimit = Number(limit) <= 0 ? "-1" : String(Math.min(500, limit));
   const params = new URLSearchParams({ limit: directusLimit, sort: "-date_created", fields: "id,project_id,target_locale,content_type,domain,source,rejected_translation,corrected_translation,issues,score_before,score_after,status,embedding,date_created" });
   params.set("filter[target_locale][_eq]", locale);
-  if (scopeFallback) {
-    // 与 TM / 风格规范同一套降级链。
-    const types = [...new Set([contentType || "general", "general"])];
-    if (types.length > 1 || types[0] !== "general") params.set("filter[content_type][_in]", types.join(","));
-  } else if (contentType) {
-    params.set("filter[content_type][_eq]", contentType);
-  }
+  // 语体/领域只影响 scopeRank 加成，不再过滤：同项目内所有已批准反例都参与排序。
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   const items = await request(`/items/qa_cases?${params}`);
-  return items.filter((item) => (!domain || domain === "general" || item.domain === domain || item.domain === "general") && item.status === "human_approved").map((item) => ({
+  return items.filter((item) => item.status === "human_approved").map((item) => ({
     ...(scopeFallback ? { scopeRank: scopeRankOf({ contentType: item.content_type, domain: item.domain }, { contentType, domain }) } : {}),
     id: item.id, projectId: item.project_id || "", locale: item.target_locale, contentType: item.content_type, domain: item.domain || "general", source: item.source,
     rejectedTranslation: item.rejected_translation, correctedTranslation: item.corrected_translation, issues: arrayValue(item.issues),
@@ -990,12 +1294,35 @@ export async function getDirectusQaCases(locale, { contentType = "general", doma
   }));
 }
 
+/**
+ * 按 ID 取一条 QA 案例（不过滤状态）：采纳动作要在同一条案例上立刻派生回归案例，
+ * 而列表接口只返回 human_approved，拿不到刚采纳的原始状态与所属作用域。
+ */
+export async function findDirectusQaCase(id) {
+  if (!id) return null;
+  try {
+    const item = await request(`/items/qa_cases/${encodeURIComponent(String(id))}?fields=id,project_id,target_locale,content_type,domain,source,rejected_translation,corrected_translation,issues,score_before,score_after,status,date_created`);
+    if (!item?.id) return null;
+    return {
+      id: item.id, projectId: item.project_id || "", project: item.project_id || "", locale: item.target_locale,
+      contentType: item.content_type || "general", domain: item.domain || "general", source: item.source,
+      rejectedTranslation: item.rejected_translation, correctedTranslation: item.corrected_translation,
+      issues: arrayValue(item.issues),
+      scoreBefore: Number(item.score_before) || 0, scoreAfter: Number(item.score_after) || 0,
+      status: item.status, createdAt: item.date_created
+    };
+  } catch (error) {
+    if (isMissingItem(error)) return null;
+    throw error;
+  }
+}
+
 export async function getDirectusAssets(locale, { projectId = "" } = {}) {
   const collection = collectionFor(locale);
   const fields = "id,source,aliases,target,forbidden,domains,content_types,content_tags,enforcement,note,status,provenance,asset_tier,case_sensitive,preserve_original,version,version_group_id,lifecycle_status,valid_from,valid_to,projects,project_id,library_id,channels,platforms,regions,superseded_by,date_created,date_updated";
   const params = new URLSearchParams({ limit: "-1", sort: "-date_updated", fields });
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
-  const items = await request(`/items/${collection}?${params}`);
+  const items = await request(`/items/${collection}?${params}`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
   const latest = items.map((item) => item.date_updated || item.date_created).filter(Boolean).sort().at(-1);
   return {
     locale,
@@ -1239,7 +1566,7 @@ export async function saveDirectusAssets(locale, inputs = []) {
     records.push(item);
   }
   if (!records.length) return [];
-  const saved = await createItemsInChunks(`/items/${collection}`, records);
+  const saved = await createItemsInChunks(`/items/${collection}`, records, { maxItems: BULK_INSERT_CHUNK_ITEMS });
   return saved.map(toTerm);
 }
 
@@ -1279,7 +1606,9 @@ export async function saveDirectusCorpus(input) {
 
 /** 候选 → term_candidates 行：写审核队列与写回 AI 清洗结论共用同一套字段映射。 */
 function importCandidateRecord(candidate, { batchId, projectId = "", filename = "", aiUsed = false } = {}) {
-  return {
+  // PostgreSQL 的文本列不接受 0x00，而候选键按约定用 NUL 当分隔符（`语种\0源词\0译法`）。
+  // 在写库边界把 NUL 换成可见的单位分隔符：内存里的键照旧，库里不会再 500。
+  return withoutNullBytes({
     project_id: projectId,
     source: candidate.source,
     target: candidate.target,
@@ -1312,7 +1641,16 @@ function importCandidateRecord(candidate, { batchId, projectId = "", filename = 
     decision: candidate.decision,
     reason: (candidate.reasons || []).join("；"),
     status: "pending"
-  };
+  });
+}
+
+function withoutNullBytes(value) {
+  if (typeof value === "string") return value.replace(/\u0000/gu, "\u241f");
+  if (Array.isArray(value)) return value.map(withoutNullBytes);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, withoutNullBytes(item)]));
+  }
+  return value;
 }
 
 export async function saveDirectusImportPreview(input, { onProgress } = {}) {
@@ -1347,6 +1685,7 @@ export async function saveDirectusImportPreview(input, { onProgress } = {}) {
     // 入库前先写审核队列：几千条候选会在这一步花掉最多时间，必须能把进度报出去。
     saved = records.length
       ? await createItemsInChunks("/items/term_candidates", records, {
+        maxItems: BULK_INSERT_CHUNK_ITEMS,
         onProgress: (update) => onProgress?.({ phase: "queueing", message: `正在写入审核队列：${update.completed} / ${update.total}`, ...update })
       })
       : [];
@@ -1375,6 +1714,131 @@ export async function saveDirectusImportPreview(input, { onProgress } = {}) {
 }
 
 /**
+ * 批量插入的分块大小：一次 2,000 条。
+ *
+ * 之前只按 64MB 切块，等于"整批一次请求"：7 万条证据在真机上直接撞 120 秒超时，
+ * 整批风格证据 100% 失败（任务摘要里会写"风格证据写入失败：Directus请求超时"）。
+ * 分块之后单请求可控，失败也只影响一块。
+ */
+const BULK_INSERT_CHUNK_ITEMS = 2_000;
+/**
+ * TM 审计批次的 file_type 标记。表里只有这一种批次是我们自己的导入历史，
+ * "替换上一批"只认这个标记，绝不会误删资产导入（术语审核队列）的批次。
+ */
+const TM_AUDIT_FILE_TYPE = "tm-audit";
+
+/**
+ * 同一项目 + 同一文件名重新导入时，把**上一次的审计批次连同候选行删掉**，只留最新一批。
+ *
+ * 记忆与风格证据本身是"命中即覆盖"，不会翻倍；这里处理的是 `term_import_batches` /
+ * `term_candidates` 的历史堆积（重复导入 7 万行文件就是再堆 7 万行）。
+ * 删失败只记警告：审计是历史记录，不能因为清理失败就把导入判失败。
+ */
+export async function replacePreviousTmImportAudit({ projectId = "", filename = "", keepBatchId = "" } = {}) {
+  if (!projectId || !filename) return { batches: 0, candidates: 0 };
+  const params = new URLSearchParams({
+    limit: "-1",
+    fields: "id,file_type,status,summary",
+    filter: JSON.stringify({
+      project_id: { _eq: projectId },
+      filename: { _eq: filename },
+      status: { _eq: "completed" }
+    })
+  });
+  const rows = await request(`/items/term_import_batches?${params}`);
+  const stale = rows
+    // 新批次带固定标记；历史批次（队列后置之前的 TM 导入）没有 file_type 标记，
+    // 用"没有 fileMode"来认——资产导入的 summary 一律带 fileMode，绝不会被误删。
+    .filter((row) => String(row.file_type || "") === TM_AUDIT_FILE_TYPE || !(row.summary || {}).fileMode)
+    .map((row) => String(row.id || ""))
+    .filter((id) => id && id !== keepBatchId);
+  if (!stale.length) return { batches: 0, candidates: 0 };
+  let removedCandidates = 0;
+  for (const chunk of chunkList(stale, 5)) {
+    const filter = encodeURIComponent(JSON.stringify({ batch_id: { _in: chunk } }));
+    const candidates = await request(`/items/term_candidates?limit=-1&fields=id&filter=${filter}`);
+    const ids = candidates.map((row) => row.id).filter(Boolean);
+    if (ids.length) removedCandidates += await deleteItemsByKeys("term_candidates", ids);
+  }
+  await deleteItemsByKeys("term_import_batches", stale);
+  return { batches: stale.length, candidates: removedCandidates };
+}
+
+/**
+ * TM 导入成功后的审计：批次行 + 精简候选行（直接写终态）。
+ *
+ * 队列不再充当"导入前先落盘的中转队列"——失败时库里一行都不写（老的先写队列
+ * 方式会让每次失败都留下几万条 pending 垃圾）；"继续导入"改读本地预检缓存。
+ * 候选行只留审计必需字段：原来 30 多列里有一半对 TM 候选恒为空值/默认值。
+ */
+export async function saveDirectusTmImportAudit({
+  batchId,
+  filename = "人工 TM 导入",
+  fileType = "tm",
+  projectId = "",
+  requestedLocale = "zh-CN",
+  summary = {},
+  candidates = [],
+  decisions = []
+} = {}) {
+  if (!batchId) throw new Error("TM 导入审计缺少批次号");
+  const records = (Array.isArray(candidates) ? candidates : []).map((candidate, index) => {
+    const decision = decisions[index] || {};
+    const accepted = decision.status === "accepted";
+    return withoutNullBytes({
+      project_id: projectId,
+      source: candidate?.source || "",
+      target: candidate?.target || "",
+      target_locale: candidate?.locale || requestedLocale,
+      asset_type: candidate?.assetType || "memory",
+      content_type: candidate?.contentType || "general",
+      domain: candidate?.domain || "general",
+      note: String(candidate?.note || "").slice(0, 500),
+      batch_id: batchId,
+      source_file: candidate?.sourceFile || filename,
+      row_number: Number(candidate?.rowNumber ?? candidate?.sourceRow) || index + 1,
+      decision: accepted ? (candidate?.decision || "ready") : (decision.decision || candidate?.decision || "excluded"),
+      status: accepted ? "accepted" : "rejected",
+      reason: accepted ? "" : String(decision.reason || "").slice(0, 200)
+    });
+  });
+  const batchBody = {
+    filename,
+    // 固定标记（真实来源类型记进 summary.sourceFileType）：同项目 + 同文件名重新导入时，
+    // 只替换上一次的 TM 审计批次，不会碰到资产导入的审核批次。
+    file_type: TM_AUDIT_FILE_TYPE,
+    source_language: "ja-JP",
+    project_id: projectId,
+    requested_locale: requestedLocale,
+    row_count: records.length,
+    candidate_count: records.length,
+    status: "completed",
+    ai_used: Boolean(summary?.ai?.used),
+    summary: { ...summary, sourceFileType: fileType }
+  };
+  try {
+    const replaced = await replacePreviousTmImportAudit({ projectId, filename, keepBatchId: batchId });
+    if (replaced.batches) {
+      console.log(`[Kami] 重复导入同一文件：已替换上一批审计（批次 ${replaced.batches} 个、候选 ${replaced.candidates} 行）`);
+    }
+  } catch (error) {
+    console.warn(`[Kami] 替换上一批审计失败（不影响本次导入）：${error.message}`);
+  }
+  try {
+    // 指定主键让任务载荷、记忆行与审计批次共用同一个批次号。
+    await request("/items/term_import_batches", { method: "POST", body: { id: batchId, ...batchBody } });
+  } catch (error) {
+    // Directus 若拒绝客户端主键，就退回服务端生成：审计仍然落地，只是批次号不再是预生成的那个。
+    console.warn(`[Kami] TM 导入批次行改用服务端主键：${error.message}`);
+    await request("/items/term_import_batches", { method: "POST", body: batchBody });
+  }
+  if (records.length) {
+    await createItemsInChunks("/items/term_candidates", records, { maxItems: BULK_INSERT_CHUNK_ITEMS });
+  }
+  return { batchId, candidates: records.length };
+}
+
+/**
  * 把 AI 清洗结论写回候选行，供续跑时跳过已经判定过的条目、省掉重复的模型调用。
  * 已存在的候选按 id 更新；句内术语这类这一轮才产生的候选作为新行写进同一个批次。
  * 用 classification_source = "ai-cleaned" 作为"已判定"的标记（该列本来就只记来源，不参与业务判断）。
@@ -1397,7 +1861,7 @@ export async function persistDirectusImportCleaning(batchId, { projectId = "", f
     await createItemsInChunks("/items/term_candidates", created.map((candidate) => importCandidateRecord(
       { ...candidate, contentTypeSource: "ai-cleaned" },
       { batchId, projectId, filename, aiUsed: true }
-    )));
+    )), { maxItems: BULK_INSERT_CHUNK_ITEMS });
   }
   return existing.length + created.length;
 }
@@ -1511,7 +1975,8 @@ export async function rebuildDirectusEmbeddings(locale, { forceLocal = false } =
     await request(`/items/${collection}/${encodeURIComponent(item.id)}`, { method: "PATCH", body: { embedding } });
     stats.memories += 1;
   }
-  for (const [collectionName, key] of [["qa_cases", "qaCases"], ["style_evidence", "evidence"]]) {
+  // 风格证据不再维护向量（证据池按作用域 + 分层取样读取，不做向量检索）。
+  for (const [collectionName, key] of [["qa_cases", "qaCases"]]) {
     const params = new URLSearchParams({ limit: "-1", fields: "id,source,embedding" });
     params.set("filter[target_locale][_eq]", locale);
     const items = await request(`/items/${collectionName}?${params}`);
@@ -1564,6 +2029,8 @@ function batchMetrics(segments = [], runState = "") {
   }).length;
   return {
     totalSegments: selected.length, completedSegments, failedSegments, qaPending,
+    // 自动档是逐段判定的：文件行要能直接看到实际档位分布，而不是只写"自动"。
+    qualityTiers: summarizeQualityTiers(selected),
     status: runState === "ready" ? "ready" : runState === "paused" ? "paused" : failedSegments ? "needs_attention" : completedSegments < selected.length ? "in_progress" : qaPending ? "review" : "completed"
   };
 }
@@ -1583,7 +2050,11 @@ export async function saveDirectusBatchRun(input) {
     structure: input.structure ?? null,
     segments: input.segments || [],
     ...(Object.hasOwn(input, "subBatches") ? { sub_batches: input.subBatches || [] } : {}),
-    ...(Object.hasOwn(input, "runnerOptions") ? { runner_options: input.runnerOptions || {} } : {}),
+    // 档位分布跟着 runner_options 一起落库：文件列表只查聚合列、不取 segments，
+    // 放在这里才能让"自动档实际用了哪几档"直接显示在列表上。
+    ...(Object.hasOwn(input, "runnerOptions")
+      ? { runner_options: { ...(input.runnerOptions || {}), qualityTierSummary: metrics.qualityTiers, batchSummary: summarizeBatchSegments(input.segments || []) } }
+      : {}),
     // 语境档案与质量报告是整份文件级结论：批次记录本身就带，刷新页面不用重算。
     ...(Object.hasOwn(input, "contextBrief") ? { context_brief: input.contextBrief ?? null } : {}),
     ...(Object.hasOwn(input, "qualityReport") ? { quality_report: input.qualityReport ?? null } : {}),
@@ -1604,7 +2075,7 @@ export async function saveDirectusBatchRun(input) {
 
 export async function getDirectusBatchRun(batchId) {
   try {
-    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,structure,segments,sub_batches,runner_options,context_brief,quality_report,run_state,date_updated`);
+    const item = await request(`/items/batch_runs/${encodeURIComponent(String(batchId))}?fields=id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,structure,segments,sub_batches,runner_options,context_brief,quality_report,run_state,date_updated`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
     return {
       batchId: item.id,
       filename: item.filename || "",
@@ -1621,6 +2092,8 @@ export async function getDirectusBatchRun(batchId) {
       contextBrief: item.context_brief ?? null,
       qualityReport: item.quality_report ?? null,
       runState: item.run_state || "ready",
+      // 档位分布：详情页有 segments 就现算，没有就用落库时的汇总。
+      qualityTiers: arrayValue(item.segments).length ? summarizeQualityTiers(arrayValue(item.segments)) : (item.runner_options?.qualityTierSummary || null),
       updatedAt: item.date_updated || null
     };
   } catch (error) {
@@ -1652,19 +2125,30 @@ function summarizeBatchRun(item) {
     contentType: item.content_type || "general", domain: item.domain || "general", format: item.format || "",
     segmentationMode: item.segmentation_mode || "sentence", status, runState: item.run_state || "ready",
     runnerOptions: item.runner_options || {},
+    // 文件列表要显示"语境分析到哪一步了"：这里只带状态与区间数，不带整份 brief。
+    contextBrief: item.context_brief
+      ? { status: item.context_brief.status || "", sections: (item.context_brief.sections || []).length }
+      : null,
     totalSegments, completedSegments, failedSegments, qaPending,
+    qaIncomplete: Number(item.runner_options?.batchSummary?.qaIncomplete) || 0,
+    qualityTiers: directusJson(item.runner_options, {})?.qualityTierSummary || null,
     createdAt: item.date_created || null, updatedAt: item.date_updated || item.date_created || null
   };
 }
 
 export async function listDirectusBatchRuns({ locale = "", status = "", search = "", projectId = "", limit = 200 } = {}) {
-  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,run_state,task_status,runner_options,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
+  const params = new URLSearchParams({ limit: String(Math.min(500, Math.max(1, Number(limit) || 200))), sort: "-date_updated,-date_created", fields: "id,filename,project_id,target_locale,content_type,domain,format,segmentation_mode,run_state,task_status,runner_options,context_brief,total_segments,completed_segments,failed_segments,qa_pending,date_created,date_updated" });
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[filename][_icontains]", String(search).slice(0, 120));
-  const items = await request(`/items/batch_runs?${params}`);
+  const items = await request(`/items/batch_runs?${params}`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
+  // 老批次只读补算 QA 执行失败数，不把低分或 QA 建议误当成“未完成”。
+  for (const item of items.filter((entry) => entry.qa_pending > 0 && !entry.runner_options?.batchSummary)) {
+    const legacy = await request(`/items/batch_runs/${encodeURIComponent(item.id)}?fields=segments`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
+    item.runner_options = { ...(item.runner_options || {}), batchSummary: summarizeBatchSegments(arrayValue(legacy.segments)) };
+  }
   for (const item of items.filter((entry) => entry.total_segments == null)) {
-    const legacy = await request(`/items/batch_runs/${encodeURIComponent(item.id)}?fields=segments`);
+    const legacy = await request(`/items/batch_runs/${encodeURIComponent(item.id)}?fields=segments`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
     const metrics = batchMetrics(arrayValue(legacy.segments), item.run_state || "");
     Object.assign(item, { task_status: metrics.status, total_segments: metrics.totalSegments, completed_segments: metrics.completedSegments, failed_segments: metrics.failedSegments, qa_pending: metrics.qaPending });
     await request(`/items/batch_runs/${encodeURIComponent(item.id)}`, { method: "PATCH", body: { task_status: metrics.status, total_segments: metrics.totalSegments, completed_segments: metrics.completedSegments, failed_segments: metrics.failedSegments, qa_pending: metrics.qaPending } });
@@ -1722,7 +2206,7 @@ export async function listDirectusQaTasks({ locale = "", projectId = "", status 
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[title][_icontains]", String(search).slice(0, 120));
-  const items = await request(`/items/qa_tasks?${params}`);
+  const items = await request(`/items/qa_tasks?${params}`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
   const summaries = items.map((item) => ({
     id: item.id, projectId: item.project_id || "", type: "autoqa", title: item.title || "未命名质检", locale: item.target_locale || "",
     contentType: item.content_type || "general", domain: item.domain || "general",
@@ -1785,7 +2269,7 @@ export async function listDirectusBackgroundTasks({ locale = "", projectId = "",
   if (locale) params.set("filter[target_locale][_eq]", assertLocale(locale));
   if (projectId) params.set("filter[project_id][_eq]", String(projectId));
   if (search) params.set("filter[title][_icontains]", String(search).slice(0, 120));
-  const items = await request(`/items/background_tasks?${params}`);
+  const items = await request(`/items/background_tasks?${params}`, { timeoutMs: DIRECTUS_READ_TIMEOUT_MS });
   const tasks = items.map((item) => ({
     id: item.id, projectId: item.project_id || "", type: item.task_type || "term_import", title: item.title || "",
     locale: item.target_locale || "", status: item.status || "in_progress",
@@ -1997,7 +2481,8 @@ function sameDirectusLearningScope(left, right) {
 function translationSkillScopeKey(scope) {
   const normalized = directusLearningScope(scope);
   return createHash("sha256")
-    .update([normalized.locale, normalized.contentType, normalized.domain, normalized.project].join("\u0000"))
+    // 语体/领域只作参考：生效版本的唯一性按「语言 × 项目」结算，一个项目只能有一个 champion。
+    .update([normalized.locale, normalized.project].join("\u0000"))
     .digest("hex");
 }
 
@@ -2023,8 +2508,7 @@ function assertDirectusImmutable(existing, patch, fields) {
 
 function addLearningScopeFilters(params, filters = {}) {
   if (filters.locale) params.set("filter[target_locale][_eq]", assertLocale(filters.locale));
-  if (filters.contentType) params.set("filter[content_type][_eq]", filters.contentType);
-  if (filters.domain) params.set("filter[domain][_eq]", filters.domain);
+  // 语体与领域降级为标签：学习资产（轨迹/技能/评测/Gold/门禁/训练）只按「语言 × 项目」结算。
   if (filters.project) params.set("filter[project][_eq]", filters.project);
   return params;
 }
@@ -2700,9 +3184,21 @@ function mapQualityRun(item) {
   };
 }
 
-export async function saveDirectusQualityRun(input) {
+/**
+ * 可空指标：这类字段"没测出来"和"测出来是 0"是两件事。`Number(null)` 是 0，
+ * 直接用它做判断会把"本批 Gold 样本没有术语约束、指标不可测"写成 0.0%，
+ * 界面上看起来就像术语全错。null / 空串 / 非数值一律存 null。
+ */
+export function nullableMetric(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/** 门禁运行记录的请求体；抽成纯函数便于直接断言真正发出去的字段。 */
+export function qualityRunBody(input = {}) {
   const scope = directusLearningScope(input.scope || input, {});
-  const body = {
+  return {
     target_locale: scope.locale,
     content_type: scope.contentType,
     domain: scope.domain,
@@ -2712,16 +3208,20 @@ export async function saveDirectusQualityRun(input) {
     decision: assertLearningChoice(String(input.decision ?? "insufficient"), QUALITY_GATE_DECISIONS, "quality gate decision"),
     regression_total: Number(input.regressionTotal) || 0,
     regression_passed: Number(input.regressionPassed) || 0,
-    regression_pass_rate: Number.isFinite(Number(input.regressionPassRate)) ? Number(input.regressionPassRate) : null,
+    regression_pass_rate: nullableMetric(input.regressionPassRate),
     gold_total: Number(input.goldTotal) || 0,
-    gold_term_accuracy: Number.isFinite(Number(input.goldTermAccuracy)) ? Number(input.goldTermAccuracy) : null,
-    gold_fact_accuracy: Number.isFinite(Number(input.goldFactAccuracy)) ? Number(input.goldFactAccuracy) : null,
+    gold_term_accuracy: nullableMetric(input.goldTermAccuracy),
+    gold_fact_accuracy: nullableMetric(input.goldFactAccuracy),
     asset_versions: input.assetVersions ?? {},
     metrics: input.metrics ?? {},
     report: input.report ?? {},
     blocking: input.blocking ?? [],
     triggered_by: String(input.triggeredBy ?? "")
   };
+}
+
+export async function saveDirectusQualityRun(input) {
+  const body = qualityRunBody(input);
   return mapQualityRun(await request("/items/quality_runs", { method: "POST", body }));
 }
 
@@ -2734,6 +3234,20 @@ export async function listDirectusQualityRuns(filters = {}) {
   if (filters.skillId) params.set("filter[skill_id][_eq]", String(filters.skillId));
   if (filters.decision) params.set("filter[decision][_eq]", String(filters.decision));
   return (await request(`/items/quality_runs?${params}`)).map(mapQualityRun);
+}
+
+/**
+ * 只更新运行记录的附加内容（复盘报告）。结论、计数与资产版本属于门禁留档，
+ * 不允许在这里被改写——那等于事后篡改结论。
+ */
+export async function updateDirectusQualityRun(id, patch = {}) {
+  const current = await request(`/items/quality_runs/${encodeURIComponent(String(id))}?fields=id,report`).catch((error) => {
+    if (isMissingItem(error)) return null;
+    throw error;
+  });
+  if (!current?.id) return null;
+  const report = { ...(directusJson(current.report, {}) || {}), ...(patch.report || {}) };
+  return mapQualityRun(await request(`/items/quality_runs/${encodeURIComponent(String(id))}`, { method: "PATCH", body: { report } }));
 }
 
 function mapTrainingRun(item) {
@@ -2909,6 +3423,9 @@ const PROJECT_PURGE_TARGETS = new Map([
   ["qa_cases", "_or"],
   ["qa_tasks", "project_id"],
   ["background_tasks", "project_id"],
+  ["reference_documents", "project_id"],
+  ["reference_chunks", "project_id"],
+  ["reference_folders", "project_id"],
   ["learning_trajectories", "project"],
   ["translation_skills", "project"],
   ["skill_evaluations", "project"],
@@ -3038,14 +3555,27 @@ export async function deleteDirectusUserProfile(id) {
 
 const REFERENCE_DOCUMENT_COLLECTION = "reference_documents";
 const REFERENCE_CHUNK_COLLECTION = "reference_chunks";
+const REFERENCE_FOLDER_COLLECTION = "reference_folders";
 const REFERENCE_KIND_VALUES = ["character", "script", "synopsis", "setting", "other"];
 const REFERENCE_STATUS_VALUES = ["indexing", "ready", "failed", "disabled"];
+
+function mapReferenceFolder(item = {}) {
+  return {
+    id: item.id,
+    projectId: item.project_id || "",
+    parentId: item.parent_id || "",
+    name: item.name || "",
+    createdAt: item.date_created || "",
+    updatedAt: item.date_updated || item.date_created || ""
+  };
+}
 
 function mapReferenceDocument(item = {}) {
   return {
     id: item.id,
     projectId: item.project_id || "",
     libraryId: item.library_id || "",
+    folderId: item.folder_id || "",
     name: item.name || "",
     kind: item.kind || "other",
     contentType: item.content_type || "",
@@ -3080,10 +3610,54 @@ function mapReferenceChunk(item = {}) {
   };
 }
 
+export async function saveDirectusReferenceFolder(input = {}) {
+  const body = {
+    project_id: String(input.projectId || "").trim(),
+    parent_id: String(input.parentId || "").trim(),
+    name: String(input.name || "新建文件夹").trim().slice(0, 200)
+  };
+  const id = String(input.id || "").trim();
+  const saved = id
+    ? await request(`/items/${REFERENCE_FOLDER_COLLECTION}/${encodeURIComponent(id)}`, { method: "PATCH", body })
+    : await request(`/items/${REFERENCE_FOLDER_COLLECTION}`, { method: "POST", body: { id: randomUUID(), ...body } });
+  return mapReferenceFolder(saved);
+}
+
+export async function getDirectusReferenceFolder(id) {
+  try {
+    return mapReferenceFolder(await request(`/items/${REFERENCE_FOLDER_COLLECTION}/${encodeURIComponent(String(id))}?fields=*`));
+  } catch (error) {
+    if (isMissingItem(error)) return null;
+    throw error;
+  }
+}
+
+export async function listDirectusReferenceFolders({ projectId = "", limit = 5_000 } = {}) {
+  const params = new URLSearchParams({
+    limit: String(Number(limit) > 0 ? Math.min(5_000, Number(limit)) : -1),
+    fields: "*",
+    sort: "name,date_created"
+  });
+  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
+  const items = await request(`/items/${REFERENCE_FOLDER_COLLECTION}?${params}`);
+  return (items || []).map(mapReferenceFolder);
+}
+
+export async function deleteDirectusReferenceFolder(id) {
+  try {
+    await request(`/items/${REFERENCE_FOLDER_COLLECTION}/${encodeURIComponent(String(id))}`, { method: "DELETE" });
+    return true;
+  } catch (error) {
+    if (isMissingItem(error)) return false;
+    throw error;
+  }
+}
+
 export async function saveDirectusReferenceDocument(input = {}) {
   const body = {
     project_id: String(input.projectId || "").trim(),
     library_id: String(input.libraryId || "").trim(),
+    folder_id: String(input.folderId || "").trim(),
     name: String(input.name || "未命名资料").trim().slice(0, 200),
     kind: REFERENCE_KIND_VALUES.includes(input.kind) ? input.kind : "other",
     content_type: String(input.contentType || "").trim(),
@@ -3112,20 +3686,67 @@ export async function getDirectusReferenceDocument(id) {
   }
 }
 
-function referenceDocumentQuery({ projectId = "", libraryId = "", status = "", search = "" } = {}) {
-  const params = new URLSearchParams();
-  if (projectId) params.set("filter[project_id][_eq]", String(projectId));
-  if (libraryId) params.set("filter[library_id][_eq]", String(libraryId));
-  if (status) params.set("filter[status][_eq]", String(status));
-  if (search) params.set("filter[name][_icontains]", String(search));
-  return params;
+function referenceDocumentQuery({
+  projectId = "",
+  libraryId = "",
+  folderId = "",
+  folderIds = null,
+  status = "",
+  search = ""
+} = {}) {
+  const filter = {};
+  if (projectId) filter.project_id = { _eq: String(projectId) };
+  if (libraryId) filter.library_id = { _eq: String(libraryId) };
+  if (status) filter.status = { _eq: String(status) };
+  const clauses = [];
+  if (Array.isArray(folderIds)) {
+    const values = folderIds.map(String);
+    if (values.includes("")) {
+      const nonEmpty = values.filter(Boolean);
+      const alternatives = [];
+      if (nonEmpty.length) alternatives.push({ folder_id: { _in: nonEmpty } });
+      alternatives.push({ folder_id: { _empty: true } });
+      clauses.push({ _or: alternatives });
+    } else {
+      filter.folder_id = values.length === 1 ? { _eq: values[0] } : { _in: values };
+    }
+  }
+  else if (folderId) filter.folder_id = { _eq: String(folderId) };
+  if (search) {
+    clauses.push({ _or: [
+      { name: { _icontains: String(search) } },
+      { source_file: { _icontains: String(search) } }
+    ] });
+  }
+  if (clauses.length === 1) Object.assign(filter, clauses[0]);
+  else if (clauses.length > 1) filter._and = clauses;
+  return Object.keys(filter).length ? JSON.stringify(filter) : "";
 }
 
-export async function listDirectusReferenceDocuments({ projectId = "", libraryId = "", status = "", search = "", offset = 0, limit = 50 } = {}) {
-  const filters = referenceDocumentQuery({ projectId, libraryId, status, search });
+export async function listDirectusReferenceDocuments({
+  projectId = "",
+  libraryId = "",
+  folderId = "",
+  folderIds = null,
+  status = "",
+  search = "",
+  offset = 0,
+  limit = 50
+} = {}) {
+  const filter = referenceDocumentQuery({ projectId, libraryId, folderId, folderIds, status, search });
+  const params = new URLSearchParams({ fields: "*", limit: "200", sort: "-date_created" });
+  const countParams = new URLSearchParams();
+  if (filter) {
+    params.set("filter", filter);
+    countParams.set("filter", filter);
+  }
+  const requested = Number(limit);
+  params.set("limit", String(requested > 0 ? Math.min(1_000, requested) : -1));
+  params.set("offset", String(Math.max(0, Number(offset) || 0)));
+  countParams.set("aggregate[count]", "*");
   const [items, counted] = await Promise.all([
-    request(`/items/${REFERENCE_DOCUMENT_COLLECTION}?${filters}&fields=*&limit=${Math.min(200, Math.max(1, Number(limit) || 50))}&offset=${Math.max(0, Number(offset) || 0)}&sort=-date_updated`),
-    request(`/items/${REFERENCE_DOCUMENT_COLLECTION}?${referenceDocumentQuery({ projectId, libraryId, status, search })}&aggregate[count]=*`)
+    request(`/items/${REFERENCE_DOCUMENT_COLLECTION}?${params}`),
+    request(`/items/${REFERENCE_DOCUMENT_COLLECTION}?${countParams}`)
   ]);
   return { total: Number(counted?.[0]?.count) || 0, items: (items || []).map(mapReferenceDocument) };
 }

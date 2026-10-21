@@ -95,10 +95,23 @@ function cosineScore(stored, query) {
   return Math.max(0, Math.min(1, dot));
 }
 
-function lexicalScore(normalized, memory) {
-  const edit = similarity(normalized, normalizeSource(memory.source));
-  const overlap = tokenOverlap(normalized, memory.source);
-  const exact = normalized === normalizeSource(memory.source) ? 1 : 0;
+/**
+ * 比较用文本：先剥掉 MQXLIFF 内联标签（`<tag id='tag-1' type='inline' desc='ph'/>`）再归一化。
+ *
+ * 标签在同一次导出里高度雷同，拿它参与编辑距离会让"只有标签相同"的两行算出
+ * 0.5–0.6 的相似度。真库实测：8,455 行里有 3,019 行带标签，全量打分时
+ * `（笑い）<tag…/>`、`ふん<tag…/>` 甚至只有标签的行都会被当成"相似译例"送进提示词。
+ * 判等与相似度都必须先剥标签；写库仍然保存原始文本（导出回写需要它们）。
+ */
+function comparableSource(value = "") {
+  return normalizeSource(String(value || "").replace(/<tag\b[^<>]*\/>/giu, " "));
+}
+
+function lexicalScore(comparable, memory) {
+  const stored = comparableSource(memory.source);
+  const edit = similarity(comparable, stored);
+  const overlap = tokenOverlap(comparable, stored);
+  const exact = comparable && comparable === stored ? 1 : 0;
   return { edit, overlap, exact };
 }
 
@@ -175,7 +188,8 @@ export function rankTranslationMemories(source, memories = [], {
   catMinFuzzy = 0,
   llmMinRelevance = 0
 } = {}) {
-  const normalized = normalizeSource(source);
+  // 相似度按"剥掉内联标签"的文本算（见 comparableSource 的注释）：查询与记忆两侧必须同一口径。
+  const normalized = comparableSource(source);
   const nowMs = now instanceof Date ? now.valueOf() : Date.parse(now);
   // Production and long-term retrieval are formal-only by default. A caller
   // must explicitly request working_consistency and provide a batch/task/session
@@ -236,15 +250,12 @@ export function rankTranslationMemories(source, memories = [], {
     const roleRank = { master: 3, reference: 2, working: 1 };
     return (roleRank[b.libraryRole] || 0) - (roleRank[a.libraryRole] || 0)
       || Number(a.libraryPriority ?? 100) - Number(b.libraryPriority ?? 100)
-      || b.rankScore - a.rankScore
       || b.similarity - a.similarity
+      // 相关度相同的附近才让"同语体同领域"占优：范围只是参考，不是过滤条件。
+      || b.rankScore - a.rankScore
       || (QUALITY_RANK[b.qualityStatus] ?? 0) - (QUALITY_RANK[a.qualityStatus] ?? 0)
       || (b.qaScore || 0) - (a.qaScore || 0);
   }).slice(0, limit);
-}
-
-function catComparable(value) {
-  return normalizeSource(String(value || "").replace(/<tag\b[^<>]*\/>/giu, " "));
 }
 
 function nonBreakTagSignature(value) {
@@ -256,11 +267,11 @@ function nonBreakTagSignature(value) {
 }
 
 function sameContextValue(left, right) {
-  return Boolean(String(left || "").trim() && String(right || "").trim() && catComparable(left) === catComparable(right));
+  return Boolean(String(left || "").trim() && String(right || "").trim() && comparableSource(left) === comparableSource(right));
 }
 
 export function classifyCatMatch(source, memory, { entryId = "", entryKey = "", previousSource = "", nextSource = "" } = {}) {
-  const exact = catComparable(source) === catComparable(memory?.source)
+  const exact = comparableSource(source) === comparableSource(memory?.source)
     && nonBreakTagSignature(source) === nonBreakTagSignature(memory?.source);
   if (!exact) return { rate: null, kind: "fuzzy", idMatch: false, contextMatch: false };
   // 条目身份优先用 memoQ 的稳定 ID（entryKey）：unitId 只是文件内序号，跨文件不可比。
@@ -276,9 +287,10 @@ export function classifyCatMatch(source, memory, { entryId = "", entryKey = "", 
 }
 
 export function rankQaCases(source, cases = [], { limit = 3, queryEmbedding = null, contentType = "", domain = "" } = {}) {
-  const normalized = normalizeSource(source);
+  // 相似度按"剥掉内联标签"的文本算：标签不该制造相似度（见 comparableSource 的注释）。
+  const normalized = comparableSource(source);
   return cases.map((item) => {
-    const edit = similarity(normalized, normalizeSource(item.source));
+    const edit = similarity(normalized, comparableSource(item.source));
     const overlap = tokenOverlap(normalized, item.source);
     const lexical = edit * 0.72 + overlap * 0.28;
     const cosine = cosineScore(item, queryEmbedding);
@@ -295,7 +307,10 @@ export function rankQaCases(source, cases = [], { limit = 3, queryEmbedding = nu
       scopeRank,
       rankScore: Number((score + (SCOPE_RANK_BONUS[scopeRank] ?? 0)).toFixed(4))
     };
-  }).filter((item) => item.similarity >= 0.3).sort((a, b) => b.rankScore - a.rankScore || b.similarity - a.similarity || b.scoreAfter - a.scoreAfter).slice(0, limit);
+    // 语体/领域只作参考：先看相关度，同分附近才让同范围的排前面。
+  }).filter((item) => item.similarity >= 0.3)
+    .sort((a, b) => b.similarity - a.similarity || b.rankScore - a.rankScore || b.scoreAfter - a.scoreAfter)
+    .slice(0, limit);
 }
 
 /**
@@ -348,18 +363,10 @@ export function scopeMachineDraftsToFile(memories = [], { sourceFile = "", batch
 }
 
 /**
- * 领域是**收窄**维度，不是必要条件。记忆、QA 案例与风格证据都按
- * `item.domain === domain || item.domain === "general"` 严格过滤，而本项目
- * 99% 资产都归在 game 下（风格规范 7/7、记忆 592/597、证据 1951/1966）——
- * 一旦领域判成或选成别的值，检索会静默归零，模型失去全部参考译例。
- *
- * 因此统一用不限领域的一次查询取回，再在内存里收窄；收窄后为空就退回全量，
- * 只保留语体维度。这样领域既能在资产积累起来后真正起作用，也永远不会把
- * 检索打空。返回 relaxed 供界面说明本次是否放宽过。
+ * 领域与语体都只作参考：不再按它们收窄候选池，是否同范围只影响排序加成
+ * （见 scopeRank / SCOPE_RANK_BONUS）。这个函数保留成 passthrough，
+ * 让调用方与界面口径（relaxed=false）保持稳定，同时避免"领域判错就检索归零"。
  */
-export function narrowByDomain(items, domain) {
-  const list = Array.isArray(items) ? items : [];
-  if (!domain || domain === "general") return { items: list, relaxed: false };
-  const scoped = list.filter((item) => item?.domain === domain || item?.domain === "general");
-  return scoped.length ? { items: scoped, relaxed: false } : { items: list, relaxed: list.length > 0 };
+export function narrowByDomain(items) {
+  return { items: Array.isArray(items) ? items : [], relaxed: false };
 }

@@ -286,13 +286,34 @@ const definitions = [
     ]
   },
   {
+    collection: "reference_folders",
+    meta: {
+      icon: "folder",
+      note: "参考资料的目录树；项目内单一层级，parent_id 为空表示项目根目录。",
+      display_template: "{{name}}",
+      group: "localization_assets",
+      sort: 2,
+      accountability: "all",
+      translations: label("参考资料目录")
+    },
+    schema: {},
+    fields: [
+      uuidField(),
+      textField("project_id", "所属项目 ID", { required: true, width: "half", sort: 2 }),
+      textField("parent_id", "上级目录 ID", { width: "half", sort: 3 }),
+      textField("name", "目录名称", { required: true, sort: 4 }),
+      dateField("date_created", "创建时间", "date-created", 5),
+      dateField("date_updated", "更新时间", "date-updated", 6)
+    ]
+  },
+  {
     collection: "reference_documents",
     meta: {
       icon: "menu_book",
       note: "参考资料：角色设定、剧本、故事梗概等不作为术语或 TM 注入的资料。",
       display_template: "{{name}}",
       group: "localization_assets",
-      sort: 2,
+      sort: 3,
       accountability: "all",
       translations: label("参考资料")
     },
@@ -301,19 +322,20 @@ const definitions = [
       uuidField(),
       textField("project_id", "所属项目 ID", { width: "half", sort: 2 }),
       textField("library_id", "所属资料库", { width: "half", sort: 3 }),
-      textField("name", "资料名称", { required: true, sort: 4 }),
-      selectField("kind", "资料类型", [["角色设定", "character"], ["剧本", "script"], ["故事梗概", "synopsis"], ["设定资料", "setting"], ["其他", "other"]], { defaultValue: "other", sort: 5 }),
-      selectField("content_type", "限定语体", contentTypeValues, { sort: 6, nullable: true }),
-      textField("domain", "限定领域", { width: "half", sort: 7 }),
-      textField("source_file", "来源文件", { width: "half", sort: 8 }),
-      textField("source_format", "文件格式", { width: "half", sort: 9 }),
-      { field: "characters", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 10, translations: label("字数") }, schema: { is_nullable: false, default_value: 0 } },
-      { field: "chunk_count", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 11, translations: label("片段数") }, schema: { is_nullable: false, default_value: 0 } },
-      selectField("status", "状态", [["索引中", "indexing"], ["可用", "ready"], ["失败", "failed"], ["已停用", "disabled"]], { defaultValue: "indexing", sort: 12 }),
-      textField("error", "失败原因", { multiline: true, sort: 13 }),
-      jsonField("ingest_report", "导入报告", { note: "解析格式、识图页数与分块统计。", sort: 14 }),
-      dateField("date_created", "创建时间", "date-created", 15),
-      dateField("date_updated", "更新时间", "date-updated", 16)
+      textField("folder_id", "所属目录", { width: "half", sort: 4 }),
+      textField("name", "资料名称", { required: true, sort: 5 }),
+      selectField("kind", "资料类型", [["角色设定", "character"], ["剧本", "script"], ["故事梗概", "synopsis"], ["设定资料", "setting"], ["其他", "other"]], { defaultValue: "other", sort: 6 }),
+      selectField("content_type", "限定语体", contentTypeValues, { sort: 7, nullable: true }),
+      textField("domain", "限定领域", { width: "half", sort: 8 }),
+      textField("source_file", "来源文件", { width: "half", sort: 9 }),
+      textField("source_format", "文件格式", { width: "half", sort: 10 }),
+      { field: "characters", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 11, translations: label("字数") }, schema: { is_nullable: false, default_value: 0 } },
+      { field: "chunk_count", type: "integer", meta: { interface: "input", readonly: true, width: "half", sort: 12, translations: label("片段数") }, schema: { is_nullable: false, default_value: 0 } },
+      selectField("status", "状态", [["索引中", "indexing"], ["可用", "ready"], ["失败", "failed"], ["已停用", "disabled"]], { defaultValue: "indexing", sort: 13 }),
+      textField("error", "失败原因", { multiline: true, sort: 14 }),
+      jsonField("ingest_report", "导入报告", { note: "解析格式、识图页数与分块统计。", sort: 15 }),
+      dateField("date_created", "创建时间", "date-created", 16),
+      dateField("date_updated", "更新时间", "date-updated", 17)
     ]
   },
   {
@@ -323,7 +345,7 @@ const definitions = [
       note: "参考资料的检索片段；risk 片段默认不参与检索，人工放行后才可被模型查到。",
       display_template: "{{heading}} · {{ordinal}}",
       group: "localization_assets",
-      sort: 3,
+      sort: 4,
       accountability: "all",
       translations: label("参考资料片段")
     },
@@ -429,7 +451,10 @@ const definitions = [
       display_template: "{{filename}}",
       group: "localization_pipeline",
       sort: 3,
-      accountability: "all",
+      // 批次状态是高频覆盖写的运行数据（每段 commit 一次，979 段单行 269KB）。
+      // 只保留 activity，不要 revisions：否则每段都会复制一份整行，revisions 会按
+      // O(n²) 膨胀（实测 4 个批次已有 196MB）。
+      accountability: "activity",
       translations: label("翻译批次进度")
     },
     schema: {},
@@ -907,6 +932,38 @@ const definitions = [
   }
 ];
 
+/**
+ * 高频过滤列的索引声明。
+ *
+ * Directus 默认只给主键建索引；TM/术语/QA 的查询几乎都带 project_id，再加上
+ * library_id / entry_key / source_hash 或 batch_id。没有这些索引时，8 万行 TM
+ * 的每次写入查重都会全表扫描（实测 1.8 万次 seq scan）。
+ */
+const INDEXED_FIELDS = {
+  terms_zh_cn: ["project_id", "source"],
+  translation_memory_zh_cn: ["project_id", "library_id", "entry_key", "source_hash"],
+  qa_runs: ["project_id", "batch_id"],
+  qa_cases: ["project_id", "status"],
+  reference_documents: ["project_id"],
+  reference_chunks: ["project_id", "document_id"],
+  background_tasks: ["project_id", "date_updated"],
+  batch_runs: ["project_id"],
+  style_evidence: ["project_id", "status"],
+  learning_trajectories: ["project_id", "batch_id"],
+  term_candidates: ["project_id", "batch_id", "status"]
+};
+
+function applyIndexDeclarations() {
+  for (const definition of definitions) {
+    const indexed = INDEXED_FIELDS[definition.collection];
+    if (!indexed) continue;
+    for (const field of definition.fields) {
+      if (!indexed.includes(field.field)) continue;
+      field.schema = { ...(field.schema || {}), is_indexed: true };
+    }
+  }
+}
+
 async function api(path, { method = "GET", body, allowed = [] } = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
@@ -970,6 +1027,11 @@ async function ensureCollection(definition) {
         console.log(`relaxed ${definition.collection}.${field.field} to nullable`);
       } else if (field.schema?.is_nullable === false && current.schema?.is_nullable === true) {
         console.warn(`skip ${definition.collection}.${field.field}: 声明为非空但库中可空，收紧约束需人工确认历史数据`);
+      }
+      // Directus 默认只给主键建索引。高频过滤列（项目、库、条目身份、原文哈希）
+      // 没有索引时，8 万行 TM 的每次查重都是全表扫描。
+      if (field.schema?.is_indexed === true && current.schema?.is_indexed !== true) {
+        schemaPatch.is_indexed = true;
       }
       // 下拉选项和默认值是接口元数据，不会因为字段已存在而自动更新。后台任务的
       // task_type/task_status 需要补上批次翻译与运行状态，否则界面仍停留在旧选项。
@@ -1113,6 +1175,7 @@ async function ensureServiceAccount() {
     ...["create", "read", "update", "delete"].map((action) => ["translation_skills", action]),
     ...["create", "read", "update", "delete"].map((action) => ["skill_evaluations", action]),
     ...["create", "read", "update", "delete"].map((action) => ["quality_assets", action]),
+    ...["create", "read", "update", "delete"].map((action) => ["reference_folders", action]),
     ...["create", "read", "update", "delete"].map((action) => ["reference_documents", action]),
     ...["create", "read", "update", "delete"].map((action) => ["reference_chunks", action]),
     ...["create", "read", "delete"].map((action) => ["quality_runs", action]),
@@ -1166,6 +1229,7 @@ await waitForDirectus();
 await ensureFolder("localization_assets", "日语到简体中文资产", "translate", 1);
 await ensureFolder("localization_pipeline", "语料与规则", "account_tree", 2);
 await ensureFolder("localization_learning", "翻译学习与评测", "psychology", 3);
+applyIndexDeclarations();
 for (const definition of definitions) await ensureCollection(definition);
 await cleanupAbandonedFrenchSharedFields();
 await reconcileTranslationSkillKeys();

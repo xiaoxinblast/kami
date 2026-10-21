@@ -185,3 +185,31 @@ export function describeTierStrength({ tier, provider = {} } = {}) {
     ? `严苛档使用高质量模型「${qualityModel}」并执行多轮修订。`
     : "严苛档＝当前模型满强度 + 多候选 + 多轮修订（未启用更强模型）。";
 }
+
+/**
+ * 一份文件实际各用了多少段哪一档。
+ *
+ * 质量档是逐段判定的，文件行只写"自动"看不出实际发生了什么；
+ * `unrecorded` 是较早版本翻译、结果里还没落档位字段的段落——如实报出来，不猜。
+ */
+export function summarizeQualityTiers(segments = []) {
+  const counts = { fast: 0, standard: 0, strict: 0, unrecorded: 0 };
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    if (!segment || segment.selected === false) continue;
+    const tier = String(segment?.result?.qualityTier || "");
+    if (Object.hasOwn(counts, tier)) counts[tier] += 1;
+    else counts.unrecorded += 1;
+  }
+  return counts;
+}
+
+/** 档位分布的展示文案：只列非零项；一条都没记录时说清楚原因。 */
+export function describeQualityTiers(tiers = {}) {
+  const parts = [["fast", "快速"], ["standard", "标准"], ["strict", "严苛"]]
+    .map(([key, label]) => [Number(tiers?.[key]) || 0, label])
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => `${label} ${count}`);
+  const unrecorded = Number(tiers?.unrecorded) || 0;
+  if (unrecorded) parts.push(parts.length ? `未记录 ${unrecorded}` : "未记录（旧版本翻译）");
+  return parts.join(" · ");
+}

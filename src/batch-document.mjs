@@ -162,6 +162,9 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
   analysis = applyColumnMapping(analysis, columnMapping);
   const collector = createCollector(segmentationMode);
   const cells = [];
+  // 导出用：这张表有没有真正的"译文列"，没有的话要把译文写到末尾新增的一列，
+  // 而不是覆盖原文（原位覆盖会让用户拿不到原文，是不可逆的破坏）。
+  const translationColumns = {};
   workbook.eachSheet((worksheet) => {
     const sheetAnalysis = analysis.sheets.find((sheet) => sheet.sheet === worksheet.name);
     if (!sheetAnalysis) return;
@@ -170,6 +173,13 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
     // 写回列：优先用"译文列"（translation_output，memoQ 的 target 语义）；
     // 没有这样的列就写回原文列本身（原位覆盖），与旧行为一致。
     const outputColumns = sheetAnalysis.columns.filter((column) => column.role === "translation_output").map((column) => column.column);
+    translationColumns[worksheet.name] = {
+      hasTranslationColumn: outputColumns.length > 0,
+      appendColumn: outputColumns[0] || Math.max(worksheet.columnCount || 0, ...sheetAnalysis.columns.map((column) => Number(column.column) || 0)) + 1,
+      headerRow: Number(sheetAnalysis.headerRow) || 1,
+      // 无表头的表格不能往第一行写"译文"列头，那会顶掉一条正文。
+      hasHeader: Boolean(sheetAnalysis.headerRow)
+    };
     worksheet.eachRow((row) => {
       if (sheetAnalysis.headerRow && row.number === sheetAnalysis.headerRow) return;
       const metadata = [];
@@ -210,7 +220,7 @@ async function prepareSpreadsheet(workbook, segmentationMode, analyzeSpreadsheet
   return {
     format,
     segments: collector.segments,
-    structure: { cells },
+    structure: { cells, translationColumns },
     spreadsheetAnalysis: {
       source: analysis.usedModel ? "model" : "rules",
       usedModel: Boolean(analysis.usedModel),
@@ -377,52 +387,181 @@ async function buildTranslationOnlyDocx(paragraphs = []) {
   return zip.generateAsync({ type: "nodebuffer" });
 }
 
+/** 单列译文表：给 xliff/mqxliff 这类"没有纯译文文件形态"的源用。 */
+function buildTranslationWorkbook(lines) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet("译文");
+  worksheet.columns = [{ header: "译文", key: "translation", width: 80 }];
+  lines.forEach((line) => worksheet.addRow({ translation: line }));
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  return workbook;
+}
+
+/** xlsx 双语表：文本文档（txt/md/docx）没有列可填，就按段落给原文 + 译文。 */
+function buildBilingualWorkbook(segments = []) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet("双语对照");
+  worksheet.columns = [
+    { header: "序号", key: "index", width: 8 },
+    { header: "原文", key: "source", width: 58 },
+    { header: "译文", key: "translation", width: 58 }
+  ];
+  segments.filter((segment) => segment.selected !== false).forEach((segment, index) => {
+    worksheet.addRow({ index: index + 1, source: segment.source || "", translation: segment.translation || "" });
+  });
+  worksheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  worksheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF123E31" } };
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  worksheet.eachRow((row, rowNumber) => {
+    row.alignment = { vertical: "top", wrapText: true };
+    if (rowNumber > 1) row.height = 36;
+  });
+  return workbook;
+}
+
+/**
+ * 表格的双语写回：有译文列就填那一列，没有就在末尾新增一列"译文"。
+ *
+ * `translationColumns` 是解析阶段记下来的（哪张表有没有译文列、追加列是第几列），
+ * 导出时按它决定目标单元格——绝不覆盖原文列。
+ */
+async function exportSpreadsheetWithTranslationColumn(input, translations) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(decodeBase64(input.base64));
+  const plan = input.structure?.translationColumns || {};
+  const appliedSheets = new Set();
+  for (const item of input.structure?.cells || []) {
+    const worksheet = workbook.getWorksheet(item.sheet);
+    if (!worksheet) continue;
+    const sheetPlan = plan[item.sheet] || {};
+    const target = sheetPlan.hasTranslationColumn
+      ? (item.targetAddress || item.address)
+      : `${columnNumberToLetters(sheetPlan.appendColumn || item.column || 1)}${Number(item.row) || 1}`;
+    worksheet.getCell(target).value = translatedGroup(item.segmentIds, translations);
+    if (!appliedSheets.has(item.sheet) && sheetPlan.hasTranslationColumn !== true && sheetPlan.hasHeader === true) {
+      // 追加列的列头写"译文"，用户打开就能看出这一列是系统加的。
+      const headerCell = worksheet.getCell(`${columnNumberToLetters(sheetPlan.appendColumn || 1)}${Number(sheetPlan.headerRow) || 1}`);
+      if (!excelCellText(headerCell)) headerCell.value = "译文";
+      appliedSheets.add(item.sheet);
+    }
+  }
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+/** csv 同规则：目标列 = 译文列，没有就追加到最后一列之后。 */
+function exportCsvWithTranslationColumn(input, translations) {
+  const original = input.text !== undefined ? String(input.text) : decodeBase64(input.base64).toString("utf8");
+  const document = parseCsvDocument(original, { delimiter: input.structure?.csv?.delimiter });
+  const plan = input.structure?.translationColumns || {};
+  const sheetPlan = plan[Object.keys(plan)[0] || ""] || {};
+  const replacements = [];
+  if (sheetPlan.hasTranslationColumn !== true && sheetPlan.hasHeader === true) {
+    // 追加列也要有列头，否则用户打开只看到一列没有名字的译文。
+    replacements.push({ row: Number(sheetPlan.headerRow) || 1, column: Number(sheetPlan.appendColumn) || 1, value: "译文" });
+  }
+  for (const item of input.structure?.cells || []) replacements.push({
+    row: Number(item.row),
+    column: Number(sheetPlan.hasTranslationColumn ? (item.targetColumn || item.column) : (sheetPlan.appendColumn || item.column)),
+    value: translatedGroup(item.segmentIds, translations)
+  });
+  return replaceCsvCells(
+    document,
+    replacements.filter((item) => Number.isInteger(item.row) && item.row > 0 && Number.isInteger(item.column) && item.column > 0),
+    { allowAppend: sheetPlan.hasTranslationColumn !== true }
+  );
+}
+
+/** 1 → A、27 → AA。 */
+function columnNumberToLetters(value) {
+  let number = Math.max(1, Math.trunc(Number(value) || 1));
+  let letters = "";
+  while (number > 0) {
+    const remainder = (number - 1) % 26;
+    letters = String.fromCharCode(65 + remainder) + letters;
+    number = Math.floor((number - 1) / 26);
+  }
+  return letters;
+}
+
 export async function exportBatchDocument(input = {}) {
-  const format = String(input.format || "");
-  // mode: in-place（写回原文件，默认）| translation-only（仅译文）
-  const mode = input.mode === "translation-only" ? "translation-only" : "in-place";
+  const requested = String(input.format || "");
+  /**
+   * 三种交付语义（用户定的）：
+   * - bilingual：原文 + 译文放同一份里。表格有译文列就填那一列、没有就在末尾新增"译文"列；
+   *   mqxliff/xliff 填 target；文本文档（txt/md/docx）没有"列"的概念，给 xlsx 双语表。
+   * - translation：只要译文。docx 给纯译文文档、xlsx/csv 给单列译文、txt/md 给纯译文；
+   *   mqxliff/xliff 是双语容器、抽不出"纯译文文件"，统一转成 xlsx 单列译文表。
+   * - in-place：老行为（写回原文件里的对应位置），翻译界面里的「写回原文件」还用它。
+   */
+  const kind = requested === "translation" ? "translation"
+    : requested === "bilingual" ? "bilingual"
+      : input.mode === "translation-only" ? "translation"
+        : requested === "task-xlsx" ? "task-xlsx"
+          : "in-place";
+  const format = kind === "task-xlsx" ? "task-xlsx" : requested === "translation" || requested === "bilingual" ? String(input.sourceFormat || "") : requested;
+  const sourceFormat = String(input.sourceFormat || requested || "");
   const translations = translationMap(input.segments);
   if (!translations.size) fail("没有可导出的分段");
-  if (mode === "in-place" && ["docx", "xlsx", "xliff", "mqxliff"].includes(format) && !input.base64) {
-    fail("写回原文件需要原始文件，请重新选择该文件；只想拿译文可以选「仅译文」导出");
-  }
-  if (mode === "in-place" && format === "csv" && input.text === undefined && !input.base64) {
-    fail("写回原文件需要原始文件，请重新选择该文件；只想拿译文可以选「仅译文」导出");
-  }
   const orderedSegments = (input.segments || []).filter((segment) => segment.selected !== false && String(segment.translation || "").trim());
   const translationLines = orderedSegments.map((segment) => String(segment.translation || "").trim());
   let buffer;
   let mimeType;
   let extension;
 
-  if (mode === "translation-only" && format !== "task-xlsx") {
-    // 仅译文：适合交给下游直接使用的纯译文文件（docx/txt/md/xlsx/csv 都支持）。
-    if (format === "docx") {
+  const effectiveFormat = ["translation", "bilingual"].includes(kind) ? sourceFormat : format;
+  const needsSource = ["docx", "xlsx", "csv", "xliff", "mqxliff"].includes(effectiveFormat);
+  /** 双语交付能"填回原文件"的格式：表格填列、xliff 填 target；其余文本文档给 xlsx 双语表。 */
+  const bilingualWritesBack = ["xlsx", "csv", "xliff", "mqxliff"].includes(effectiveFormat);
+  if (kind === "in-place" && ["docx", "xlsx", "xliff", "mqxliff"].includes(effectiveFormat) && !input.base64) {
+    fail("写回原文件需要原始文件，请重新选择该文件；只想拿译文可以选「仅译文」导出");
+  }
+  if (kind === "in-place" && effectiveFormat === "csv" && input.text === undefined && !input.base64) {
+    fail("写回原文件需要原始文件，请重新选择该文件；只想拿译文可以选「仅译文」导出");
+  }
+
+  if (kind === "translation") {
+    // 仅译文：适合交给下游直接使用的纯译文文件。
+    if (effectiveFormat === "docx") {
       buffer = await buildTranslationOnlyDocx(translationLines);
       mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       extension = ".docx";
-    } else if (format === "xlsx") {
-      const workbook = new ExcelJS.Workbook();
-      const worksheet = workbook.addWorksheet("译文");
-      worksheet.columns = [{ header: "译文", key: "translation", width: 80 }];
-      translationLines.forEach((line) => worksheet.addRow({ translation: line }));
-      worksheet.getRow(1).font = { bold: true };
-      worksheet.views = [{ state: "frozen", ySplit: 1 }];
+    } else if (["xlsx", "xliff", "mqxliff"].includes(effectiveFormat)) {
+      // xliff / mqxliff 没有"纯译文文件"这种形态：统一给一份单列译文表，跟其它"仅译文"一致。
+      const workbook = buildTranslationWorkbook(translationLines);
       buffer = Buffer.from(await workbook.xlsx.writeBuffer());
       mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
       extension = ".xlsx";
-    } else if (format === "csv") {
+    } else if (effectiveFormat === "csv") {
       const escapeCell = (value) => `"${String(value ?? "").replace(/"/gu, '""')}"`;
       buffer = Buffer.from([["译文"], ...translationLines.map((line) => [line])].map((row) => row.map(escapeCell).join(",")).join("\r\n"), "utf8");
       mimeType = "text/csv; charset=utf-8";
       extension = ".csv";
-    } else if (format === "markdown" || format === "text") {
+    } else if (effectiveFormat === "markdown" || effectiveFormat === "text") {
       buffer = Buffer.from(translationLines.join("\n"), "utf8");
-      mimeType = format === "markdown" ? "text/markdown; charset=utf-8" : "text/plain; charset=utf-8";
-      extension = format === "markdown" ? ".md" : ".txt";
+      mimeType = effectiveFormat === "markdown" ? "text/markdown; charset=utf-8" : "text/plain; charset=utf-8";
+      extension = effectiveFormat === "markdown" ? ".md" : ".txt";
     } else {
       fail("这个格式不支持仅译文导出");
     }
+  } else if (kind === "bilingual" && !bilingualWritesBack) {
+    // 文本文档没有"列"可填：给一份 xlsx 双语表（序号 / 原文 / 译文）。
+    const workbook = buildBilingualWorkbook(input.segments || []);
+    buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+    mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    extension = ".xlsx";
+  } else if (kind === "bilingual" && effectiveFormat === "xlsx") {
+    buffer = await exportSpreadsheetWithTranslationColumn(input, translations);
+    mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    extension = ".xlsx";
+  } else if (kind === "bilingual" && effectiveFormat === "csv") {
+    buffer = Buffer.from(exportCsvWithTranslationColumn(input, translations), "utf8");
+    mimeType = "text/csv; charset=utf-8";
+    extension = ".csv";
+  } else if (kind === "bilingual" && (effectiveFormat === "xliff" || effectiveFormat === "mqxliff")) {
+    buffer = exportXliffDocument({ ...input, format: effectiveFormat });
+    mimeType = "application/xliff+xml; charset=utf-8";
+    extension = effectiveFormat === "mqxliff" ? ".mqxliff" : ".xliff";
   } else if (format === "task-xlsx") {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet("翻译任务");
@@ -487,31 +626,19 @@ export async function exportBatchDocument(input = {}) {
     mimeType = "application/xliff+xml; charset=utf-8";
     extension = format === "mqxliff" ? ".mqxliff" : ".xliff";
   } else if (format === "xlsx") {
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(decodeBase64(input.base64));
-    for (const item of input.structure?.cells || []) {
-      const worksheet = workbook.getWorksheet(item.sheet);
-      // 有写回列就写进那一列（原文保留），没有就原位覆盖原文单元格。
-      if (worksheet) worksheet.getCell(item.targetAddress || item.address).value = translatedGroup(item.segmentIds, translations);
-    }
-    buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+    // 写回原文件同样不覆盖原文：有译文列写译文列，没有就在末尾加一列。
+    buffer = await exportSpreadsheetWithTranslationColumn(input, translations);
     mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     extension = ".xlsx";
   } else if (format === "csv") {
-    const original = input.text !== undefined ? String(input.text) : decodeBase64(input.base64).toString("utf8");
-    const document = parseCsvDocument(original, { delimiter: input.structure?.csv?.delimiter });
-    const replacements = (input.structure?.cells || []).map((item) => ({
-      row: Number(item.row),
-      column: Number(item.targetColumn || item.column),
-      value: translatedGroup(item.segmentIds, translations)
-    })).filter((item) => Number.isInteger(item.row) && item.row > 0 && Number.isInteger(item.column) && item.column > 0);
-    buffer = Buffer.from(replaceCsvCells(document, replacements), "utf8");
+    buffer = Buffer.from(exportCsvWithTranslationColumn(input, translations), "utf8");
     mimeType = "text/csv; charset=utf-8";
     extension = ".csv";
   } else fail("不支持的导出格式");
 
   return {
     filename: outputName(input.filename || `translated${extension}`, input.locale, extension),
+    extension,
     mimeType,
     base64: buffer.toString("base64"),
     bytes: buffer.length

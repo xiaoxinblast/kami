@@ -120,6 +120,9 @@ export function matchTerms(text, assets, {
   channel = "",
   platform = "",
   region = "",
+  // 只算"原文里确实包含该词"的精确命中：一致性核对/术语证据只取 exact，
+  // 关掉滑窗编辑距离后 5.8k 条术语从几十秒降到几十毫秒。
+  exactOnly = false,
   now = new Date()
 } = {}) {
   if (!assets?.locale) throw new Error("Asset collection must have an explicit locale");
@@ -156,7 +159,7 @@ export function matchTerms(text, assets, {
         if (!best || candidate.score > best.score) best = candidate;
         continue;
       }
-      if (normalizedVariant.length >= 3 && couldFuzzyMatch(sourceCharacters, normalizedVariant)) {
+      if (!exactOnly && normalizedVariant.length >= 3 && couldFuzzyMatch(sourceCharacters, normalizedVariant)) {
         const windows = [];
         const characters = [...normalizedText];
         const size = [...normalizedVariant].length;

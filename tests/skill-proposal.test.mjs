@@ -20,16 +20,27 @@ const store = await import("../src/store.mjs");
 const engine = await import("../src/learning-engine.mjs");
 const proposal = await import("../src/skill-proposal.mjs");
 
-test("selectProposalTrajectories 只保留带终稿的完成/复核轨迹并截断", () => {
+test("selectProposalTrajectories 只保留人工采纳的终稿并截断", () => {
+  const accepted = (id, extra = {}) => ({
+    id, status: "completed", finalTranslation: "有", humanDecision: { accepted: true, finalTranslation: "有" }, ...extra
+  });
   const trajectories = [
-    { id: "a", status: "completed", finalTranslation: "有" },
-    { id: "b", status: "review", finalTranslation: "有" },
-    { id: "c", status: "running", finalTranslation: "有" },
-    { id: "d", status: "completed", finalTranslation: "" },
-    { id: "e", status: "failed", finalTranslation: "有" }
+    accepted("a"),
+    accepted("b", { status: "review" }),
+    accepted("c", { status: "running" }),
+    accepted("d", { finalTranslation: "" , humanDecision: { accepted: true, finalTranslation: "" } }),
+    accepted("e", { status: "failed" }),
+    // 采纳记录里没写终稿时回落到轨迹自己的终稿
+    { id: "f", status: "completed", finalTranslation: "有", humanDecision: { accepted: true } },
+    // 机器稿：批次翻完就有了，但没有人采纳 → 不能当改进依据
+    { id: "g", status: "completed", finalTranslation: "有" },
+    { id: "h", status: "review", finalTranslation: "有", humanDecision: { accepted: false } }
   ];
-  assert.deepEqual(proposal.selectProposalTrajectories(trajectories).map((item) => item.id), ["a", "b"]);
-  assert.equal(proposal.selectProposalTrajectories(Array.from({ length: 50 }, (_, index) => ({ id: `t${index}`, status: "completed", finalTranslation: "x" }))).length, 40);
+  assert.deepEqual(proposal.selectProposalTrajectories(trajectories).map((item) => item.id), ["a", "b", "f"]);
+  assert.equal(
+    proposal.selectProposalTrajectories(Array.from({ length: 50 }, (_, index) => accepted(`t${index}`))).length,
+    40
+  );
 });
 
 test("proposeChallengerSkill 走完模型提议、补丁合并与隔离保存的完整闭环", async () => {
@@ -42,7 +53,21 @@ test("proposeChallengerSkill 走完模型提议、补丁合并与隔离保存的
       ...scope, batchId: "manual-review", segmentId: "", source: `自动提议测试句${index}` ,
       contextPack: {}, assetRefs: {}, model: "mock-model", promptVersion: "kami-translation-v1", status: "running", events: []
     });
-    await store.updateLearningTrajectory(created.id, { finalTranslation: `訳${index}`, status: "completed" });
+    await store.updateLearningTrajectory(created.id, {
+      finalTranslation: `訳${index}`,
+      status: "completed",
+      humanDecision: { accepted: true, finalTranslation: `訳${index}` }
+    });
+  }
+  // 同一范围里再塞两条没人工采纳的机器稿：它们不能进候选技能的证据。
+  const machineOnly = [];
+  for (let index = 0; index < 2; index += 1) {
+    const created = await store.saveLearningTrajectory({
+      ...scope, batchId: "machine-only", segmentId: "", source: `未校对的机器稿${index}`,
+      contextPack: {}, assetRefs: {}, model: "mock-model", promptVersion: "kami-translation-v1", status: "running", events: []
+    });
+    await store.updateLearningTrajectory(created.id, { finalTranslation: `机器${index}`, status: "completed" });
+    machineOnly.push(created.id);
   }
   const trajectories = await store.listLearningTrajectories({ ...scope, limit: 100 });
   const challenger = await proposal.proposeChallengerSkill({ scope, champion, trajectories, promptVersion: "kami-translation-v1" });
@@ -52,7 +77,12 @@ test("proposeChallengerSkill 走完模型提议、补丁合并与隔离保存的
   assert.equal(challenger.version, 2);
   assert.equal(challenger.strategy.retrieval.translationMemory.limit, 8, "模型补丁应合并进候选策略");
   assert.deepEqual(challenger.strategy.prompting.additionalRules, ["输出前逐项核对强制术语"]);
-  assert.deepEqual(challenger.evidenceIds.sort(), trajectories.filter((item) => item.status === "completed" && item.finalTranslation).map((item) => item.id).sort());
+  assert.deepEqual(
+    challenger.evidenceIds.sort(),
+    trajectories.filter((item) => item.humanDecision?.accepted === true).map((item) => item.id).sort(),
+    "只有人工采纳的终稿能当证据"
+  );
+  assert.ok(machineOnly.every((id) => !challenger.evidenceIds.includes(id)), "未校对的机器稿不能进候选技能证据");
   assert.equal(challenger.metadata.seed, 1, "冠军 metadata 应保留并合并");
   assert.equal(challenger.metadata.generatedBy, "mock-model");
 });
@@ -65,7 +95,11 @@ test("垃圾补丁经白名单净化后入库并记录净化明细", async () =>
     ...scope, batchId: "manual-review", segmentId: "", source: "返回垃圾补丁的测试句",
     contextPack: {}, assetRefs: {}, model: "mock-model", promptVersion: "kami-translation-v1", status: "running", events: []
   });
-  await store.updateLearningTrajectory(created.id, { finalTranslation: "訳", status: "completed" });
+  await store.updateLearningTrajectory(created.id, {
+    finalTranslation: "訳",
+    status: "completed",
+    humanDecision: { accepted: true, finalTranslation: "訳" }
+  });
   const trajectories = await store.listLearningTrajectories({ ...scope, limit: 100 });
   const challenger = await proposal.proposeChallengerSkill({ scope, champion, trajectories, promptVersion: "kami-translation-v1" });
 
@@ -99,7 +133,19 @@ test("没有可用轨迹时抛出与手动入口一致的 409", async () => {
   const scope = { locale: "ko-KR", contentType: "general", domain: "game", project: "default" };
   const template = engine.createDefaultTranslationSkill({ scope });
   const champion = await store.saveTranslationSkill({ ...scope, ...template, id: "champion-empty-trajectory" });
-  await assert.rejects(() => proposal.proposeChallengerSkill({ scope, champion, trajectories: [] }), (error) => error.statusCode === 409 && /没有可复盘的完成轨迹/.test(error.message));
+  await assert.rejects(
+    () => proposal.proposeChallengerSkill({ scope, champion, trajectories: [] }),
+    (error) => error.statusCode === 409 && /还没有人工采纳的终稿/.test(error.message)
+  );
+  // 只有机器稿同样不能生成：这是这一版明确加上的闸门。
+  await assert.rejects(
+    () => proposal.proposeChallengerSkill({
+      scope,
+      champion,
+      trajectories: [{ id: "machine-1", status: "completed", finalTranslation: "机器稿" }]
+    }),
+    (error) => error.statusCode === 409 && /还没有人工采纳的终稿/.test(error.message)
+  );
 });
 
 /**
@@ -122,4 +168,21 @@ test("手动生成成功会清掉自动提议的失败记录，并标明来源�
   assert.match(autoProposal, /lastSource: String\(previous\.lastSource \|\| ""\)/u);
   // 卡片上要把"手动"标出来。
   assert.match(app, /上次生成候选 \$\{escapeHtml\(formatLearningDate\(autoPropose\.lastProposedAt\)\)\}\$\{autoPropose\.lastSource === "manual" \? "（手动）" : ""\}/u);
+});
+
+/**
+ * 机器稿不能当生成依据：后端筛选、取数窗口与界面口径三处必须一致，
+ * 否则会出现"按钮能点但服务端 409"或者"明明有人工终稿却找不到"。
+ */
+test("界面与后端同口径：只有人工采纳终稿能生成候选", async () => {
+  const [server, app] = await Promise.all([
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8")
+  ]);
+  assert.match(server, /const trajectories = await listLearningTrajectories\(\{ \.\.\.scope, limit: 500 \}\);/u, "手动入口取 500 条窗口，别被最新一批机器稿挤掉人工终稿");
+  assert.match(server, /listTrajectories: async \(scope\) => listLearningTrajectories\(\{ \.\.\.scope, limit: 500 \}\)/u);
+  assert.match(app, /function proposalTrajectories\(items = \[\]\)/u);
+  assert.match(app, /proposalTrajectories\(payload\.trajectories \|\| payload\.evidence\)\.length/u, "按钮可用性要按人工采纳算");
+  assert.match(app, /条轨迹（\$\{proposalCount\} 条人工采纳）/u, "总量与可生成候选的数量要分开显示");
+  assert.match(app, /根据人工采纳终稿生成候选技能/u);
 });

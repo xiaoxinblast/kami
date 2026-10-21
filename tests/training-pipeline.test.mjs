@@ -36,7 +36,7 @@ test("冻结数据集的指纹算在序列化内容上，可被外部复算", ()
   assert.equal(dataset.recordCount, 2);
   assert.equal(dataset.kind, "sft");
   assert.equal(dataset.contentFingerprint, createHash("sha256").update(SFT_JSONL, "utf8").digest("hex"));
-  assert.equal(dataset.scopeKey, "ja-JP::narrative::game::default");
+  assert.equal(dataset.scopeKey, "ja-JP::default", "语体/领域只作参考，数据集按语言×项目结算");
 });
 
 test("空数据集和非法行都不能冻结", () => {

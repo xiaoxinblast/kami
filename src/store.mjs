@@ -1,3 +1,4 @@
+import { summarizeBatchSegments } from "../public/batch-status.js";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -6,7 +7,10 @@ import { assertLocale, LOCALES } from "./config.mjs";
 import { embedSource, embeddingModelName } from "./embedding.mjs";
 import { createDefaultProjectSettings, sanitizeProjectSettings } from "./project-config.mjs";
 import { memoryMatchAttempts, normalizeMemoryText, styleEvidenceMatch } from "./translation-memory.mjs";
+import { DEFAULT_CANDIDATE_POOL, buildMemoryIndex, removeMemoryRow, selectMemoryCandidates, upsertMemoryRow } from "./memory-index.mjs";
+import { EVIDENCE_PAGE_SIZE, EVIDENCE_SCAN_BUDGET, collectEvidencePages, stratifyEvidenceSample } from "./evidence-sample.mjs";
 import { scopeFallbackChain, scopeRankOf } from "./scope-fallback.mjs";
+import { summarizeQualityTiers } from "./quality-tier.mjs";
 import {
   deleteDirectusAsset,
   deleteDirectusLibraryEntries,
@@ -25,9 +29,11 @@ import {
   getDirectusMemories,
   countDirectusMemories,
   getDirectusQaCases,
+  findDirectusQaCase,
   getDirectusStyleProfile,
   getDirectusProjectStyleProfile,
   getDirectusStyleEvidence,
+  listDirectusStyleEvidencePage,
   countDirectusStyleEvidenceByFile,
   listDirectusStyleEvidenceFiles,
   getDirectusQaRuns,
@@ -55,15 +61,21 @@ import {
   listDirectusBackgroundTasks,
   deleteDirectusBackgroundTask,
   saveDirectusMemory,
+  saveDirectusMemories,
+  listDirectusMemoryIndexRows,
+  getDirectusMemoriesByIds,
   saveDirectusQaCase,
   saveDirectusQaRun,
   saveDirectusAsset,
   saveDirectusCorpus,
   saveDirectusImportPreview,
+  saveDirectusTmImportAudit,
   getDirectusImportPreview,
   persistDirectusImportCleaning,
   deleteDirectusBatchRun,
   saveDirectusStyleEvidence,
+  loadDirectusStyleEvidenceIndex,
+  saveDirectusStyleEvidences,
   saveDirectusStyleProfileEvaluation,
   updateDirectusStyleProfileRules,
   findDirectusStyleProfile,
@@ -89,6 +101,10 @@ import {
   listDirectusReferenceDocuments,
   updateDirectusReferenceDocument,
   deleteDirectusReferenceDocument,
+  saveDirectusReferenceFolder,
+  getDirectusReferenceFolder,
+  listDirectusReferenceFolders,
+  deleteDirectusReferenceFolder,
   replaceDirectusReferenceChunks,
   listDirectusReferenceChunks,
   listDirectusReferenceChunksForProject,
@@ -101,6 +117,7 @@ import {
   updateDirectusQualityAsset,
   saveDirectusQualityRun,
   listDirectusQualityRuns,
+  updateDirectusQualityRun,
   saveDirectusTrainingRun,
   listDirectusTrainingRuns,
   getDirectusTrainingRun
@@ -245,7 +262,7 @@ async function purgeJsonProject(id) {
   const project = await getJsonProject(id);
   if (!project) return null;
   let total = 0;
-  for (const directory of ["assets", "memories", "styles", "qa", "batches", "qa-tasks", "background-tasks", "corpora", "learning"]) {
+  for (const directory of ["assets", "memories", "styles", "qa", "batches", "qa-tasks", "background-tasks", "corpora", "learning", "references"]) {
     for (const file of await listJsonFiles(join(ROOT, directory))) {
       let data;
       try { data = JSON.parse(await readFile(file, "utf8")); } catch { continue; }
@@ -347,10 +364,6 @@ async function getJsonMemories(locale, options = {}) {
   const projectId = String(options.projectId || "").trim();
   const matched = items.filter((item) =>
     (!projectId || item.projectId === projectId)
-    && (options.scopeFallback
-      ? (!options.contentType || options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")
-      : (!options.contentType || (options.exactContentType ? item.contentType === options.contentType : options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")))
-    && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
     && (!String(options.search || "").trim() || [item.source, item.target].some((value) => String(value || "").toLowerCase().includes(String(options.search).trim().toLowerCase())))
   ).map((item) => (options.scopeFallback
     ? { ...item, scopeRank: scopeRankOf(item, { contentType: options.contentType || "general", domain: options.domain || "general" }) }
@@ -360,6 +373,35 @@ async function getJsonMemories(locale, options = {}) {
   const offset = Math.max(0, Math.trunc(Number(options.offset)) || 0);
   const limit = Number(options.limit) > 0 ? Math.min(1_000, Number(options.limit)) : sorted.length;
   return offset || limit < sorted.length ? sorted.slice(offset, offset + limit) : sorted;
+}
+
+/** 候选索引用的精简行（JSON 存储）：与 Directus 版同一口径。 */
+async function listJsonMemoryIndexRows(locale, { projectId = "" } = {}) {
+  assertLocale(locale);
+  const items = await readJson(join(ROOT, "memories", `${locale}.json`), []);
+  const wanted = String(projectId || "").trim();
+  return items
+    .filter((item) => !wanted || String(item.projectId || "").trim() === wanted)
+    .map((item) => ({
+      id: item.id,
+      source: item.source || "",
+      libraryId: item.libraryId || "",
+      qualityStatus: item.qualityStatus || "provisional",
+      projectId: item.projectId || ""
+    }));
+}
+
+/** 按 id 取回候选行（JSON 存储）。 */
+async function getJsonMemoriesByIds(locale, ids = [], options = {}) {
+  assertLocale(locale);
+  const wanted = new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "")).filter(Boolean));
+  if (!wanted.size) return [];
+  const items = await readJson(join(ROOT, "memories", `${locale}.json`), []);
+  return items
+    .filter((item) => wanted.has(String(item.id || "")))
+    .map((item) => (options.scopeFallback
+      ? { ...item, scopeRank: scopeRankOf(item, { contentType: options.contentType || "general", domain: options.domain || "general" }) }
+      : item));
 }
 
 async function countJsonMemories(locale, options = {}) {
@@ -389,6 +431,57 @@ async function saveJsonMemory(locale, input) {
   else items.unshift(item);
   await writeJsonAtomic(path, items);
   return item;
+}
+
+/**
+ * 批量写入翻译记忆（JSON 存储）。逐条写要反复读整份文件再整份写回，
+ * 一次导入几万条时是平方级开销；这里只在开头读一次、结尾写一次。
+ */
+async function saveJsonMemories(locale, inputs = []) {
+  const path = join(ROOT, "memories", `${assertLocale(locale)}.json`);
+  const results = new Array(inputs.length).fill(null);
+  if (!inputs.length) return results;
+  const items = await readJson(path, []);
+  const sourceOf = (value) => normalizeMemoryText(value);
+  const findExisting = (input, source, target) => {
+    const projectId = String(input.projectId || "").trim();
+    const scoped = items.filter((item) => String(item.projectId || "").trim() === projectId);
+    for (const attempt of memoryMatchAttempts({ ...input, source, target })) {
+      const hit = attempt.kind === "entry"
+        ? scoped.find((item) => String(item.entryKey || "").trim() === attempt.entryKey
+          && sourceOf(item.source) === sourceOf(attempt.source))
+        : scoped.find((item) => sourceOf(item.source) === sourceOf(attempt.source)
+          && sourceOf(item.target) === sourceOf(attempt.target));
+      if (hit) return hit;
+    }
+    return null;
+  };
+  for (const [index, input] of inputs.entries()) {
+    const source = String(input.source || "").trim();
+    const target = String(input.target || "").trim();
+    if (!source || !target) {
+      results[index] = { error: "翻译记忆的日语原文和简体中文译文不能为空" };
+      continue;
+    }
+    const embedding = input.embedding ?? await embedSource(source);
+    const existing = findExisting(input, source, target);
+    const item = {
+      id: existing?.id || randomUUID(),
+      ...existing,
+      ...input,
+      locale,
+      source,
+      target,
+      ...(embedding ? { embedding } : {}),
+      updatedAt: new Date().toISOString(),
+      createdAt: existing?.createdAt || new Date().toISOString()
+    };
+    if (existing) items[items.indexOf(existing)] = item;
+    else items.unshift(item);
+    results[index] = { id: item.id, locale, source, target, qualityStatus: item.qualityStatus, qaScore: Number(item.qaScore) || 0 };
+  }
+  await writeJsonAtomic(path, items);
+  return results;
 }
 
 async function getJsonStyleProfile(locale, contentType, domain = "general", { projectId = "", scopeFallback = false } = {}) {
@@ -458,8 +551,6 @@ async function getJsonQaRuns(locale, options = {}) {
   const items = await readJson(join(ROOT, "qa", "runs.json"), []);
   return items
     .filter((item) => item.locale === assertLocale(locale)
-      && (!options.contentType || options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")
-      && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
       && (!options.projectId || item.projectId === options.projectId)
       && (!options.batchId || item.batchId === options.batchId))
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
@@ -508,7 +599,6 @@ async function saveJsonStyleEvidence(input) {
   const path = join(ROOT, "styles", "evidence.json");
   const items = await readJson(path, []);
   const source = String(input.source || "").trim();
-  const embedding = input.embedding ?? await embedSource(source);
   const match = styleEvidenceMatch({ entryKey: input.entryKey, locale: input.locale, projectId: input.projectId });
   const existing = match
     ? items.find((item) => String(item.entryKey || "").trim() === match.entryKey
@@ -527,13 +617,84 @@ async function saveJsonStyleEvidence(input) {
     machineTranslation: String(input.machineTranslation || "").trim(),
     polarity: input.polarity === "negative" ? "negative" : "positive",
     note: String(input.note || "").trim(),
-    ...(embedding ? { embedding } : {}),
     createdAt: new Date().toISOString()
   };
   if (existing) items[items.indexOf(existing)] = item;
   else items.push(item);
   await writeJsonAtomic(path, items);
   return item;
+}
+
+/** JSON 存储下的风格证据判重索引：与 Directus 版同口径（条目 ID 优先，其次原文+译文）。 */
+async function loadJsonStyleEvidenceIndex(locale, { projectId = "" } = {}) {
+  const items = await readJson(join(ROOT, "styles", "evidence.json"), []);
+  const pairs = new Map();
+  const entryKeys = new Map();
+  const wanted = assertLocale(locale);
+  const wantedProject = String(projectId || "").trim();
+  for (const item of items) {
+    if (String(item.locale || "") !== wanted) continue;
+    if (String(item.projectId || "").trim() !== wantedProject) continue;
+    const entryKey = String(item.entryKey || "").trim();
+    if (entryKey) entryKeys.set(entryKey, item.id);
+    else pairs.set(`${normalizeMemoryText(item.source)}\u0000${normalizeMemoryText(item.target)}`, item.id);
+  }
+  return { pairs, entryKeys };
+}
+
+/** 批量写入风格证据（JSON 存储）：一次读、一次写，判重口径与单条完全一致。 */
+async function saveJsonStyleEvidences(inputs = [], { index = null } = {}) {
+  const path = join(ROOT, "styles", "evidence.json");
+  const results = new Array(inputs.length).fill(null);
+  if (!inputs.length) return results;
+  const items = await readJson(path, []);
+  const pairs = index?.pairs || new Map();
+  const entryKeys = index?.entryKeys || new Map();
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const fallbackFind = (input, source, target) => {
+    const entryKey = String(input.entryKey || "").trim();
+    if (entryKey) {
+      return items.find((item) => String(item.entryKey || "").trim() === entryKey
+        && String(item.locale || "") === String(input.locale || "")
+        && String(item.projectId || "").trim() === String(input.projectId || "").trim()) || null;
+    }
+    return items.find((item) => !String(item.entryKey || "").trim()
+      && String(item.locale || "") === String(input.locale || "")
+      && String(item.projectId || "").trim() === String(input.projectId || "").trim()
+      && normalizeMemoryText(item.source) === normalizeMemoryText(source)
+      && normalizeMemoryText(item.target) === normalizeMemoryText(target)) || null;
+  };
+  for (const [position, input] of inputs.entries()) {
+    const locale = assertLocale(input.locale);
+    const source = String(input.source || "").trim();
+    const target = String(input.target || "").trim();
+    if (!source || !target) {
+      results[position] = { error: "风格证据缺少原文或译文" };
+      continue;
+    }
+    const entryKey = String(input.entryKey || "").trim();
+    const pairKey = `${normalizeMemoryText(source)}\u0000${normalizeMemoryText(target)}`;
+    const existingId = entryKey ? entryKeys.get(entryKey) : pairs.get(pairKey);
+    const existing = existingId ? byId.get(existingId) || fallbackFind(input, source, target) : fallbackFind(input, source, target);
+    const item = {
+      id: existing?.id || randomUUID(),
+      ...existing,
+      ...input,
+      projectId: String(input.projectId || ""),
+      machineTranslation: String(input.machineTranslation || "").trim(),
+      polarity: input.polarity === "negative" ? "negative" : "positive",
+      note: String(input.note || "").trim(),
+      createdAt: existing?.createdAt || new Date().toISOString()
+    };
+    if (existing) items[items.indexOf(existing)] = item;
+    else items.push(item);
+    byId.set(item.id, item);
+    if (entryKey) entryKeys.set(entryKey, item.id);
+    else pairs.set(pairKey, item.id);
+    results[position] = { id: item.id, source, target };
+  }
+  await writeJsonAtomic(path, items);
+  return results;
 }
 
 async function saveJsonStyleProfile(input) {
@@ -667,9 +828,8 @@ async function listJsonStyleProfiles(locale, status, scope = null) {
   const styleProfiles = await readJson(join(ROOT, "styles", `${locale}.json`), []);
   const userProfiles = await readJson(join(ROOT, "styles", "profiles.json"), []);
   const pick = (items) => items.filter((item) => !status || item.status === status).sort((a, b) => b.version - a.version);
-  const inScope = (items) => items.filter((item) => (!scope?.contentType || item.contentType === scope.contentType)
-    && (!scope?.domain || (item.domain || "general") === (scope.domain || "general"))
-    && (!scope?.projectId || String(item.projectId || "") === String(scope.projectId)));
+  // 风格规范是项目级的：语体/领域不再筛掉任何一份规范，只按项目收窄。
+  const inScope = (items) => items.filter((item) => !scope?.projectId || String(item.projectId || "") === String(scope.projectId));
   return {
     styleProfiles: pick(inScope(styleProfiles)),
     userProfiles: pick(userProfiles.filter((item) => item.locale === locale && (!scope?.projectId || String(item.projectId || "") === String(scope.projectId))))
@@ -740,13 +900,16 @@ async function getJsonQaCases(locale, options = {}) {
     item.locale === assertLocale(locale)
     && item.status === "human_approved"
     && (!options.projectId || item.projectId === options.projectId)
-    && (options.scopeFallback
-      ? (!options.contentType || options.contentType === "general" || item.contentType === options.contentType || item.contentType === "general")
-      : (!options.contentType || item.contentType === options.contentType))
-    && (!options.domain || options.domain === "general" || item.domain === options.domain || item.domain === "general")
   ).map((item) => (options.scopeFallback
     ? { ...item, scopeRank: scopeRankOf(item, { contentType: options.contentType || "general", domain: options.domain || "general" }) }
     : item));
+}
+
+/** 按 ID 取一条 QA 案例，不过滤状态：采纳后要立刻用它派生回归案例。 */
+async function findJsonQaCase(id) {
+  if (!id) return null;
+  const items = await readJson(join(ROOT, "qa", "cases.json"), []);
+  return items.find((item) => String(item.id) === String(id)) || null;
 }
 
 async function getJsonAssets(locale, options = {}) {
@@ -1032,7 +1195,7 @@ async function saveJsonBatchRun(input) {
     segmentationMode: String(input.segmentationMode || "sentence"),
     structure: input.structure ?? null,
     subBatches: input.subBatches ?? existing?.subBatches ?? [],
-    runnerOptions: input.runnerOptions ?? existing?.runnerOptions ?? {},
+    runnerOptions: { ...(input.runnerOptions ?? existing?.runnerOptions ?? {}), batchSummary: summarizeBatchSegments(input.segments || []) },
     contextBrief: input.contextBrief ?? existing?.contextBrief ?? null,
     qualityReport: input.qualityReport ?? existing?.qualityReport ?? null,
     runState: String(input.runState || existing?.runState || "ready"),
@@ -1067,7 +1230,18 @@ async function listJsonBatchRuns({ locale = "", status = "", search = "", projec
     const failedSegments = selected.filter((segment) => segment.status === "error").length;
     const qaPending = selected.filter((segment) => Boolean(segment.result?.aiQa?.fallbackReason) || (Number.isFinite(segment.result?.qaScore) && segment.result.qaScore < 90) || (segment.result?.issues || []).length > 0).length;
     const status = run.runState === "ready" ? "ready" : run.runState === "paused" ? "paused" : failedSegments ? "needs_attention" : completedSegments < selected.length ? "in_progress" : qaPending ? "review" : "completed";
-    return { batchId: run.batchId, projectId: run.projectId || "", filename: run.filename || "未命名任务", locale: run.locale, contentType: run.contentType || "general", domain: run.domain || "general", format: run.format || "", segmentationMode: run.segmentationMode || "sentence", status, runState: run.runState || "ready", totalSegments: selected.length, completedSegments, failedSegments, qaPending, createdAt: run.createdAt || run.updatedAt, updatedAt: run.updatedAt };
+    return {
+      batchId: run.batchId, projectId: run.projectId || "", filename: run.filename || "未命名任务", locale: run.locale,
+      contentType: run.contentType || "general", domain: run.domain || "general", format: run.format || "",
+      segmentationMode: run.segmentationMode || "sentence", status, runState: run.runState || "ready",
+      runnerOptions: run.runnerOptions || {},
+      // 文件列表要看"语境分析到哪一步"：只带状态与区间数，不带整份 brief。
+      contextBrief: run.contextBrief ? { status: run.contextBrief.status || "", sections: (run.contextBrief.sections || []).length } : null,
+      totalSegments: selected.length, completedSegments, failedSegments, qaPending,
+      qaIncomplete: summarizeBatchSegments(selected).qaIncomplete,
+      qualityTiers: summarizeQualityTiers(selected),
+      createdAt: run.createdAt || run.updatedAt, updatedAt: run.updatedAt
+    };
   }).filter((item) => (!locale || item.locale === locale) && (!projectId || item.projectId === projectId) && (!status || item.status === status) && (!search || item.filename.toLowerCase().includes(String(search).toLowerCase()))).sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, limit);
 }
 
@@ -1178,8 +1352,8 @@ async function deleteJsonBackgroundTask(id) {
 
 async function rebuildJsonEmbeddings(locale, currentModel, { forceLocal = false } = {}) {  const stats = { memories: 0, qaCases: 0, evidence: 0, errors: [] };  const targets = [
     { path: join(ROOT, "memories", `${assertLocale(locale)}.json`), kind: "memories" },
-    { path: join(ROOT, "qa", "cases.json"), kind: "qaCases", filter: (item) => item.locale === locale },
-    { path: join(ROOT, "styles", "evidence.json"), kind: "evidence", filter: (item) => item.locale === locale }
+    { path: join(ROOT, "qa", "cases.json"), kind: "qaCases", filter: (item) => item.locale === locale }
+    // 风格证据不再维护向量：见 directus-store.mjs 里 directusStyleEvidenceBody 的注释。
   ];
   for (const target of targets) {
     const items = await readJson(target.path, []);
@@ -1211,6 +1385,80 @@ async function saveJsonImportPreview(input) {
     createdAt: new Date().toISOString()
   });
   return { batchId, candidates };
+}
+
+/**
+ * JSON 存储版的"替换上一批"：同项目 + 同文件名的旧 TM 审计文件直接删掉。
+ * 与 Directus 版同一口径（只认 fileType === "tm-audit" 的批次）。
+ */
+async function replaceJsonTmImportAudit({ projectId = "", filename = "", keepBatchId = "" } = {}) {
+  if (!projectId || !filename) return { batches: 0 };
+  const dir = join(ROOT, "imports");
+  let names = [];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return { batches: 0 };
+  }
+  let batches = 0;
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    const existing = await readJson(path, null);
+    if (!existing) continue;
+    // 与 Directus 版同一口径：新批次看标记，历史批次看"没有 fileMode"。
+    const isTmAudit = existing.fileType === "tm-audit" || (!existing.fileMode && existing.status === "completed");
+    if (!isTmAudit) continue;
+    if (String(existing.batchId || "") === String(keepBatchId || "")) continue;
+    if (String(existing.projectId || "") !== projectId || String(existing.filename || "") !== filename) continue;
+    await rm(path, { force: true });
+    batches += 1;
+  }
+  return { batches };
+}
+
+/**
+ * TM 导入成功后的审计（JSON 存储）：与 Directus 版同一份字段口径——
+ * 批次状态直接写 completed，候选行只留审计必需的 14 列，且写终态。
+ */
+async function saveJsonTmImportAudit({ batchId, filename = "人工 TM 导入", fileType = "tm", projectId = "", requestedLocale = "zh-CN", summary = {}, candidates = [], decisions = [] } = {}) {
+  if (!batchId) throw new Error("TM 导入审计缺少批次号");
+  const rows = (Array.isArray(candidates) ? candidates : []).map((candidate, index) => {
+    const decision = decisions[index] || {};
+    const accepted = decision.status === "accepted";
+    return {
+      candidateId: randomUUID(),
+      projectId,
+      source: candidate?.source || "",
+      target: candidate?.target || "",
+      locale: candidate?.locale || requestedLocale,
+      assetType: candidate?.assetType || "memory",
+      contentType: candidate?.contentType || "general",
+      domain: candidate?.domain || "general",
+      note: String(candidate?.note || "").slice(0, 500),
+      batchId,
+      sourceFile: candidate?.sourceFile || filename,
+      rowNumber: Number(candidate?.rowNumber ?? candidate?.sourceRow) || index + 1,
+      decision: accepted ? (candidate?.decision || "ready") : (decision.decision || candidate?.decision || "excluded"),
+      status: accepted ? "accepted" : "rejected"
+    };
+  });
+  // 重复导入同一个文件时替换上一批（口径与 Directus 版一致）。
+  await replaceJsonTmImportAudit({ projectId, filename, keepBatchId: batchId }).catch(() => ({}));
+  await writeJsonAtomic(join(ROOT, "imports", `${batchId}.json`), {
+    batchId,
+    filename,
+    fileType: "tm-audit",
+    sourceFileType: fileType,
+    projectId,
+    requestedLocale,
+    candidates: rows,
+    status: "completed",
+    summary,
+    createdAt: new Date().toISOString(),
+    completedAt: new Date().toISOString()
+  });
+  return { batchId, candidates: rows.length };
 }
 
 async function getJsonImportPreview(batchId) {
@@ -1246,9 +1494,8 @@ function cleanScope(input, fallback = {}) {
 }
 
 function matchesLearningScope(item, filters = {}) {
+  // 语体与领域只作参考：学习资产按「语言 × 项目」取，历史数据里它们的值只用于展示与排序。
   return (!filters.locale || item.locale === assertLocale(filters.locale))
-    && (!filters.contentType || item.contentType === filters.contentType)
-    && (!filters.domain || item.domain === filters.domain)
     && (!filters.project || item.project === filters.project);
 }
 
@@ -1784,7 +2031,9 @@ export async function deleteProject(id) {
 }
 
 export async function purgeProject(id) {
-  return usesDirectus() ? purgeDirectusProject(id) : purgeJsonProject(id);
+  const purged = await (usesDirectus() ? purgeDirectusProject(id) : purgeJsonProject(id));
+  invalidateMemoryIndexes();
+  return purged;
 }
 
 export async function getResourceLibraries(projectId, options = {}) {
@@ -1837,6 +2086,20 @@ export async function getAssets(locale, options = {}) {
   return usesDirectus() ? getDirectusAssets(locale, options) : getJsonAssets(locale, options);
 }
 
+/**
+ * 术语库写入代际：术语/别名/状态变化后 +1。
+ * 上层用它判断「项目资产缓存」是否过期，避免每次 QA/翻译都重拉 5,800+ 条术语。
+ */
+let assetGeneration = 0;
+
+export function getAssetGenerationToken() {
+  return assetGeneration;
+}
+
+function bumpAssetGeneration() {
+  assetGeneration += 1;
+}
+
 export async function getAssetStats(locale) {
   if (usesDirectus()) return getDirectusAssetStats(locale);
   const assets = await getJsonAssets(locale);
@@ -1844,19 +2107,31 @@ export async function getAssetStats(locale) {
 }
 
 export async function saveAsset(locale, input) {
-  return usesDirectus() ? saveDirectusAsset(locale, input) : saveJsonAsset(locale, input);
+  try {
+    return await (usesDirectus() ? saveDirectusAsset(locale, input) : saveJsonAsset(locale, input));
+  } finally {
+    bumpAssetGeneration();
+  }
 }
 
 /** 批量写入术语：导入几千条时逐条写会把整批拖到分钟级。 */
 export async function saveAssets(locale, inputs = []) {
-  if (usesDirectus()) return saveDirectusAssets(locale, inputs);
-  const saved = [];
-  for (const input of inputs) saved.push(await saveJsonAsset(locale, input));
-  return saved;
+  try {
+    if (usesDirectus()) return await saveDirectusAssets(locale, inputs);
+    const saved = [];
+    for (const input of inputs) saved.push(await saveJsonAsset(locale, input));
+    return saved;
+  } finally {
+    bumpAssetGeneration();
+  }
 }
 
 export async function deleteAsset(locale, id) {
-  return usesDirectus() ? deleteDirectusAsset(locale, id) : deleteJsonAsset(locale, id);
+  try {
+    return await (usesDirectus() ? deleteDirectusAsset(locale, id) : deleteJsonAsset(locale, id));
+  } finally {
+    bumpAssetGeneration();
+  }
 }
 
 /** 单条术语：编辑前要先读回现有行，避免整条覆盖丢掉 library_id 等归属信息。 */
@@ -1881,7 +2156,11 @@ export async function listLibraryFiles(options) {
 
 /** 批量删除库内条目（删库时二选一里的"连条目一起删"）。 */
 export async function deleteLibraryEntries(locale, kind, ids) {
-  return usesDirectus() ? deleteDirectusLibraryEntries(locale, kind, ids) : deleteJsonLibraryEntries(locale, kind, ids);
+  const removed = await (usesDirectus() ? deleteDirectusLibraryEntries(locale, kind, ids) : deleteJsonLibraryEntries(locale, kind, ids));
+  // 删库里的 TM 行同样会改变检索结果：索引必须跟着失效。
+  invalidateMemoryIndexes();
+  if (kind === "term") bumpAssetGeneration();
+  return removed;
 }
 
 export async function saveCorpus(input) {
@@ -1894,6 +2173,11 @@ export async function saveImportPreview(input, options) {
 
 export async function getImportPreview(batchId) {
   return usesDirectus() ? getDirectusImportPreview(batchId) : getJsonImportPreview(batchId);
+}
+
+/** TM 导入成功后的审计写入（失败路径不调用，因此库里不会留半截候选）。 */
+export async function saveTmImportAudit(input = {}) {
+  return usesDirectus() ? saveDirectusTmImportAudit(input) : saveJsonTmImportAudit(input);
 }
 
 /**
@@ -1912,20 +2196,158 @@ export async function getMemories(locale, options) {
   return usesDirectus() ? getDirectusMemories(locale, options) : getJsonMemories(locale, options);
 }
 
+/**
+ * 记忆候选索引缓存：键是「语言 + 项目」。
+ *
+ * 索引只留 id / 原文 / 库归属，不含向量——实测 8.3 万行建索引 0.9 秒、几十 MB 级。
+ * 单条写入/删除只增量更新已加载的缓存；只有批量导入、删库、清理项目这类影响面大的
+ * 操作才整体失效，下次检索重建一次。
+ */
+const memoryIndexCache = new Map();
+/** 首次加载中的 `{ generation, promise }`：同一代的并发检索只拉一次 22MB。 */
+const memoryIndexLoads = new Map();
+let memoryIndexGeneration = 0;
+let memoryIndexBuilds = 0;
+
+/** 诊断用：候选索引缓存规模与全量重建次数（测试与性能排查使用，不参与业务逻辑）。 */
+export function getMemoryIndexDiagnostics() {
+  return { entries: memoryIndexCache.size, builds: memoryIndexBuilds, generation: memoryIndexGeneration };
+}
+
+/** 记忆写入后调用：索引整体失效，下次检索按需重建。 */
+export function invalidateMemoryIndexes() {
+  memoryIndexGeneration += 1;
+  memoryIndexCache.clear();
+}
+
+function memoryIndexRow(memory) {
+  return {
+    id: String(memory?.id || ""),
+    source: String(memory?.source || ""),
+    libraryId: String(memory?.libraryId || ""),
+    qualityStatus: memory?.qualityStatus || "provisional",
+    projectId: String(memory?.projectId || "")
+  };
+}
+
+/**
+ * 单条写入后只更新对应「语言 + 项目」的已加载索引；没有缓存就不用动（下次检索直接读新数据）。
+ *
+ * `memory.projectId` 缺失时（部分 update 返回体）按 id 找到已有缓存行并沿用它的项目，
+ * 避免把项目归属写成空串。
+ */
+function applyMemoryIndexUpsert(locale, memory, projectIdHint = "") {
+  const id = String(memory?.id || "");
+  if (!id) return;
+  memoryIndexGeneration += 1;
+  const explicitProject = memory?.projectId !== undefined;
+  const projectId = explicitProject ? String(memory.projectId || "") : String(projectIdHint || "");
+  const row = memoryIndexRow(memory);
+  for (const entry of memoryIndexCache.values()) {
+    if (entry.locale !== locale) continue;
+    if (explicitProject) {
+      if (entry.projectId !== projectId) continue;
+    } else if (!entry.index.slotById.has(id)) {
+      continue;
+    }
+    const slot = entry.index.slotById.get(id);
+    const existing = slot === undefined ? null : entry.index.rows[slot];
+    upsertMemoryRow(entry.index, {
+      ...row,
+      projectId: explicitProject ? projectId : String(existing?.projectId || entry.projectId || "")
+    });
+  }
+}
+
+/** 单条删除后从该语言的所有已加载缓存里移除（id 全局唯一，不用先查项目）。 */
+function applyMemoryIndexRemoval(locale, id) {
+  memoryIndexGeneration += 1;
+  for (const entry of memoryIndexCache.values()) {
+    if (entry.locale !== locale) continue;
+    removeMemoryRow(entry.index, id);
+  }
+}
+
+/**
+ * 检索用候选：先用字符 n-gram 倒排收窄到 top-K，再按 id 取回完整行（含向量）。
+ * 打分公式与门槛完全不变，本函数只决定"候选从哪来"。
+ *
+ * limit <= 0 时退回原来的整库取法，作为应急开关（8 万条时每段要十几秒）。
+ */
+export async function getMemoryCandidates(locale, { projectId = "", source = "", limit = DEFAULT_CANDIDATE_POOL, scopeFallback = false, contentType = "general", domain = "general", libraryIds = null } = {}) {
+  const pool = Number(limit);
+  if (!String(source || "").trim() || !Number.isFinite(pool) || pool <= 0) {
+    return getMemories(locale, { projectId, limit: pool > 0 ? pool : -1, scopeFallback, contentType, domain });
+  }
+  const key = `${locale}\u0000${String(projectId || "")}`;
+  let entry = memoryIndexCache.get(key);
+  if (!entry) {
+    const generation = memoryIndexGeneration;
+    let pending = memoryIndexLoads.get(key);
+    // 只有同一代的加载才能共用：读取期间若有写入，后来者必须重新拉，不能吃到旧快照。
+    if (!pending || pending.generation !== generation) {
+      // 这一枪读到的只是快照，可以用于本次检索；若期间有写入，不写回缓存，
+      // 否则会把写入后的新行丢掉。
+      const promise = (async () => {
+        const rows = await (usesDirectus()
+          ? listDirectusMemoryIndexRows(locale, { projectId })
+          : listJsonMemoryIndexRows(locale, { projectId }));
+        memoryIndexBuilds += 1;
+        const loaded = { locale, projectId: String(projectId || ""), index: buildMemoryIndex(rows) };
+        if (memoryIndexGeneration === generation) memoryIndexCache.set(key, loaded);
+        return loaded;
+      })();
+      pending = { generation, promise };
+      memoryIndexLoads.set(key, pending);
+      const clear = () => {
+        if (memoryIndexLoads.get(key) === pending) memoryIndexLoads.delete(key);
+      };
+      promise.then(clear, clear);
+    }
+    entry = await pending.promise;
+  }
+  const candidates = selectMemoryCandidates(entry.index, source, { limit: pool, libraryIds });
+  const ids = candidates.map((row) => row.id).filter(Boolean);
+  if (!ids.length) return [];
+  const rows = await (usesDirectus()
+    ? getDirectusMemoriesByIds(locale, ids, { contentType, domain, scopeFallback })
+    : getJsonMemoriesByIds(locale, ids, { contentType, domain, scopeFallback }));
+  // 输入顺序与整库路径保持一致（最新在前）：排序函数对完全同分的条目按输入顺序打破平局，
+  // 顺序一致，重复行之间的取舍才不会因为换了检索路径而变。
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  return ids
+    .map((id) => byId.get(String(id)))
+    .filter(Boolean)
+    .sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")));
+}
+
 export async function countMemories(locale, options) {
   return usesDirectus() ? countDirectusMemories(locale, options) : countJsonMemories(locale, options);
 }
 
 export async function saveMemory(locale, input) {
-  return usesDirectus() ? saveDirectusMemory(locale, input) : saveJsonMemory(locale, input);
+  const saved = await (usesDirectus() ? saveDirectusMemory(locale, input) : saveJsonMemory(locale, input));
+  applyMemoryIndexUpsert(locale, saved, input?.projectId || "");
+  return saved;
+}
+
+/** 批量写翻译记忆：导入大表时用，单条写入语义不变。 */
+export async function saveMemories(locale, inputs = [], options = {}) {
+  const saved = await (usesDirectus() ? saveDirectusMemories(locale, inputs, options) : saveJsonMemories(locale, inputs));
+  invalidateMemoryIndexes();
+  return saved;
 }
 
 export async function updateMemory(locale, id, patch) {
-  return usesDirectus() ? updateDirectusMemory(locale, id, patch) : updateJsonMemory(locale, id, patch);
+  const saved = await (usesDirectus() ? updateDirectusMemory(locale, id, patch) : updateJsonMemory(locale, id, patch));
+  if (saved) applyMemoryIndexUpsert(locale, saved);
+  return saved;
 }
 
 export async function deleteMemory(locale, id) {
-  return usesDirectus() ? deleteDirectusMemory(locale, id) : deleteJsonMemory(locale, id);
+  const removed = await (usesDirectus() ? deleteDirectusMemory(locale, id) : deleteJsonMemory(locale, id));
+  if (removed) applyMemoryIndexRemoval(locale, id);
+  return removed;
 }
 
 export async function getStyleProfile(locale, contentType, domain, options = {}) {
@@ -1934,6 +2356,32 @@ export async function getStyleProfile(locale, contentType, domain, options = {})
 
 export async function getStyleEvidence(locale, options) {
   return usesDirectus() ? getDirectusStyleEvidence(locale, options) : getJsonStyleEvidence(locale, options);
+}
+
+/**
+ * 分层取样读证据：先扫一个有界窗口（默认最近 5000 条），再按
+ * provenance → 语体 → 来源文件分层取 limit 条。见 src/evidence-sample.mjs。
+ *
+ * 为什么不是 `getStyleEvidence(..., { limit })`：那条路是"最新优先"，
+ * 一次 7 万行的导入就能把窗口占满，蒸馏与提示词只会看到这一批。
+ */
+export async function sampleStyleEvidence(locale, options = {}) {
+  const {
+    limit = 1_000,
+    scanBudget = EVIDENCE_SCAN_BUDGET,
+    pageSize = EVIDENCE_PAGE_SIZE,
+    perFileCap,
+    positiveOnly = false,
+    ...filters
+  } = options;
+  const rows = usesDirectus()
+    ? await collectEvidencePages({
+      scanBudget,
+      pageSize,
+      fetchPage: (offset, size) => listDirectusStyleEvidencePage(locale, { ...filters, limit: size, offset })
+    })
+    : await getJsonStyleEvidence(locale, { ...filters, limit: Math.max(1, Math.trunc(Number(scanBudget)) || EVIDENCE_SCAN_BUDGET) });
+  return stratifyEvidenceSample(rows, { limit, perFileCap, positiveOnly });
 }
 
 export async function getQaRuns(locale, options) {
@@ -1950,6 +2398,15 @@ export async function saveUserProfile(input) {
 
 export async function saveStyleEvidence(input) {
   return usesDirectus() ? saveDirectusStyleEvidence(input) : saveJsonStyleEvidence(input);
+}
+
+/** 批量写风格证据 + 判重索引：大表导入时避免逐条拉全项目证据（旧实现是 O(n²)）。 */
+export async function loadStyleEvidenceIndex(locale, options = {}) {
+  return usesDirectus() ? loadDirectusStyleEvidenceIndex(locale, options) : loadJsonStyleEvidenceIndex(locale, options);
+}
+
+export async function saveStyleEvidences(inputs = [], options = {}) {
+  return usesDirectus() ? saveDirectusStyleEvidences(inputs, options) : saveJsonStyleEvidences(inputs, options);
 }
 
 export async function saveStyleProfile(input) {
@@ -2002,7 +2459,9 @@ export async function rebuildEmbeddings(locale, options = {}) {
 }
 
 export async function demoteMemories(locale, source, exceptId, options = {}) {
-  return usesDirectus() ? demoteDirectusMemories(locale, source, exceptId, options) : demoteJsonMemories(locale, source, exceptId, options);
+  const result = await (usesDirectus() ? demoteDirectusMemories(locale, source, exceptId, options) : demoteJsonMemories(locale, source, exceptId, options));
+  invalidateMemoryIndexes();
+  return result;
 }
 
 export async function approveQaCase(id) {
@@ -2115,6 +2574,10 @@ export async function getQaCases(locale, options) {
   return usesDirectus() ? getDirectusQaCases(locale, options) : getJsonQaCases(locale, options);
 }
 
+export async function findQaCase(id) {
+  return usesDirectus() ? findDirectusQaCase(id) : findJsonQaCase(id);
+}
+
 export async function saveLearningTrajectory(input) {
   return usesDirectus() ? saveDirectusLearningTrajectory(input) : saveJsonLearningTrajectory(input);
 }
@@ -2162,6 +2625,10 @@ export async function saveQualityRun(input) {
 
 export async function listQualityRuns(filters) {
   return usesDirectus() ? listDirectusQualityRuns(filters) : listJsonQualityRuns(filters);
+}
+
+export async function updateQualityRun(id, patch) {
+  return usesDirectus() ? updateDirectusQualityRun(id, patch) : updateJsonQualityRun(id, patch);
 }
 
 export async function saveTrainingRun(input) {
@@ -2230,6 +2697,7 @@ function referenceDocumentRecord(input = {}, existing = null) {
     id: String(input.id ?? existing?.id ?? randomUUID()),
     projectId: String(input.projectId ?? existing?.projectId ?? "").trim(),
     libraryId: String(input.libraryId ?? existing?.libraryId ?? "").trim(),
+    folderId: String(input.folderId ?? existing?.folderId ?? "").trim(),
     name: String(input.name ?? existing?.name ?? "未命名资料").trim().slice(0, 200) || "未命名资料",
     kind: REFERENCE_KIND_VALUES.has(input.kind) ? input.kind : (existing?.kind || "other"),
     contentType: String(input.contentType ?? existing?.contentType ?? "").trim(),
@@ -2241,6 +2709,18 @@ function referenceDocumentRecord(input = {}, existing = null) {
     status: REFERENCE_STATUS_VALUES.has(input.status) ? input.status : (existing?.status || "indexing"),
     error: String(input.error ?? existing?.error ?? "").slice(0, 1_000),
     ingestReport: input.ingestReport ?? existing?.ingestReport ?? null,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now
+  };
+}
+
+function referenceFolderRecord(input = {}, existing = null) {
+  const now = new Date().toISOString();
+  return {
+    id: String(input.id ?? existing?.id ?? randomUUID()),
+    projectId: String(input.projectId ?? existing?.projectId ?? "").trim(),
+    parentId: String(input.parentId ?? existing?.parentId ?? "").trim(),
+    name: String(input.name ?? existing?.name ?? "新建文件夹").trim().slice(0, 200) || "新建文件夹",
     createdAt: existing?.createdAt || now,
     updatedAt: now
   };
@@ -2265,6 +2745,66 @@ function referenceChunkRecord(input = {}, documentId, projectId, ordinal) {
   };
 }
 
+async function saveJsonReferenceFolder(input = {}) {
+  const path = join(ROOT, "references", "folders.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const id = String(input.id ?? "");
+    const existing = id ? items.find((item) => item.id === id) : null;
+    const record = referenceFolderRecord(input, existing);
+    if (existing) items[items.indexOf(existing)] = record;
+    else items.unshift(record);
+    await writeJsonAtomic(path, items);
+    return record;
+  });
+}
+
+/**
+ * 只更新运行记录的附加内容（目前只有复盘报告）。
+ * 结论、计数与资产版本是留档的一部分，改它们等于篡改门禁结论，这里一律不碰。
+ */
+async function updateJsonQualityRun(id, patch = {}) {
+  const path = learningPath("quality-runs.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const index = items.findIndex((item) => String(item.id) === String(id));
+    if (index < 0) return null;
+    const current = items[index];
+    items[index] = {
+      ...current,
+      report: { ...jsonObject(current.report, {}), ...jsonObject(patch.report, {}) }
+    };
+    await writeJsonAtomic(path, items);
+    return items[index];
+  });
+}
+
+async function getJsonReferenceFolder(id) {
+  const items = await readJson(join(ROOT, "references", "folders.json"), []);
+  return items.find((item) => item.id === String(id)) || null;
+}
+
+async function listJsonReferenceFolders({ projectId = "", limit = 5_000 } = {}) {
+  const items = await readJson(join(ROOT, "references", "folders.json"), []);
+  const filtered = items
+    .filter((item) => !projectId || item.projectId === String(projectId))
+    .sort((left, right) => String(left.name || "").localeCompare(String(right.name || ""), "zh-CN", { numeric: true })
+      || String(left.createdAt || "").localeCompare(String(right.createdAt || "")));
+  return Number(limit) > 0 ? filtered.slice(0, Number(limit)) : filtered;
+}
+
+async function deleteJsonReferenceFolder(id) {
+  const folderId = String(id);
+  const path = join(ROOT, "references", "folders.json");
+  return withJsonFileLock(path, async () => {
+    const items = await readJson(path, []);
+    const next = items.filter((item) => item.id !== folderId);
+    if (next.length === items.length) return false;
+    await writeJsonAtomic(path, next);
+    return true;
+  });
+}
+
 async function saveJsonReferenceDocument(input) {
   const path = join(ROOT, "references", "documents.json");
   return withJsonFileLock(path, async () => {
@@ -2284,16 +2824,29 @@ async function getJsonReferenceDocument(id) {
   return items.find((item) => item.id === String(id)) || null;
 }
 
-async function listJsonReferenceDocuments({ projectId = "", libraryId = "", status = "", search = "", offset = 0, limit = 50 } = {}) {
+async function listJsonReferenceDocuments({
+  projectId = "",
+  libraryId = "",
+  folderId = "",
+  folderIds = null,
+  status = "",
+  search = "",
+  offset = 0,
+  limit = 50
+} = {}) {
   const items = await readJson(join(ROOT, "references", "documents.json"), []);
   const keyword = String(search || "").trim().toLowerCase();
+  const folderSet = Array.isArray(folderIds) ? new Set(folderIds.map(String)) : null;
   const filtered = items
     .filter((item) => (!projectId || item.projectId === projectId)
       && (!libraryId || item.libraryId === libraryId)
+      && (!folderSet ? (!folderId || item.folderId === String(folderId)) : folderSet.has(String(item.folderId || "")))
       && (!status || item.status === status)
       && (!keyword || String(item.name || "").toLowerCase().includes(keyword) || String(item.sourceFile || "").toLowerCase().includes(keyword)))
-    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-  return { total: filtered.length, items: filtered.slice(Math.max(0, offset), Math.max(0, offset) + Math.max(1, limit)) };
+    .sort((a, b) => String(b.createdAt || b.updatedAt || "").localeCompare(String(a.createdAt || a.updatedAt || "")));
+  const start = Math.max(0, Number(offset) || 0);
+  const take = Number(limit) > 0 ? Math.min(1_000, Number(limit)) : filtered.length;
+  return { total: filtered.length, items: filtered.slice(start, start + take) };
 }
 
 async function updateJsonReferenceDocument(id, patch = {}) {
@@ -2363,6 +2916,22 @@ async function updateJsonReferenceChunk(id, patch = {}) {
 
 export async function saveReferenceDocument(input) {
   return usesDirectus() ? saveDirectusReferenceDocument(input) : saveJsonReferenceDocument(input);
+}
+
+export async function saveReferenceFolder(input) {
+  return usesDirectus() ? saveDirectusReferenceFolder(input) : saveJsonReferenceFolder(input);
+}
+
+export async function getReferenceFolder(id) {
+  return usesDirectus() ? getDirectusReferenceFolder(id) : getJsonReferenceFolder(id);
+}
+
+export async function listReferenceFolders(options) {
+  return usesDirectus() ? listDirectusReferenceFolders(options) : listJsonReferenceFolders(options);
+}
+
+export async function deleteReferenceFolder(id) {
+  return usesDirectus() ? deleteDirectusReferenceFolder(id) : deleteJsonReferenceFolder(id);
 }
 
 export async function getReferenceDocument(id) {

@@ -116,14 +116,26 @@ function encodeCsvCell(value, delimiter, originalRaw = "") {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-/** replacements use one-based row and column coordinates. */
-export function replaceCsvCells(document, replacements = []) {
+/**
+ * replacements use one-based row and column coordinates.
+ *
+ * `allowAppend`：允许写到最后一列之后（双语导出在没有译文列时要新增一列），
+ * 默认仍然只改已有单元格，避免误加列。
+ */
+export function replaceCsvCells(document, replacements = [], { allowAppend = false } = {}) {
   const byCell = new Map(replacements.map((item) => [`${Number(item.row)}:${Number(item.column)}`, String(item.value ?? "")]));
   const body = (document?.rows || []).map((row, rowIndex) => {
-    const fields = row.cells.map((cell, columnIndex) => {
+    const appended = allowAppend
+      ? [...byCell.keys()].filter((key) => key.startsWith(`${rowIndex + 1}:`)).reduce((max, key) => Math.max(max, Number(key.split(":")[1]) || 0), 0)
+      : 0;
+    const width = Math.max(row.cells.length, appended);
+    const fields = [];
+    for (let columnIndex = 0; columnIndex < width; columnIndex += 1) {
       const key = `${rowIndex + 1}:${columnIndex + 1}`;
-      return byCell.has(key) ? encodeCsvCell(byCell.get(key), document.delimiter, cell.raw) : cell.raw;
-    });
+      const cell = row.cells[columnIndex];
+      if (byCell.has(key)) fields.push(encodeCsvCell(byCell.get(key), document.delimiter, cell?.raw || ""));
+      else fields.push(cell?.raw ?? "");
+    }
     return fields.join(document.delimiter) + row.ending;
   }).join("");
   return `${document?.bom ? "\uFEFF" : ""}${body}`;

@@ -14,6 +14,18 @@ delete process.env.KAMI_STORE;
 
 const store = await import("../src/store.mjs");
 
+test("参考资料目录可以创建、重命名、移动并保留文档归属", async () => {
+  await store.initializeStore();
+  const root = await store.saveReferenceFolder({ projectId: "folder-project", name: "设定集" });
+  const child = await store.saveReferenceFolder({ projectId: "folder-project", parentId: root.id, name: "角色" });
+  assert.equal((await store.listReferenceFolders({ projectId: "folder-project" })).length, 2);
+  const moved = await store.saveReferenceFolder({ id: child.id, projectId: "folder-project", parentId: "", name: "角色资料" });
+  assert.equal(moved.parentId, "");
+  assert.equal(moved.name, "角色资料");
+  assert.equal(await store.deleteReferenceFolder(root.id), true);
+  assert.equal((await store.listReferenceFolders({ projectId: "folder-project" })).length, 1);
+});
+
 test("参考资料文档与片段可以往返、停用与删除", async () => {
   await store.initializeStore();
   const created = await store.saveReferenceDocument({
@@ -62,4 +74,17 @@ test("参考资料文档与片段可以往返、停用与删除", async () => {
   assert.equal(await store.deleteReferenceDocument(created.id), true);
   assert.equal((await store.listReferenceDocuments({ projectId: "project-1" })).total, 0);
   assert.equal((await store.listReferenceChunks({ documentId: created.id })).total, 0, "删除资料要级联删除片段");
+});
+
+test("资料可以按目录归类和分页筛选", async () => {
+  await store.initializeStore();
+  const folder = await store.saveReferenceFolder({ projectId: "filter-project", name: "剧本" });
+  const first = await store.saveReferenceDocument({ projectId: "filter-project", folderId: folder.id, name: "A", sourceFile: "a.txt", status: "ready" });
+  await store.saveReferenceDocument({ projectId: "filter-project", folderId: folder.id, name: "B", sourceFile: "b.txt", status: "ready" });
+  await store.saveReferenceDocument({ projectId: "filter-project", name: "根目录资料", sourceFile: "root.txt", status: "ready" });
+  const listed = await store.listReferenceDocuments({ projectId: "filter-project", folderIds: [folder.id], limit: 1 });
+  assert.equal(listed.total, 2);
+  assert.equal(listed.items.length, 1);
+  assert.equal((await store.listReferenceDocuments({ projectId: "filter-project", folderIds: [""], limit: 0 })).total, 1);
+  assert.equal((await store.getReferenceDocument(first.id)).folderId, folder.id);
 });

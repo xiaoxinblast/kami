@@ -112,10 +112,13 @@ test("后台评测任务完成全流程：双变体重跑、成本采集、保�
   }
 
   const jobsDirectory = join(dataDir, "learning", "jobs");
+  // 状态变化要回调出去（任务中心/通知中心靠它知道"评测跑完了"）。
+  const changes = [];
   const runner = jobsModule.createEvaluationJobRunner({
     benchmark: benchmarkModule.benchmarkTranslationSkill,
     jobsDirectory,
     concurrency: 3,
+    onChanged: (job) => changes.push(`${job.status}:${job.progress.completed}/${job.progress.requested}`),
     deps: makeDeps()
   });
   await runner.initialize();
@@ -130,6 +133,13 @@ test("后台评测任务完成全流程：双变体重跑、成本采集、保�
   assert.equal(report.benchmark.completedPairs, 20);
   assert.equal(report.benchmark.failedPairs, 0);
   assert.equal(report.benchmark.isolation.totalExcluded, 0, "空记忆库不应有同源剔除");
+  // 回调是按序落地的微任务：排队与开跑挨得太近时，第一条回调里状态已经变成 running 也正常。
+  assert.match(changes[0], /^(queued|running):0\/20$/u, "创建后要先报一次，任务中心才能立刻出现这条评测");
+  assert.ok(changes.includes("running:0/20"), `开跑要回调：${changes.join(" , ")}`);
+  // 回调是串行落地的：完成状态由最后一个微任务写出去，等它出现再断言（并行跑全量时不抖）。
+  const changedDeadline = Date.now() + 5_000;
+  while (Date.now() < changedDeadline && changes.at(-1) !== "completed:20/20") await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(changes.at(-1), "completed:20/20", "完成也要回调，否则没有完成通知");
 
   // mock 服务每次返回 42 输入 / 7 输出 token，每 case 翻译 + AIQA 各一次，定价 0.5 / 1.5 每百万。
   const expectedPerCase = 2 * ((42 / 1_000_000) * 0.5 + (7 / 1_000_000) * 1.5);
@@ -414,4 +424,145 @@ test("检查点落盘遇到 Windows 文件锁会退避重试，收尾异常不�
   assert.match(source, /await renameWithRetry\(temporary, path\);/u);
   assert.match(source, /if \(\[COMPLETED, FAILED\]\.includes\(next\.status\)\) \{/u);
   assert.match(source, /评测收尾异常（评测结论已落盘，保持原状态）/u);
+});
+
+/**
+ * 一条 27 组样本的评测挂掉一组时，以前只能「重新评测」——27 组全部重跑，模型调用白烧一遍。
+ * 现在失败的那几组可以单独重试：已成功的样本沿用，冻结输入快照从检查点里取回。
+ */
+test("只重试失败的样本：成功的样本不重跑，检查点里的输入快照会取回来", async () => {
+  const scope = { locale: "zh-CN", contentType: "general", domain: "game", project: "retry-scope" };
+  const template = engine.createDefaultTranslationSkill({ scope });
+  const champion = await store.saveTranslationSkill({ ...scope, ...template });
+  const challengerTemplate = engine.mergeTranslationSkillPatch(
+    template,
+    { name: "重试用例候选", changeReason: "测试只重试失败样本", strategy: { retrieval: { translationMemory: { limit: 9 } } } },
+    { candidateId: `${champion.id}@retry-v2` }
+  );
+  const challenger = await store.saveTranslationSkill({ ...scope, ...challengerTemplate });
+
+  const trajectories = [];
+  for (let index = 0; index < 4; index += 1) {
+    const created = await store.saveLearningTrajectory({
+      ...scope,
+      batchId: "retry-review",
+      segmentId: "",
+      source: `重试用例原文第${index}号`,
+      contextPack: { neighborContext: "" },
+      assetRefs: {},
+      model: "mock-model",
+      promptVersion: "kami-translation-v1",
+      status: "running",
+      events: []
+    });
+    const finalTranslation = `重试用例译文第${index}号`;
+    trajectories.push(await store.updateLearningTrajectory(created.id, {
+      finalTranslation,
+      humanDecision: { accepted: true, finalTranslation },
+      status: "completed"
+    }));
+  }
+
+  // 第 3 组第一次必失败、第二次成功：用来证明"只重试失败的那组"。
+  const failingCaseId = String(trajectories[2].id);
+  const benchmarkCalls = new Map();
+  const benchmark = async (skill, trajectory, options = {}) => {
+    const variant = String(options.variant || (String(skill?.id) === String(challenger.id) ? "challenger" : "champion"));
+    const key = `${variant}:${trajectory.id}`;
+    benchmarkCalls.set(key, (benchmarkCalls.get(key) || 0) + 1);
+    if (String(trajectory.id) === failingCaseId && benchmarkCalls.get(`champion:${failingCaseId}`) === 1) {
+      // 真实事故的形态：模型没产出译文（code=empty_translation），不是接口报错。
+      const error = new Error("模型没有返回译文（连续两次都是空白输出）");
+      error.code = "empty_translation";
+      throw error;
+    }
+    return {
+      caseId: trajectory.id,
+      sourceCaseId: trajectory.id,
+      variant,
+      scope,
+      translation: `译文-${trajectory.id}`,
+      qaScore: variant === "champion" ? 80 : 84,
+      humanEditDistance: 0.1,
+      humanAccepted: variant === "challenger",
+      hardErrorCount: 0,
+      isolation: {}
+    };
+  };
+
+  const jobsDirectory = join(dataDir, "learning", "jobs-retry");
+  const runner = jobsModule.createEvaluationJobRunner({
+    benchmark,
+    createSnapshot: () => ({ fingerprint: "retry-snapshot", frozen: true }),
+    jobsDirectory,
+    concurrency: 1,
+    deps: makeDeps()
+  });
+  await runner.initialize();
+
+  const createdJob = await runner.create({ scope, champion, challenger, trajectories });
+  const first = await waitForTerminal(runner, createdJob.jobId);
+  assert.equal(first.status, "completed");
+  assert.equal(first.progress.failed, 1, "第 3 组应当失败一次");
+  assert.equal(first.progress.completed, 3);
+  assert.equal(first.result.report.promotable, false, "有失败样本时禁止晋升");
+  // 报告要能区分"模型没产出译文"和"接口报错"：前者可以只重试失败样本。
+  assert.equal(first.result.report.benchmark.missingTranslations, 1);
+  assert.deepEqual(first.result.report.benchmark.failureReasons, [{ reason: "empty_translation", count: 1 }]);
+  assert.match(first.result.report.conclusion, /其中 1 组是模型没有产出译文/u);
+  const callsAfterFirstRun = new Map(benchmarkCalls);
+
+  // 完成后的检查点不再把输入快照留在内存里（实测 77MB），重试失败样本时要能从磁盘取回。
+  const retried = await runner.retryFailed(createdJob.jobId);
+  assert.ok(["queued", "running"].includes(retried.status), `重试应立即入队：${retried.status}`);
+  assert.equal(retried.progress.failed, 0, "重试入队时失败标记先清空，进度里只剩待重跑的那一组");
+  assert.equal(retried.progress.completed, 3, "已成功的样本保留在进度里");
+  const second = await waitForTerminal(runner, createdJob.jobId);
+  assert.equal(second.status, "completed", second.error || "重试后仍未完成");
+  assert.equal(second.progress.failed, 0, "失败样本应当被重跑并成功");
+  assert.equal(second.progress.completed, 4);
+  // 只有失败那一组被重跑：其它三组的调用次数不变。
+  for (const trajectory of [trajectories[0], trajectories[1], trajectories[3]]) {
+    for (const variant of ["champion", "challenger"]) {
+      const key = `${variant}:${trajectory.id}`;
+      assert.equal(benchmarkCalls.get(key), callsAfterFirstRun.get(key), `${key} 不该被重跑`);
+    }
+  }
+  assert.equal(benchmarkCalls.get(`champion:${failingCaseId}`), 2, "失败的那组应当且只应当再跑一次");
+  assert.equal(benchmarkCalls.get(`challenger:${failingCaseId}`), 1);
+});
+
+/**
+ * 重试失败样本要求同一份冻结输入：检查点里真丢了快照时必须明确拒绝，
+ * 不能用"现场重新抓一份输入"糊过去（那份输入已经漂移，结论不可复现）。
+ */
+test("检查点缺输入快照时明确拒绝只重试失败样本", async () => {
+  const jobsDirectory = join(dataDir, "learning", "jobs-retry-missing");
+  await mkdir(jobsDirectory, { recursive: true });
+  await writeFile(join(jobsDirectory, "no-snapshot.json"), JSON.stringify({
+    jobId: "no-snapshot",
+    kind: "skill-evaluation",
+    scope: { locale: "zh-CN", contentType: "general", domain: "game", project: "default" },
+    championId: "champion-y",
+    challengerId: "challenger-y",
+    requestedCaseIds: ["case-1", "case-2"],
+    caseTrajectories: {},
+    caseSamples: { "case-1": { champion: [], challenger: [] } },
+    caseFailures: { "case-2": "翻译失败" },
+    status: "failed",
+    result: null,
+    error: "1 组失败",
+    createdAt: "2026-08-13T00:00:00.000Z",
+    updatedAt: "2026-08-13T00:00:00.000Z",
+    finishedAt: "2026-08-13T00:00:00.000Z"
+  }));
+  const runner = jobsModule.createEvaluationJobRunner({
+    benchmark: async () => ({ caseId: "unused" }),
+    jobsDirectory,
+    concurrency: 1,
+    deps: makeDeps()
+  });
+  await runner.initialize();
+  await assert.rejects(() => runner.retryFailed("no-snapshot"), /缺少输入快照，无法只重试失败样本/u);
+  assert.equal(runner.get("no-snapshot").status, "failed", "被拒绝的重试不能改动任务状态");
 });
