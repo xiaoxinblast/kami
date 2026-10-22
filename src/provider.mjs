@@ -5,6 +5,7 @@ import { contextBriefMessages, parseContextBriefPart } from "./context-brief.mjs
 import { consistencyMessages, parseConsistencyFindings } from "./consistency-check.mjs";
 import { parseTermAlign, parseTermSurvey, termAlignMessages, termSurveyMessages } from "./term-survey.mjs";
 import { gateReviewMessages, parseGateReview } from "./gate-review.mjs";
+import { parseModelJsonObject } from "./text.mjs";
 
 const loadedProvider = loadProviderConfig();
 let persistence = loadedProvider.persistence;
@@ -324,6 +325,8 @@ export function projectContextPack(contextPack = {}, purpose = "translate") {
     } : null,
     requiredTerms: contextPack.requiredTerms || [],
     preferredTerms: contextPack.preferredTerms || [],
+    workingTerms: contextPack.workingTerms || [],
+    patternReferences: contextPack.patternReferences || [],
     protectedTokens: contextPack.protectedTokens || [],
     factSchema: contextPack.factSchema || null,
     translationReferences: contextPack.translationReferences || [],
@@ -383,6 +386,8 @@ export function contextPackText(contextPack = {}, purpose = "review") {
   if (briefText) lines.push(`文件语境：\n${briefText}`);
   if (pack.requiredTerms?.length) lines.push(`强制术语（必须逐字采用）：${JSON.stringify(pack.requiredTerms)}`);
   if (pack.preferredTerms?.length) lines.push(`参考术语（结合句义判断，不得仅凭字面强制替换）：${JSON.stringify(pack.preferredTerms)}`);
+  if (pack.workingTerms?.length) lines.push(`本文件工作术语（优先级低于主术语库；同一文件内统一采用，不得逐段更换译法）：${JSON.stringify(pack.workingTerms)}`);
+  if (pack.patternReferences?.length) lines.push(`同句式参考（固定部分沿用参考译法，只替换当前原文的变量部分）：${JSON.stringify(pack.patternReferences)}`);
   if (pack.protectedTokens?.length) lines.push(`必须原样保留：${JSON.stringify(pack.protectedTokens)}`);
   if (pack.factSchema?.facts?.length || pack.factSchema?.limits?.length) lines.push(`事实锚点：${JSON.stringify(pack.factSchema)}`);
   if (pack.translationReferences?.length) lines.push(`历史译例：${JSON.stringify(pack.translationReferences)}`);
@@ -444,6 +449,12 @@ export function packPrompt(contextPack) {
   }
   if (conflictedTerms.length) {
     variable.push(`⚠️ 以下原文在术语库里存在多个登记译法，本次译文只能采用其中一个，不得在同一条里混用，也不得自行造第三种译法：\n${conflictedTerms.map((term) => `· ${term.source}：${term.target}`).join("\n")}`);
+  }
+  if (pack.workingTerms?.length) {
+    variable.push(`本文件工作术语（优先级低于主术语库；同一文件内统一采用，除非当前句义明确不适用）：\n${termsSummary(pack.workingTerms)}`);
+  }
+  if (pack.patternReferences?.length) {
+    variable.push(`同句式参考（这些句子共用同一固定框架；固定部分必须沿用参考译法，只替换当前原文的变量内容，变量不得照抄）：\n${pack.patternReferences.map((item) => `· ${item.source} → ${item.target}`).join("\n")}`);
   }
   if (pack.protectedTokens?.length) variable.push(`必须原样保留（URL、占位符、标签、带单位的数值）：${JSON.stringify(pack.protectedTokens)}`);
   if (pack.factSchema) variable.push(`结构化事实锚点（translation 范围必须在译文中保持等价；task 范围只作为交付约束，不得翻译进正文）：${JSON.stringify(pack.factSchema)}`);
@@ -2154,6 +2165,62 @@ export async function surveyTermsWithModel({ filename = "", locale = "zh-CN", pu
     } catch {
       throw new Error(`术语普查模型返回格式无效：${error.message}`);
     }
+  }
+}
+
+/**
+ * 边翻译边学习：从"本段原文 + 本段实际译文"里抽取需要在全文统一的新术语。
+ *
+ * 不做术语猜测：source/target 必须由调用方再校验为原文/译文逐字子串；模型只负责
+ * 指出"这里有个词值得统一，以及本次实际用了什么译法"。失败返回空数组，不拖垮翻译。
+ */
+export async function learnWorkingTermsWithModel({ source = "", translation = "", existingTerms = [], workingTerms = [], filename = "", locale = "zh-CN", purpose = "general", onUsage = null } = {}) {
+  if (!String(source || "").trim() || !String(translation || "").trim()) return [];
+  const known = (Array.isArray(existingTerms) ? existingTerms : []).slice(0, 80).map((term) => ({
+    source: String(term?.source || "").trim(),
+    target: String(term?.target || "").trim(),
+    aliases: Array.isArray(term?.aliases) ? term.aliases.slice(0, 5) : []
+  })).filter((term) => term.source);
+  const learned = (Array.isArray(workingTerms) ? workingTerms : []).slice(0, 40).map((term) => ({
+    source: String(term?.source || "").trim(), target: String(term?.target || "").trim()
+  })).filter((term) => term.source);
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你在做日语到简体中文的翻译期术语学习。只报告这一对原文/译文里需要在同一文件内保持统一的新术语、专名、商品名、技能名或固定说法。",
+        "source 必须是原文里的逐字子串；target 必须是本次译文里的逐字子串。不要改写、不要补全、不要输出句子。",
+        "主术语库已有的源词不要重复报告（见 existingTerms）；工作术语表已有的也不要重复（见 workingTerms）。",
+        "只报告有把握的；每段最多 5 条。没有就返回空数组。",
+        `只输出严格 JSON：{"terms":[{"source":"","target":"","confidence":0.9,"reason":"为什么值得统一"}]}。目标语言：${locale}。`
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        filename: filename || "",
+        purpose: purpose || "general",
+        source: String(source),
+        translation: String(translation),
+        existingTerms: known,
+        workingTerms: learned
+      })
+    }
+  ];
+  try {
+    const content = await chat(messages, configForRole("fast", runtimeConfig.fastModel || runtimeConfig.mtModel || runtimeConfig.model), {
+      temperature: 0.1,
+      timeoutMs: 45_000,
+      maxTokens: 800,
+      requestLabel: "工作术语学习",
+      responseFormat: { type: "json_object" },
+      onUsage
+    });
+    const parsed = parseModelJsonObject(content);
+    return Array.isArray(parsed?.terms) ? parsed.terms : [];
+  } catch (error) {
+    console.warn(`[Kami] 本段工作术语学习失败，已跳过：${error.message}`);
+    return [];
   }
 }
 

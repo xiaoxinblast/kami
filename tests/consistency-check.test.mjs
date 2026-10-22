@@ -178,3 +178,22 @@ test("解析一致性发现：保留 terms / unify / evidence 并裁掉残缺项
   assert.equal(findings[0].evidence.length, 1);
   assert.equal(findings[0].evidence[0].kind, "tm_master");
 });
+
+test("同骨架不同原文、译文不同 → pattern_drift", () => {
+  const findings = deterministicConsistencyFindings([
+    { id: "seg-1", source: "プレミアムパスを買うと3個の宝箱", translation: "购买高级通行证可获得 3 个宝箱", result: { patternKey: "⟦术⟧を買うと⟦数⟧個の宝箱" } },
+    { id: "seg-2", source: "プレミアムパスを買うと10個の宝箱", translation: "买高级通行证能拿到 10 个宝箱", result: { patternKey: "⟦术⟧を買うと⟦数⟧個の宝箱" } }
+  ]);
+  const pattern = findings.find((finding) => finding.type === "pattern_drift");
+  assert.ok(pattern);
+  assert.deepEqual(pattern.ids, ["seg-1", "seg-2"]);
+  assert.match(pattern.detail, /同一固定句式/u);
+});
+
+test("同骨架译文只差数字变量时不误报 pattern_drift", () => {
+  const findings = deterministicConsistencyFindings([
+    { id: "seg-1", source: "宝箱3個", translation: "获得 3 个宝箱", result: { patternKey: "宝箱⟦数⟧個" } },
+    { id: "seg-2", source: "宝箱10個", translation: "获得 10 个宝箱", result: { patternKey: "宝箱⟦数⟧個" } }
+  ]);
+  assert.equal(findings.some((finding) => finding.type === "pattern_drift"), false);
+});

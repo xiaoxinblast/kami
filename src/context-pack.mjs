@@ -26,11 +26,13 @@ function normalizeNeighborContext(neighborContext) {
   };
 }
 
-export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], batchGroupEntries = [], factSchema = null, titleOverrides = null, entryId = "", entryKey = "", documentBrief = null }) {
+export function buildContextPack({ source, locale, classification, matches, domain = "general", neighborContext = "", styleProfile = null, translationSkill = null, qaGuidance = [], userProfile = null, translationReferences = [], batchVerse = null, batchReferences = [], patternReferences = [], batchGroupEntries = [], factSchema = null, titleOverrides = null, entryId = "", entryKey = "", documentBrief = null }) {
   // 字符串精确命中只能证明字面相同，不能证明当前句子使用的是术语义。
   // 仅“保留原文”属于可确定执行的硬约束；普通正式术语交给翻译器结合上下文判断。
-  const required = matches.filter((item) => item.mode === "exact" && !item.scopeMismatch && (item.preserveOriginal ?? item.term?.preserveOriginal));
-  const preferred = matches.filter((item) => !required.includes(item));
+  // 工作术语单独分层：主术语库优先，工作术语只解决"本文件内保持一致"。
+  const working = matches.filter((item) => item.term?.working === true);
+  const required = matches.filter((item) => !item.term?.working && item.mode === "exact" && !item.scopeMismatch && (item.preserveOriginal ?? item.term?.preserveOriginal));
+  const preferred = matches.filter((item) => !item.term?.working && !required.includes(item));
   // 同一个原文登记了多个译法时，必须让模型知道"只能选一个"：否则它会在同一句里
   // 混用两种译法，或者自己造第三种。
   const targetsBySource = new Map();
@@ -153,6 +155,21 @@ export function buildContextPack({ source, locale, classification, matches, doma
     rhymeLike: detectRhymeLike(source),
     batchVerse: batchVerse?.active ? { active: true, shape: String(batchVerse.shape || ""), matchingCount: Math.max(0, Number(batchVerse.matchingCount) || 0) } : null,
     batchReferences: normalizeBatchReferences(batchReferences),
+    workingTerms: working.map(({ term, mode, matchPhrase, score }) => ({
+      source: term.source,
+      matchedSource: matchPhrase,
+      target: term.target,
+      matchMode: mode,
+      confidence: Number(score.toFixed(2)),
+      enforcement: term.enforcement === "required" ? "required" : "preferred",
+      working: true
+    })),
+    patternReferences: Array.isArray(patternReferences) ? patternReferences.slice(0, 3).map((item) => ({
+      segmentId: String(item?.segmentId || ""),
+      source: String(item?.source || ""),
+      target: String(item?.target || ""),
+      similarity: Number(item?.similarity) || 0
+    })).filter((item) => item.source && item.target) : [],
     batchGroupEntries: Array.isArray(batchGroupEntries) ? batchGroupEntries.slice(0, 50).map((item) => ({
       id: String(item?.id || ""), source: String(item?.source || ""), context: item?.context || null
     })).filter((item) => item.id && item.source) : [],

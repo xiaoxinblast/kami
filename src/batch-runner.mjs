@@ -2,6 +2,8 @@ import { splitBatchSubBatches, splitTranslationGroups } from "./batch-document.m
 import { contextBriefSlice, purposeForIndex } from "./context-brief.mjs";
 import { createCheckpointWriter } from "./checkpoint-writer.mjs";
 import { isTransientConnectionError, retryTransient } from "./transient-errors.mjs";
+import { buildPatternKey, selectPatternReferences } from "./pattern-memory.mjs";
+import { emptyWorkingGlossary, mergeWorkingTermsIntoGlossary } from "./working-glossary.mjs";
 import { isIncompleteBatchQa } from "../public/batch-status.js";
 
 /** 连接层失败自动重试一次：等 2 秒再试，内容层错误不重试。 */
@@ -30,7 +32,8 @@ function compactResult(result) {
     tierReason: clip(result.tierReason || "", 200),
     qualityUpgradeFrom: result.qualityUpgradeFrom || "",
     styleProfile: result.styleProfile ? { id: result.styleProfile.id, name: result.styleProfile.name, version: result.styleProfile.version } : null,
-    trajectoryId: result.trajectoryId || ""
+    trajectoryId: result.trajectoryId || "",
+    patternKey: clip(result.patternKey || "", 400)
   };
 }
 
@@ -72,6 +75,9 @@ export async function runServerBatch(batchId, {
   loadProject,
   classifyDocument,
   translateSegment,
+  loadTermSources = async () => [],
+  loadWorkingGlossary = null,
+  learnTerms = null,
   shouldPause = () => false,
   shouldCancel = () => false,
   touch = () => {},
@@ -82,6 +88,11 @@ export async function runServerBatch(batchId, {
   if (!run) throw new Error("未找到批次任务");
   const project = await loadProject(run.projectId);
   if (!project) throw new Error("批次所属项目不存在");
+  const formalTermSources = await Promise.resolve().then(() => loadTermSources(run)).catch(() => []) || [];
+  // 续跑时把已完成的段落先放进句式历史，后面的段落仍能拿到同框架参考。
+  const patternHistory = (Array.isArray(run.segments) ? run.segments : [])
+    .filter((segment) => segment.status === "done" && String(segment.translation || "").trim())
+    .map((segment) => ({ segmentId: segment.id, source: segment.source, target: segment.translation }));
   const batchSettings = project.settings?.batch || {};
   const tmSettings = project.settings?.tm || {};
   const selected = (run.segments || []).filter((segment) => segment.selected !== false);
@@ -145,6 +156,23 @@ export async function runServerBatch(batchId, {
         .filter((item) => item.status === "done" && item.translation && contextBoundary(item) === boundary)
         .slice(-anchorCount)
         .map((item) => ({ source: item.source, target: item.translation }));
+      // UI 可能在批中改了工作术语；只有外部版本比本进程新时才覆盖，避免把本段刚学到的词冲掉。
+      if (loadWorkingGlossary) {
+        const external = await Promise.resolve().then(() => loadWorkingGlossary(run)).catch(() => null);
+        if (external && Number(external.revision || 0) > Number(run.runnerOptions?.workingGlossary?.revision || 0)) {
+          run.runnerOptions = { ...run.runnerOptions, workingGlossary: external };
+        }
+      }
+      const workingTerms = Array.isArray(run.runnerOptions?.workingGlossary?.terms)
+        ? run.runnerOptions.workingGlossary.terms.filter((term) => term?.status !== "rejected")
+        : [];
+      const patternTerms = [...formalTermSources, ...workingTerms];
+      const patternKey = buildPatternKey(segment.source, { terms: patternTerms });
+      const patternReferences = selectPatternReferences({
+        source: segment.source,
+        terms: patternTerms,
+        previous: patternHistory.filter((item) => String(item.segmentId) !== String(segment.id))
+      });
       try {
         const translateOnce = () => translateSegment({
           projectId: run.projectId,
@@ -164,6 +192,8 @@ export async function runServerBatch(batchId, {
           previousSource: context.previous,
           nextSource: context.next,
           batchReferences,
+          patternReferences,
+          workingTerms,
           batchGroupEntries: (groupById.get(segment.id) || []).map((item) => ({ id: item.id, source: item.source, context: item.context })),
           qualityTier: options.qualityTier || "auto",
           reflect: options.reflect !== false,
@@ -177,9 +207,32 @@ export async function runServerBatch(batchId, {
           onRetry: (error) => console.warn(`[Kami] 第 ${position + 1} 段连接失败，自动重试一次：${error.message}`)
         });
         segment.translation = result.translation;
-        segment.result = compactResult(result);
+        segment.result = compactResult({ ...result, patternKey });
         segment.status = "done";
         segment.accepted = false;
+        // 本段翻完立刻学本文件术语：下一次请求就能用上；失败不影响本段。
+        if (learnTerms) {
+          try {
+            const learned = await learnTerms({ run, segment, translation: segment.translation });
+            if (Array.isArray(learned) && learned.length) {
+              const glossary = run.runnerOptions?.workingGlossary
+                || emptyWorkingGlossary({ batchId: run.batchId, filename: run.filename, locale: run.locale });
+              const merged = mergeWorkingTermsIntoGlossary(glossary, learned, { sourceSegmentId: segment.id });
+              run.runnerOptions = { ...run.runnerOptions, workingGlossary: merged };
+              // 新增术语后，已翻段落的骨架会变（术语位置从正文变成遮罩）；只重算含该词的段落。
+              const learnedSources = learned.map((term) => String(term.source || "")).filter(Boolean);
+              const refreshedTerms = [...formalTermSources, ...merged.terms];
+              for (const item of run.segments) {
+                if (item.status !== "done" || !item.result || !String(item.source || "")) continue;
+                if (!learnedSources.some((source) => item.source.includes(source))) continue;
+                item.result = { ...item.result, patternKey: buildPatternKey(item.source, { terms: refreshedTerms }) };
+              }
+            }
+          } catch (error) {
+            console.warn(`[Kami] 第 ${position + 1} 段工作术语学习失败，已跳过：${error.message}`);
+          }
+        }
+        patternHistory.push({ segmentId: segment.id, source: segment.source, target: segment.translation });
       } catch (error) {
         segment.status = "error";
         segment.error = String(error?.message || error);
@@ -221,7 +274,9 @@ export async function retryServerBatchQa(batchId, { loadRun, saveRun, recheckSeg
       try {
         const qa = await recheckSegment({ projectId: run.projectId, source: segment.source, translation: originalTranslation,
           locale: run.locale, contentType: segment.result?.segmentPurpose || run.contentType || "general",
-          domain: run.domain || "auto", batchId, aiQa: true });
+          domain: run.domain || "auto", batchId,
+          workingTerms: run.runnerOptions?.workingGlossary?.terms || [],
+          aiQa: true });
         const translation = qa.translation || originalTranslation;
         update = { ...segment, translation, accepted: translation === originalTranslation ? segment.accepted : false,
           result: { ...segment.result, ...compactResult({ ...segment.result, ...qa, translation }) } };

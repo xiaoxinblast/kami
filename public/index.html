@@ -204,6 +204,13 @@
             </article>
             </div>
             <div class="batch-tab-panel" data-batch-panel="terms" hidden>
+              <article class="panel batch-term-panel" id="batchWorkingTermsPanel">
+                <div class="panel-head">
+                  <div><span class="card-kicker">WORKING TERMS</span><h2>本文件工作术语</h2><p class="panel-caption">翻译过程中自动学习，只作用于当前文件；主术语库优先，不会写入正式术语表。</p></div>
+                  <div class="batch-progress-summary"><button class="button ghost small" id="batchWorkingTermAdd" type="button">添加术语</button></div>
+                </div>
+                <div class="batch-term-list" id="batchWorkingTerms"><div class="empty-list batch-empty">本文件还没有工作术语；翻译一段后会自动学习。</div></div>
+              </article>
               <article class="panel batch-term-panel" id="batchTermSurveyPanel">
                 <div class="panel-head">
                   <div><span class="card-kicker">TERM SURVEY</span><h2>术语普查</h2><p class="panel-caption" id="batchTermSurveySummary">整批翻完后自动找出"像术语但库里没有"的说法；回填人工终稿后再决定入库。</p></div>

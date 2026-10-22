@@ -244,3 +244,29 @@ test("术语只是在整句里命中时，不能把半句目标译法当成整�
   assert.equal(plan.actions.length, 0, "不能把整句换成半句术语译法");
   assert.match(plan.skipped[0].reason, /依据不足/u);
 });
+
+test("pattern_drift 带固定说法时按文件多数统一固定部分", () => {
+  const segments = [
+    { id: "seg-1", source: "プレミアムパスを買うと3個の宝箱", translation: "购买高级通行证可获得 3 个宝箱", status: "done" },
+    { id: "seg-2", source: "プレミアムパスを買うと10個の宝箱", translation: "购买高级通行证可获得 10 个宝箱", status: "done" },
+    { id: "seg-3", source: "プレミアムパスを買うと5個の宝箱", translation: "买高级通行证能拿到 5 个宝箱", status: "done" }
+  ];
+  const groups = repeated(segments);
+  const finding = {
+    type: "pattern_drift", ids: ["seg-1", "seg-2", "seg-3"], detail: "同句式固定说法不一致",
+    terms: [{ source: "购买高级通行证可获得", variants: ["购买高级通行证可获得", "买高级通行证能拿到"] }],
+    unify: [], evidence: []
+  };
+  const resolved = resolveFindingTargets(finding, { segments, groups, termTargetsFor: () => [], tmEntriesFor: () => [] });
+  assert.equal(resolved.targets[0].target, "购买高级通行证可获得");
+  assert.equal(resolved.targets[0].evidence.kind, "file_majority");
+  const plan = planConsistencyRepairs({
+    findings: [finding], segments,
+    groups,
+    termTargetsFor: () => [],
+    tmEntriesFor: () => []
+  });
+  assert.equal(plan.actions.length, 1);
+  assert.equal(plan.actions[0].changes[0].segmentId, "seg-3");
+  assert.equal(plan.actions[0].changes[0].after, "购买高级通行证可获得 5 个宝箱");
+});

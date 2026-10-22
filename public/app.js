@@ -2908,6 +2908,7 @@ const FINDING_TYPE_LABELS = {
   name_drift: "专名漂移",
   voice_drift: "角色口吻漂移",
   style_conflict: "与风格规范冲突",
+  pattern_drift: "句式/固定说法漂移",
   format_risk: "格式风险"
 };
 
@@ -3073,7 +3074,78 @@ function renderTermCard(term) {
   </div>`;
 }
 
+
+/** 本文件工作术语：自动学习 + 手动修正；改动只影响当前批次。 */
+function renderBatchWorkingTerms() {
+  const host = $("#batchWorkingTerms");
+  if (!host) return;
+  const glossary = state.batchPreview?.runnerOptions?.workingGlossary || null;
+  const terms = Array.isArray(glossary?.terms) ? glossary.terms.filter((term) => term.status !== "rejected") : [];
+  const addButton = $("#batchWorkingTermAdd");
+  if (addButton) {
+    addButton.onclick = async () => {
+      const source = prompt("原文（日语，必须与文件里的写法一致）：", "");
+      if (source == null || !source.trim()) return;
+      const target = prompt("本文件统一译法（简体中文）：", "");
+      if (target == null || !target.trim()) return;
+      await saveWorkingTerm({ action: "upsert", source: source.trim(), target: target.trim() });
+    };
+  }
+  if (!terms.length) {
+    host.innerHTML = '<div class="empty-list batch-empty">本文件还没有工作术语；翻译一段后会自动学习，也可以手动添加。</div>';
+    return;
+  }
+  host.innerHTML = terms.map((term) => {
+    const source = escapeHtml(term.source);
+    const target = escapeHtml(term.target);
+    const origin = term.origin === "manual" ? "手动" : "自动学习";
+    const enforcement = term.enforcement === "required" ? "已锁定为强制" : "优先采用";
+    const segment = term.sourceSegmentId ? `来源 ${escapeHtml(String(term.sourceSegmentId).slice(0, 12))}` : "手动添加";
+    return `<div class="batch-term-card">
+      <div class="batch-term-head"><strong>${source}</strong><span class="batch-term-arrow">→</span><span class="batch-term-target">${target}</span><span class="batch-term-status info">${origin}</span></div>
+      <div class="batch-term-meta"><span>${enforcement}</span><span>${segment}</span>${term.confidence ? `<span>置信度 ${Math.round(Number(term.confidence) * 100)}%</span>` : ""}</div>
+      <div class="batch-working-actions"><button class="button ghost small" type="button" data-working-action="edit" data-working-source="${source}">改译法</button><button class="button ghost small" type="button" data-working-action="lock" data-working-source="${source}">${term.enforcement === "required" ? "取消锁定" : "锁定为强制"}</button><button class="button ghost small danger" type="button" data-working-action="delete" data-working-source="${source}">删除</button></div>
+    </div>`;
+  }).join("");
+  $$("#batchWorkingTerms [data-working-action]").forEach((button) => button.addEventListener("click", async () => {
+    const term = terms.find((item) => item.source === button.dataset.workingSource);
+    if (!term) return;
+    if (button.dataset.workingAction === "delete") {
+      if (!confirm(`删除工作术语「${term.source}」？已翻译段落不会自动改回。`)) return;
+      await saveWorkingTerm({ action: "delete", source: term.source });
+      return;
+    }
+    if (button.dataset.workingAction === "lock") {
+      await saveWorkingTerm({ action: "upsert", source: term.source, target: term.target, enforcement: term.enforcement === "required" ? "preferred" : "required" });
+      return;
+    }
+    const target = prompt(`「${term.source}」在本文件的统一译法：`, term.target);
+    if (target == null || !target.trim() || target.trim() === term.target) return;
+    await saveWorkingTerm({ action: "upsert", source: term.source, target: target.trim(), enforcement: term.enforcement });
+    if (confirm("已翻译段落可能还在用旧译法，现在按新译法统一吗？")) {
+      await runConsistencyCheckNow();
+    }
+  }));
+}
+
+async function saveWorkingTerm(payload) {
+  const batchId = state.batchPreview?.batchId;
+  if (!batchId) return toast("先打开一条批次");
+  try {
+    const glossary = await api(`/api/batch/run/${encodeURIComponent(batchId)}/working-terms`, {
+      method: "POST",
+      body: JSON.stringify({ projectId: state.activeProjectId || "", ...payload })
+    });
+    state.batchPreview.runnerOptions = { ...(state.batchPreview.runnerOptions || {}), workingGlossary: glossary };
+    renderBatchWorkingTerms();
+    toast(payload.action === "delete" ? "工作术语已删除" : "工作术语已更新");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 function renderBatchTermSurvey() {
+  renderBatchWorkingTerms();
   const list = $("#batchTermSurveyList");
   if (!list) return;
   const chips = $("#batchTermSurveyChips");
@@ -5274,7 +5346,8 @@ function compactBatchResult(result) {
       referenceCount: (result.aiQa.references || []).length,
       qaCaseCount: (result.aiQa.qaCases || []).length
     } : null,
-    styleProfile: result.styleProfile ? { id: result.styleProfile.id, name: result.styleProfile.name, version: result.styleProfile.version } : null
+    styleProfile: result.styleProfile ? { id: result.styleProfile.id, name: result.styleProfile.name, version: result.styleProfile.version } : null,
+    patternKey: compactText(result.patternKey, 400)
   };
 }
 
@@ -5290,6 +5363,7 @@ async function restoreBatchProgress() {
       format: run.format,
       segmentationMode: run.segmentationMode,
       structure: run.structure,
+      runnerOptions: run.runnerOptions || null,
       termSurvey: run.termSurvey || null,
       segments: run.segments.map((segment, index) => ({
         id: segment.id,

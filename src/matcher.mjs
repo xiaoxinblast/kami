@@ -188,6 +188,7 @@ export function matchTerms(text, assets, {
       // 保留原文的术语，期望译文里出现的是原文形态本身，而不是 target 字段。
       expectedTarget: expectedTermTarget(term, { matchedSource: best.matchPhrase || term.source }),
       preserveOriginal: Boolean(term.preserveOriginal),
+      working: term.working === true,
       term
     });
   }

@@ -104,3 +104,13 @@ test("审校文本按投影渲染：带上人工指南、语义用途与术语�
   assert.equal(text.includes("翻译技能"), false);
   assert.ok(text.trimEnd().endsWith("プレミアムパスを購入してください。"));
 });
+
+test("初译提示词分层下发工作术语与同句式参考", () => {
+  const prompt = packPrompt(pack({
+    workingTerms: [{ source: "プレミアムパス", target: "高级通行证", matchMode: "exact", working: true }],
+    patternReferences: [{ segmentId: "seg-1", source: "プレミアムパスを買うと3個の宝箱", target: "购买高级通行证可获得 3 个宝箱", similarity: 1 }]
+  }));
+  assert.match(prompt, /本文件工作术语（优先级低于主术语库/u);
+  assert.match(prompt, /同句式参考（这些句子共用同一固定框架/u);
+  assert.match(prompt, /购买高级通行证可获得 3 个宝箱/u);
+});

@@ -1,4 +1,4 @@
-import { extractProtectedTokens, normalizeSource, parseModelJsonObject } from "./text.mjs";
+import { extractProtectedTokens, normalizeSource, parseModelJsonObject, similarity } from "./text.mjs";
 
 /**
  * 批次级闭环：逐段 QA 看不见跨段问题——同一句话和同一个专名在不同段落里被译成
@@ -14,6 +14,7 @@ export const CONSISTENCY_FINDING_TYPES = Object.freeze([
   "name_drift",
   "voice_drift",
   "style_conflict",
+  "pattern_drift",
   "format_risk"
 ]);
 
@@ -79,6 +80,7 @@ export function consistencyMessages({ filename = "", locale = "zh-CN", purpose =
   const system = [
     "你是日语到简体中文本地化项目的交付前一致性审核员。你只看**跨条目的不一致**，不重复逐条 QA 已经查过的问题。",
     "只报这两类：① 同一角色、同一专名、同一术语或同一固定说法在不同条目里出现了不一致的译法；② 同一角色的口吻、敬语级别在不同条目里明显漂移。",
+    "同一固定句式只替换关键词时，固定部分的译法漂移也要报 pattern_drift：terms/unify 只填需要统一的固定说法，不要要求整句一致。",
     "不要报单条问题（漏译、错译、标点、术语未采用），也不要给主观润色建议。没有发现就返回空数组。",
     "判断前先看证据：登记术语与人工批准的翻译记忆是权威，按它判定该统一成哪个写法；工作 TM 的机器译例只能参考。",
     "证据不足时不要自己发明统一译法：把 suggestion 写成「依据缺失，需人工决定：……」，unify 留空数组。",
@@ -197,13 +199,31 @@ export function mergeConsistencyFindings(parts = []) {
   return merged;
 }
 
+
+/** 译文侧的变量遮罩：术语译法、数字、URL、拉丁标识不该把同句式误报成漂移。 */
+function targetPattern(text, terms = []) {
+  const targets = [...new Set((Array.isArray(terms) ? terms : [])
+    .map((term) => String(term?.target || "").trim())
+    .filter(Boolean))].sort((left, right) => [...right].length - [...left].length);
+  let value = String(text ?? "");
+  for (const target of targets) {
+    if (target && value.includes(target)) value = value.split(target).join("⟦术⟧");
+  }
+  return normalizeSource(value
+    .replace(/https?:\/\/\S+/giu, "⟦链⟧")
+    .replace(/[A-Za-z][A-Za-z0-9_.-]*/gu, "⟦英⟧")
+    .replace(/\d+(?:[.,]\d+)*/gu, "⟦数⟧")
+    .replace(/\s+/gu, " ")
+    .trim());
+}
+
 /**
  * 确定性部分：不花模型额度就能证明的不一致。
  *  ① 同一原文在同一文件里出现多次却给了不同译文；
  *  ② 术语库已登记译法在同一文件里有的段落采用、有的没有（术语允许语境判断，
  *     所以这里报"待确认"，不判错）。
  */
-export function deterministicConsistencyFindings(segments = []) {
+export function deterministicConsistencyFindings(segments = [], { terms = [] } = {}) {
   const findings = [];
   const bySource = new Map();
   segments.forEach((segment) => {
@@ -227,6 +247,35 @@ export function deterministicConsistencyFindings(segments = []) {
       source: "rule",
       // 同一原文的两种写法：统一成哪个由裁决层按术语库 / 人工 TM / 文件内多数定案。
       terms: [{ source: String(list[0].source || "").trim(), variants: [...variants.keys()].slice(0, 6) }],
+      unify: [],
+      evidence: []
+    });
+  }
+  // 同骨架、不同原文：固定句式只换了关键词，固定部分却漂了。
+  // 只报事实；统一方案交给模型 finding 的 unify（有证据才自动替换）。
+  const byPattern = new Map();
+  for (const segment of segments) {
+    const translation = String(segment.translation || "").trim();
+    const patternKey = String(segment.result?.patternKey || "").trim();
+    if (!translation || segment.selected === false || !patternKey) continue;
+    if (!byPattern.has(patternKey)) byPattern.set(patternKey, []);
+    byPattern.get(patternKey).push(segment);
+  }
+  for (const [, list] of byPattern) {
+    if (list.length < 2) continue;
+    if (new Set(list.map((segment) => normalizeSource(segment.source))).size < 2) continue;
+    const variants = new Map();
+    for (const segment of list) variants.set(String(segment.translation || "").trim(), segment);
+    if (variants.size < 2) continue;
+    const patterns = [...variants.keys()].map((value) => targetPattern(value, terms));
+    if (patterns.every((value) => value === patterns[0]) || Math.min(...patterns.map((value) => similarity(value, patterns[0]))) >= 0.8) continue;
+    findings.push({
+      type: "pattern_drift",
+      ids: list.map((segment) => String(segment.id)).slice(0, 12),
+      detail: `同一固定句式出现 ${list.length} 次、换了关键词，却有 ${variants.size} 种不同译法：${[...variants.keys()].map((value) => clip(value, 60)).join(" / ")}`,
+      suggestion: "确认固定部分应统一成哪种写法；只改固定说法，变量部分保持当前译法。",
+      source: "rule",
+      terms: [],
       unify: [],
       evidence: []
     });

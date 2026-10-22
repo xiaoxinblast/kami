@@ -36,7 +36,17 @@ test("当前文件分区标签页与术语普查面板", { skip: !process.env.KA
     segmentationMode: "unit",
     structure: null,
     subBatches: [],
-    runnerOptions: { termSurvey: { generatedAt: "2026-09-26T02:14:35.000Z" } },
+    runnerOptions: {
+      termSurvey: { generatedAt: "2026-09-26T02:14:35.000Z" },
+      workingGlossary: {
+        version: 1, revision: 2, batchId: "batch-tabs-1", filename: "Asia_batch18_new_02.xlsx_zho-CN.mqxliff",
+        terms: [
+          { id: "wt-premium", source: "プレミアムパス", target: "高级通行证", aliases: [], status: "active", enforcement: "preferred", confidence: 0.9, origin: "segment-learn", sourceSegmentId: "seg-1" },
+          { id: "wt-nav", source: "ナビマップ", target: "导览地图", aliases: [], status: "active", enforcement: "required", confidence: 0.8, origin: "manual", sourceSegmentId: "" }
+        ],
+        conflicts: []
+      }
+    },
     runState: "paused",
     requiresBrief: true,
     contextBriefPending: false,
@@ -201,6 +211,14 @@ test("当前文件分区标签页与术语普查面板", { skip: !process.env.KA
     // ④ 术语普查：模型建议 / 机器稿实际用法 / 人工终稿 / 库里登记 / 处理结果。
     await page.locator('#batchTabs [data-batch-tab="terms"]').click();
     await page.waitForSelector("#batchTermSurveyPanel");
+    await page.waitForSelector("#batchWorkingTerms .batch-term-card");
+    const workingText = await page.locator("#batchWorkingTerms").innerText();
+    assert.match(workingText, /プレミアムパス/u);
+    assert.match(workingText, /高级通行证/u);
+    assert.match(workingText, /自动学习/u);
+    assert.match(workingText, /ナビマップ/u);
+    assert.match(workingText, /已锁定为强制/u);
+    assert.equal(await page.locator("#batchWorkingTerms .batch-term-card").count(), 2);
     assert.match(await page.locator("#batchTermSurveySummary").textContent(), /普查时间/u);
     assert.match(await page.locator("#batchTermSurveySummary").textContent(), /覆盖 8 \/ 8 段/u);
     const chips = await page.locator("#batchTermSurveyChips").innerText();
@@ -220,6 +238,7 @@ test("当前文件分区标签页与术语普查面板", { skip: !process.env.KA
     assert.match(surveyText, /原文里找不到这个源词/u);
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
+      await page.locator("#batchWorkingTermsPanel").screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/batch-working-terms.png`, animations: "disabled" });
       await page.locator("#batchTermSurveyPanel").screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/batch-tabs-term-survey.png`, animations: "disabled" });
     }
 
@@ -245,13 +264,13 @@ test("当前文件分区标签页与术语普查面板", { skip: !process.env.KA
     assert.equal(await page.locator("#batchSegmentCount").textContent(), "已显示 8 / 共 8 条");
 
     await page.locator("#batchSegmentSearch").fill("チェックポイント");
-    await page.waitForFunction(() => document.querySelector("#batchSegmentCount")?.textContent === "已显示 1 / 共 8 条");
+    await page.waitForFunction(() => /^已显示 1 \/ 共 8 条/u.test(document.querySelector("#batchSegmentCount")?.textContent || ""));
     assert.equal(await page.locator("#batchSegments .batch-segment").count(), 1);
     await page.locator("#batchSegmentSearch").fill("seg-3");
     await page.waitForFunction(() => /原文 3/.test(document.querySelector("#batchSegments")?.textContent || ""));
     assert.match(await page.locator("#batchSegments .batch-segment").innerText(), /原文 3/u, "按 ID 也能搜到");
     await page.locator("#batchSegmentSearch").press("Escape");
-    await page.waitForFunction(() => document.querySelector("#batchSegmentCount")?.textContent === "已显示 8 / 共 8 条");
+    await page.waitForFunction(() => /^已显示 8 \/ 共 8 条/u.test(document.querySelector("#batchSegmentCount")?.textContent || ""));
     if (process.env.KAMI_UI_SCREENSHOTS) {
       await mkdir(process.env.KAMI_UI_SCREENSHOTS, { recursive: true });
       await page.locator("#batchSegments").screenshot({ path: `${process.env.KAMI_UI_SCREENSHOTS}/segment-meta-search.png`, animations: "disabled" });

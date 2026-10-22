@@ -14,7 +14,9 @@ import { resolveSegmentMatches } from "./src/batch-matches.mjs";
 import { createTokenCache } from "./src/token-cache.mjs";
 import { settleReadSections } from "./src/read-sections.mjs";
 import { createMatcherPool } from "./src/matcher-pool.mjs";
-import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, resolveSurveyTargetsWithModel, reviewGateFailuresWithModel, surveyTermsWithModel, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig } from "./src/provider.mjs";
+import { adjudicateRuleConflictsWithModel, adjudicatePotentialTermsWithModel, alignSegmentsWithModel, alignTermSuggestionsWithModel, analyzeDocumentContextWithModel, analyzeSpreadsheetStructureWithModel, analyzeTermTableStructureWithModel, checkBatchConsistencyWithModel, classifyWithModel, costPricingConfigured, embed, extractTextFromImageWithModel, evaluateAutoQaWithModel, evaluateGrammarWithModel, evaluateTranslationWithModel, getProviderConfig, isEmbeddingConfigured, probeModelAvailability, resolveSurveyTargetsWithModel, reviewGateFailuresWithModel, surveyTermsWithModel, reviewTermCandidatesWithModel, reviseTranslationWithQa, translateWithReflection, translateWithRoute, updateProviderConfig, learnWorkingTermsWithModel } from "./src/provider.mjs";
+import { formalTermKeys, mergeWorkingAssets, normalizeWorkingTerms } from "./src/working-glossary.mjs";
+import { buildPatternKey } from "./src/pattern-memory.mjs";
 import { DISTILL_THRESHOLD, distillBatchStyleLearning, distillStyleProfileIfReady, runEvolutionReview } from "./src/evolution.mjs";
 import { calculateQaScore, presentAiQaIssues, runQa } from "./src/qa.mjs";
 import { alignSegmentPairs, buildAlignmentIssues, calculateAutoQaScores, cosineSimilarity, createStructuralAlignmentScorer, dedupeIssues, normalizeQaInputText, runBasicQa, splitQaSegments, summarizeIssues } from "./src/auto-qa.mjs";
@@ -118,6 +120,8 @@ const batchWorkers = new Map();
 const batchQaWorkers = new Map();
 const batchQaStarts = new Map();
 const batchWorkflowWrites = new Map();
+/** 批中手动改过的工作术语：内存里比批次记录新，跑批循环每段会先看一眼。 */
+const workingGlossaryOverrides = new Map();
 /**
  * 正在本进程内执行的后台任务。
  * 任务中心点「中断」只置一个标记，跑批的循环在下一处分块边界停下来：
@@ -3591,9 +3595,16 @@ async function runConsistencyCheck(batchId, { taskId = "" } = {}) {
     translation: String(segment.translation || "")
   }));
   const pairs = toPairs(translated);
-  const deterministic = deterministicConsistencyFindings(segments);
   const provider = getProviderConfig();
-  const assets = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets || {};
+  const baseAssets = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets || {};
+  const assets = mergeWorkingAssets(baseAssets, run.runnerOptions?.workingGlossary, { batchId: run.batchId });
+  // 先按当前主库 + 工作术语重算骨架，避免用户刚改过工作术语、旧骨架还带着未遮罩的词。
+  const patternTerms = [...(baseAssets.terms || []), ...(run.runnerOptions?.workingGlossary?.terms || [])];
+  for (const segment of segments) {
+    if (segment.status !== "done" || !segment.result || !String(segment.source || "")) continue;
+    segment.result = { ...segment.result, patternKey: buildPatternKey(segment.source, { terms: patternTerms }) };
+  }
+  const deterministic = deterministicConsistencyFindings(segments, { terms: assets.terms || [] });
   const styleProfile = await getProjectStyleProfile(run.locale, { projectId: run.projectId }).catch(() => null);
   const style = styleProfile ? {
     id: String(styleProfile.id || ""),
@@ -3957,6 +3968,27 @@ function startBatchWorker(batchId, backgroundTaskId = "") {
     loadProject: getProject,
     classifyDocument: async (text) => (await classify({ text, hint: "auto", useModel: true })).contentType,
     translateSegment: translateBatchSegment,
+    loadTermSources: async (run) => (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [],
+    loadWorkingGlossary: async (run) => workingGlossaryOverrides.get(run.batchId) || null,
+    learnTerms: async ({ run, segment, translation }) => {
+      if (getSettings().learning.workingTermsEnabled === false) return [];
+      const formalTerms = (await getProjectAssets(run.locale, run.projectId).catch(() => ({ assets: {} }))).assets?.terms || [];
+      const raw = await learnWorkingTermsWithModel({
+        source: segment.source,
+        translation,
+        existingTerms: formalTerms,
+        workingTerms: run.runnerOptions?.workingGlossary?.terms || [],
+        filename: run.filename,
+        locale: run.locale,
+        purpose: run.contentType || "general"
+      });
+      return normalizeWorkingTerms(raw, {
+        formalTerms,
+        sourceText: segment.source,
+        targetText: translation,
+        sourceSegmentId: segment.id
+      });
+    },
     shouldPause: () => controller.pauseRequested,
     shouldCancel: () => controller.cancelRequested,
     touch: () => workbenchSessionMonitor?.touch(sessionId),
@@ -6866,6 +6898,42 @@ async function apiHandler(req, res, url) {
       qualityReportAt: run.qualityReport?.report?.generatedAt || "", termSurveyAt: run.runnerOptions?.termSurvey?.generatedAt || "",
       qaCompletedAt: run.runnerOptions?.qaCompletedAt || "" });
   }
+  if (req.method === "POST" && url.pathname.startsWith("/api/batch/run/") && url.pathname.endsWith("/working-terms")) {
+    const batchId = decodeURIComponent(url.pathname.slice("/api/batch/run/".length, -"/working-terms".length));
+    const body = await readJsonBody(req);
+    const run = await getBatchRun(batchId);
+    if (!run) {
+      const error = new Error("未找到这个批次");
+      error.statusCode = 404;
+      throw error;
+    }
+    const projectId = String(body.projectId || "");
+    if (projectId && run.projectId !== projectId) return json(res, 404, { error: "未找到当前项目的批次任务" });
+    const assets = (await getProjectAssets(run.locale, run.projectId)).assets;
+    const glossary = run.runnerOptions?.workingGlossary
+      || { version: 1, batchId: run.batchId, filename: run.filename, locale: run.locale, revision: 0, terms: [], conflicts: [] };
+    const terms = Array.isArray(glossary.terms) ? [...glossary.terms] : [];
+    const action = String(body.action || "upsert");
+    const source = String(body.source || "").trim();
+    const key = normalizeSource(source);
+    if (action === "delete") {
+      const next = terms.filter((term) => normalizeSource(term.source) !== key);
+      const updated = { ...glossary, terms: next, revision: (Number(glossary.revision) || 0) + 1 };
+      await saveBatchRun({ ...run, runnerOptions: { ...run.runnerOptions, workingGlossary: updated } });
+      return json(res, 200, updated);
+    }
+    const normalized = normalizeWorkingTerms([{ ...body, source, target: body.target, origin: "manual", status: "active" }], {
+      formalTerms: assets.terms || []
+    })[0];
+    if (!normalized) return json(res, 400, { error: "术语为空、超过长度限制，或主术语库已有同源词" });
+    const index = terms.findIndex((term) => normalizeSource(term.source) === key);
+    if (index >= 0) terms[index] = { ...terms[index], ...normalized, id: terms[index].id || normalized.id, updatedAt: new Date().toISOString() };
+    else terms.push(normalized);
+    const updated = { ...glossary, terms, revision: (Number(glossary.revision) || 0) + 1 };
+    await saveBatchRun({ ...run, runnerOptions: { ...run.runnerOptions, workingGlossary: updated } });
+    workingGlossaryOverrides.set(run.batchId, updated);
+    return json(res, 200, updated);
+  }
   if (req.method === "GET" && url.pathname.startsWith("/api/batch/run/")) {
     const batchId = decodeURIComponent(url.pathname.slice("/api/batch/run/".length));
     const run = await getBatchRun(batchId);
@@ -7155,9 +7223,11 @@ async function apiHandler(req, res, url) {
     const projectRecord = body.projectId ? await getProject(String(body.projectId)) : null;
     const projectSettings = projectRecord?.settings || null;
     const assets = (await getProjectAssets(locale, body.projectId || "")).assets;
+    const workingTerms = normalizeWorkingTerms(body.workingTerms, { formalTerms: assets.terms || [] });
+    const scopedAssets = mergeWorkingAssets(assets, { batchId: body.batchId || "", terms: workingTerms }, { batchId: body.batchId || "" });
     const contentType = body.contentType || "general";
     const domain = concreteDomain(body.domain, { text: body.source || "", contentType });
-    const matches = matchTerms(body.source || "", assets, { contentType, domain, ...deliveryContext(body, body.source || "") });
+    const matches = matchTerms(body.source || "", scopedAssets, { contentType, domain, ...deliveryContext(body, body.source || "") });
     if (body.aiQa !== true) return json(res, 200, { matches, issues: runQa({ source: body.source || "", translation: body.translation || "", matches, locale, titleOverrides: getSettings().orthography.titleBrackets, contentType, projectSettings }) });
     const classification = await classify({ text: body.source || "", hint: contentType, useModel: false });
     const projectId = String(body.projectId || body.project || "default");
@@ -7862,7 +7932,9 @@ async function evaluateQaBatch(batchId, projectId = "") {
       classification.evidence = [`语境档案标注用途：${CONTENT_TYPES[briefPurpose].label}`];
     }
     const projectId = String(body.projectId || "").trim();
-    const assets = (await getProjectAssets(locale, projectId)).assets;
+    const baseAssets = (await getProjectAssets(locale, projectId)).assets;
+    const workingTerms = normalizeWorkingTerms(body.workingTerms, { formalTerms: baseAssets.terms || [] });
+    const assets = mergeWorkingAssets(baseAssets, { batchId: body.batchId || "", terms: workingTerms }, { batchId: body.batchId || "" });
     const projectRecord = projectId ? await getProject(projectId) : null;
     if (projectId && !projectRecord) {
       const error = new Error("项目不存在");
@@ -7996,6 +8068,7 @@ async function evaluateQaBatch(batchId, projectId = "") {
       translationReferences,
       batchVerse,
       batchReferences: body.batchReferences || [],
+      patternReferences: body.patternReferences || [],
       batchGroupEntries: body.batchGroupEntries || [],
       factSchema,
       // 当前段落的条目身份（memoQ x-mmq-context / 表格里的条目 ID 列）。

@@ -94,3 +94,38 @@ test("暂停请求在当前段完成后停止，恢复时跳过已完成段", as
   assert.equal(resumed.runState, "completed");
   assert.equal(translated, 3);
 });
+
+test("逐段学习工作术语并把同句式参考传给下一段", async () => {
+  const run = {
+    batchId: "batch-working", projectId: "project-1", filename: "dialogue.xlsx", locale: "zh-CN", contentType: "general", domain: "game", segmentationMode: "unit",
+    segments: [
+      { id: "seg-1", source: "プレミアムパスを購入すると、3個の宝箱を獲得します。", selected: true, status: "pending", context: {} },
+      { id: "seg-2", source: "プレミアムパスを購入すると、10個の宝箱を獲得します。", selected: true, status: "pending", context: {} }
+    ]
+  };
+  const calls = [];
+  const learnedTerm = {
+    id: "wt-premium", source: "プレミアムパス", target: "高级通行证", aliases: [],
+    status: "active", enforcement: "preferred", confidence: 0.9, origin: "segment-learn",
+    sourceSegmentId: "seg-1", createdAt: "2026-10-21T00:00:00.000Z", updatedAt: "2026-10-21T00:00:00.000Z"
+  };
+  const result = await runServerBatch(run.batchId, {
+    loadRun: async () => run,
+    saveRun: async () => {},
+    loadProject: async () => ({ settings: { batch: { subBatchMaxEntries: 10, subBatchMaxChars: 1000 }, tm: {} } }),
+    classifyDocument: async () => "general",
+    loadTermSources: async () => [{ source: "ナビマップ", target: "导览地图" }],
+    learnTerms: async ({ segment }) => segment.id === "seg-1" ? [learnedTerm] : [],
+    translateSegment: async (body) => {
+      calls.push(body);
+      return { translation: body.source.includes("3個") ? "购买高级通行证可获得 3 个宝箱。" : "购买高级通行证可获得 10 个宝箱。" };
+    }
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].workingTerms.length, 1);
+  assert.equal(calls[1].workingTerms[0].source, "プレミアムパス");
+  assert.equal(calls[1].patternReferences.length, 1);
+  assert.equal(calls[1].patternReferences[0].segmentId, "seg-1");
+  assert.equal(result.segments[1].result.patternKey, result.segments[0].result.patternKey);
+  assert.equal(result.runnerOptions.workingGlossary.terms.length, 1);
+});
